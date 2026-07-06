@@ -10,12 +10,14 @@ export interface User {
   telegramId?: string;
   registered?: boolean;
   competencies?: string[];
+  primaryCompetency?: string;
 }
 
 export interface Availability {
   userId: string;
   slots: Record<number, number[]>;
   updatedAt: string;
+  weekStart?: string;
 }
 
 export type MeetingType = 'general' | 'custom';

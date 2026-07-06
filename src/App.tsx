@@ -68,14 +68,14 @@ export default function App() {
     }, 4500);
   };
 
-  const handleSaveAvailability = async (slots: Record<number, number[]>): Promise<boolean> => {
+  const handleSaveAvailability = async (slots: Record<number, number[]>, weekStart: string): Promise<boolean> => {
     if (!state || !currentUserId) return false;
 
     try {
       const res = await fetch('/api/availability', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId: currentUserId, slots }),
+        body: JSON.stringify({ userId: currentUserId, slots, weekStart }),
       });
       const data = await res.json();
       if (res.ok && data.success) {

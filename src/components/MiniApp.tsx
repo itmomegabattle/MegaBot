@@ -24,7 +24,7 @@ interface MiniAppProps {
   currentUser: User;
   activeTab: string;
   setActiveTab: (tab: string) => void;
-  onSaveAvailability: (slots: Record<number, number[]>) => Promise<boolean>;
+  onSaveAvailability: (slots: Record<number, number[]>, weekStart: string) => Promise<boolean>;
   onScheduleMeeting: (meetingData: any) => Promise<boolean>;
   onCreateTask: (taskData: any) => Promise<boolean>;
   onClaimTask: (taskId: string) => void;
@@ -55,6 +55,7 @@ const dayLabels = [
 ];
 
 const hours = [16, 17, 18, 19, 20, 21, 22, 23];
+const maxSlotWeeks = 5;
 const telegramLink = (username: string) => `https://t.me/${username.replace('@', '')}`;
 const taskAssigneeIds = (task: Task) => {
   if (!task.assignedTo) return [];
@@ -76,6 +77,38 @@ const formatDateTimeShort = (value?: string) => {
   return `${String(date.getDate()).padStart(2, '0')}.${String(date.getMonth() + 1).padStart(2, '0')}.${String(date.getFullYear()).slice(2)} ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
 };
 
+const mondayOfCurrentWeek = () => {
+  const today = new Date();
+  const day = today.getDay() === 0 ? 6 : today.getDay() - 1;
+  const monday = new Date(today);
+  monday.setHours(0, 0, 0, 0);
+  monday.setDate(today.getDate() - day);
+  return monday;
+};
+
+const toIsoDate = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+const currentWeekStart = () => toIsoDate(mondayOfCurrentWeek());
+
+const dateForSlotDay = (absoluteDayIndex: number) => {
+  const date = mondayOfCurrentWeek();
+  date.setDate(date.getDate() + absoluteDayIndex);
+  return date;
+};
+
+const formatDayMonth = (date: Date) => `${String(date.getDate()).padStart(2, '0')}.${String(date.getMonth() + 1).padStart(2, '0')}`;
+
+const alignedSlots = (availability?: { slots?: Record<number, number[]>; weekStart?: string }) => {
+  const result: Record<number, number[]> = {};
+  if (!availability?.slots) return result;
+  const savedWeekStart = availability.weekStart || currentWeekStart();
+  const weekOffset = Math.floor((new Date(currentWeekStart()).getTime() - new Date(savedWeekStart).getTime()) / (7 * 24 * 60 * 60 * 1000));
+  Object.entries(availability.slots).forEach(([key, value]) => {
+    const nextKey = Number(key) - weekOffset * 7;
+    if (nextKey >= 0 && nextKey < maxSlotWeeks * 7) result[nextKey] = value;
+  });
+  return result;
+};
+
 export default function MiniApp({
   state,
   currentUser,
@@ -90,11 +123,13 @@ export default function MiniApp({
   onRefreshState,
 }: MiniAppProps) {
   const [slots, setSlots] = useState<Record<number, number[]>>({});
+  const [visibleWeeks, setVisibleWeeks] = useState(1);
   const [suggestions, setSuggestions] = useState<MeetingSuggestion[]>([]);
   const [suggesting, setSuggesting] = useState(false);
   const [savingWeek, setSavingWeek] = useState(false);
   const [weekSaved, setWeekSaved] = useState(false);
   const [hasUnsavedSlots, setHasUnsavedSlots] = useState(false);
+  const [slotError, setSlotError] = useState('');
   const [taskError, setTaskError] = useState('');
 
   const [showMeetingForm, setShowMeetingForm] = useState(false);
@@ -131,15 +166,16 @@ export default function MiniApp({
   const [showAddUserForm, setShowAddUserForm] = useState(false);
   const [expandedUserId, setExpandedUserId] = useState<string | null>(null);
   const [editingUserId, setEditingUserId] = useState<string | null>(null);
-  const [userDraft, setUserDraft] = useState({ realName: '', username: '', birthday: '', role: 'organizer' as User['role'], competencies: [] as string[] });
+  const [userDraft, setUserDraft] = useState({ realName: '', username: '', birthday: '', role: 'organizer' as User['role'], competencies: [] as string[], primaryCompetency: '' });
   const [newCompetency, setNewCompetency] = useState('');
 
   const isAdmin = currentUser.role === 'admin';
   const votedUsers = useMemo(
-    () => state.users.filter((user) => Object.values(state.availabilities[user.id]?.slots || {}).some((day) => day.length > 0)),
+    () => state.users.filter((user) => Object.values(alignedSlots(state.availabilities[user.id])).some((day) => day.length > 0)),
     [state.availabilities, state.users],
   );
   const majority = Math.floor(state.users.length / 2) + 1;
+  const firstWeekFilled = Array.from({ length: 7 }, (_, dayIndex) => slots[dayIndex] || []).some((day) => day.length > 0);
   const myTasks = state.tasks.filter((task) => taskAssigneeIds(task).includes(currentUser.id) && task.status !== 'completed');
   const openTasks = state.tasks.filter((task) => task.status === 'open');
   const completedTasks = state.tasks
@@ -161,7 +197,7 @@ export default function MiniApp({
       dayLabels.map((day, dayIndex) => ({
         ...day,
         count: state.users.filter((user) => {
-          const daySlots = state.availabilities[user.id]?.slots?.[dayIndex] || [];
+          const daySlots = alignedSlots(state.availabilities[user.id])?.[dayIndex] || [];
           return daySlots.length > 0;
         }).length,
       })),
@@ -192,7 +228,7 @@ export default function MiniApp({
     const rows = state.users.map((user) => [
       user.realName,
       user.username,
-      ...dayLabels.map((_, dayIndex) => formatHours(state.availabilities[user.id]?.slots?.[dayIndex] || [])),
+      ...dayLabels.map((_, dayIndex) => formatHours(alignedSlots(state.availabilities[user.id])?.[dayIndex] || [])),
     ]);
     const csv = [header, ...rows]
       .map((row) => row.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(';'))
@@ -207,16 +243,22 @@ export default function MiniApp({
   };
 
   useEffect(() => {
-    const saved = state.availabilities[currentUser.id]?.slots;
+    const saved = alignedSlots(state.availabilities[currentUser.id]);
     const nextSlots: Record<number, number[]> = {};
-    dayLabels.forEach((_, index) => {
+    Array.from({ length: maxSlotWeeks * 7 }, (_, index) => {
       nextSlots[index] = [...(saved?.[index] || [])];
     });
+    const lastFilledDay = Object.entries(nextSlots)
+      .filter(([, value]) => value.length > 0)
+      .map(([key]) => Number(key))
+      .sort((a, b) => b - a)[0];
+    setVisibleWeeks(Math.min(maxSlotWeeks, Math.max(1, lastFilledDay === undefined ? 1 : Math.floor(lastFilledDay / 7) + 1)));
     setSlots(nextSlots);
   }, [currentUser.id, state.availabilities]);
 
   const toggleSlot = (day: number, hour: number) => {
     setWeekSaved(false);
+    setSlotError('');
     setHasUnsavedSlots(true);
     setSlots((prev) => {
       const daySlots = prev[day] || [];
@@ -229,6 +271,7 @@ export default function MiniApp({
 
   const selectWholeDay = (day: number) => {
     setWeekSaved(false);
+    setSlotError('');
     setHasUnsavedSlots(true);
     setSlots((prev) => {
       const full = (prev[day] || []).length === hours.length;
@@ -273,8 +316,14 @@ export default function MiniApp({
   };
 
   const saveWeek = async () => {
+    if (!firstWeekFilled) {
+      setSlotError('Сначала отметь хотя бы один свободный час на первой неделе. Следующие недели можно заполнить дополнительно.');
+      setHasUnsavedSlots(true);
+      return;
+    }
+    setSlotError('');
     setSavingWeek(true);
-    const ok = await onSaveAvailability(slots);
+    const ok = await onSaveAvailability(slots, currentWeekStart());
     setSavingWeek(false);
     setWeekSaved(ok);
     if (ok) setHasUnsavedSlots(false);
@@ -452,13 +501,14 @@ export default function MiniApp({
       birthday: user.birthday || '01.01',
       role: user.role,
       competencies: user.competencies || [],
+      primaryCompetency: user.primaryCompetency || '',
     });
   };
 
   const updateUser = async (userId: string) => {
     const payload = isAdmin
       ? { requesterId: currentUser.id, userId, ...userDraft }
-      : { requesterId: currentUser.id, userId, competencies: userDraft.competencies };
+      : { requesterId: currentUser.id, userId, competencies: userDraft.competencies, primaryCompetency: userDraft.primaryCompetency };
     const res = await fetch('/api/user/update', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -496,6 +546,7 @@ export default function MiniApp({
   const toggleDraftCompetency = (name: string) => {
     setUserDraft((prev) => ({
       ...prev,
+      primaryCompetency: prev.primaryCompetency === name && prev.competencies.includes(name) ? '' : prev.primaryCompetency,
       competencies: prev.competencies.includes(name)
         ? prev.competencies.filter((item) => item !== name)
         : [...prev.competencies, name],
@@ -582,43 +633,86 @@ export default function MiniApp({
                 </button>
               </div>
             </div>
+            {slotError && <div className="rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm font-bold text-amber-800">{slotError}</div>}
 
-            <div className="space-y-3">
-              {dayLabels.map((day, index) => {
-                const selected = slots[index] || [];
-                return (
-                  <div key={day.full} className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
-                    <div className="mb-3 flex items-center justify-between gap-3">
-                      <div>
-                        <h2 className="text-base font-black">{day.full}</h2>
-                        <p className="text-xs text-slate-500">{selected.length ? `${selected.length} ч. свободно` : 'Пока ничего не выбрано'}</p>
-                      </div>
-                      <button onClick={() => selectWholeDay(index)} className={secondaryButtonClass}>
-                        {selected.length === hours.length ? 'Снять' : 'Весь день'}
+            <div className="space-y-4">
+              {Array.from({ length: visibleWeeks }, (_, weekIndex) => (
+                <div key={weekIndex} className="space-y-3">
+                  <div className="flex items-center justify-between px-1">
+                    <div>
+                      <h2 className="font-black">{weekIndex === 0 ? 'Эта неделя' : `Неделя ${weekIndex + 1}`}</h2>
+                      <p className="text-xs font-semibold text-slate-500">
+                        {formatDayMonth(dateForSlotDay(weekIndex * 7))} - {formatDayMonth(dateForSlotDay(weekIndex * 7 + 6))}
+                      </p>
+                    </div>
+                    {weekIndex === visibleWeeks - 1 && weekIndex > 0 && (
+                      <button
+                        onClick={() => {
+                          setSlots((prev) => {
+                            const next = { ...prev };
+                            for (let day = weekIndex * 7; day < weekIndex * 7 + 7; day += 1) next[day] = [];
+                            return next;
+                          });
+                          setVisibleWeeks((value) => Math.max(1, value - 1));
+                          setHasUnsavedSlots(true);
+                        }}
+                        className={secondaryButtonClass}
+                      >
+                        <Minus className="h-4 w-4" />
+                        Скрыть неделю
                       </button>
-                    </div>
-                    <div className="grid grid-cols-4 gap-2 sm:grid-cols-8">
-                      {hours.map((hour) => {
-                        const active = selected.includes(hour);
-                        return (
-                          <button
-                            key={hour}
-                            onClick={() => toggleSlot(index, hour)}
-                            className={`h-11 rounded-2xl border text-sm font-black ${pressClass} ${
-                              active
-                                ? 'border-[#0050ff] bg-[#0050ff] text-white shadow-[0_8px_20px_rgba(0,80,255,0.2)] hover:bg-[#0a5cff] active:bg-[#0045d8]'
-                                : 'border-slate-200 bg-slate-50 text-slate-600 hover:bg-blue-50 active:bg-blue-100'
-                            }`}
-                          >
-                            {hour}:00
-                          </button>
-                        );
-                      })}
-                    </div>
+                    )}
                   </div>
-                );
-              })}
+
+                  {dayLabels.map((day, dayIndex) => {
+                    const absoluteDayIndex = weekIndex * 7 + dayIndex;
+                    const selected = slots[absoluteDayIndex] || [];
+                    const date = dateForSlotDay(absoluteDayIndex);
+                    return (
+                      <div key={`${weekIndex}-${day.full}`} className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
+                        <div className="mb-3 flex items-center justify-between gap-3">
+                          <div>
+                            <h2 className="text-base font-black">{day.full}, {formatDayMonth(date)}</h2>
+                            <p className="text-xs text-slate-500">{selected.length ? `${selected.length} ч. свободно` : 'Пока ничего не выбрано'}</p>
+                          </div>
+                          <button onClick={() => selectWholeDay(absoluteDayIndex)} className={secondaryButtonClass}>
+                            {selected.length === hours.length ? 'Снять' : 'Весь день'}
+                          </button>
+                        </div>
+                        <div className="grid grid-cols-4 gap-2 sm:grid-cols-8">
+                          {hours.map((hour) => {
+                            const active = selected.includes(hour);
+                            return (
+                              <button
+                                key={hour}
+                                onClick={() => toggleSlot(absoluteDayIndex, hour)}
+                                className={`h-11 rounded-2xl border text-sm font-black ${pressClass} ${
+                                  active
+                                    ? 'border-[#0050ff] bg-[#0050ff] text-white shadow-[0_8px_20px_rgba(0,80,255,0.2)] hover:bg-[#0a5cff] active:bg-[#0045d8]'
+                                    : 'border-slate-200 bg-slate-50 text-slate-600 hover:bg-blue-50 active:bg-blue-100'
+                                }`}
+                              >
+                                {hour}:00
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ))}
             </div>
+
+            {visibleWeeks < maxSlotWeeks && (
+              <button
+                onClick={() => setVisibleWeeks((value) => Math.min(maxSlotWeeks, value + 1))}
+                className={secondaryButtonClass}
+              >
+                <Plus className="h-4 w-4" />
+                Еще неделя
+              </button>
+            )}
 
             <button onClick={saveWeek} disabled={savingWeek || (!hasUnsavedSlots && weekSaved)} className={`${primaryButtonClass} sticky bottom-24 z-20 py-4 text-base disabled:opacity-70`}>
               <Check className="h-5 w-5" />
@@ -685,7 +779,7 @@ export default function MiniApp({
                             <div className="font-bold text-[#0050ff]">{user.username}</div>
                           </td>
                           {dayLabels.map((_, dayIndex) => {
-                            const text = formatHours(state.availabilities[user.id]?.slots?.[dayIndex] || []);
+                            const text = formatHours(alignedSlots(state.availabilities[user.id])?.[dayIndex] || []);
                             const filled = text !== '—';
                             return (
                               <td key={dayIndex} className="px-2 py-2 align-top">
@@ -1060,7 +1154,7 @@ export default function MiniApp({
                           </a>
                         </div>
                         <div className="text-right">
-                          <div className="rounded-full bg-blue-50 px-3 py-1 text-xs font-black text-[#0050ff]">{user.role === 'admin' ? 'Админ' : 'Орг'}</div>
+                          <div className="rounded-full bg-blue-50 px-3 py-1 text-xs font-black text-[#0050ff]">{user.primaryCompetency || 'Блок не выбран'}</div>
                           <div className="mt-1 text-xs text-slate-500">{formatDateShort(user.birthday || '01.01')}</div>
                         </div>
                       </div>
@@ -1072,7 +1166,7 @@ export default function MiniApp({
                               <InfoRow label="Имя" value={user.realName} />
                               <InfoRow label="Telegram" value={user.username} href={telegramLink(user.username)} />
                               <InfoRow label="Дата рождения" value={formatDateShort(user.birthday || '01.01')} />
-                              <InfoRow label="Роль" value={user.role === 'admin' ? 'Админ' : 'Организатор'} />
+                              <InfoRow label="Главный блок" value={user.primaryCompetency || 'не выбран'} />
                               <InfoRow label="Блоки" value={(user.competencies || []).join(', ') || 'не выбраны'} />
                               {(isAdmin || user.id === currentUser.id) && (
                                 <div className="flex gap-2 pt-2">
@@ -1110,6 +1204,29 @@ export default function MiniApp({
                                   </Field>
                                 )}
                               </div>
+                              <Field label="Главный блок">
+                                <div className="grid grid-cols-1 gap-2 rounded-2xl border border-slate-200 bg-slate-50 p-2">
+                                  {competencies.length === 0 ? (
+                                    <div className="text-xs font-bold text-slate-400">Админ ещё не добавил блоки</div>
+                                  ) : (
+                                    competencies.map((name) => (
+                                      <label key={name} className="flex items-center justify-between rounded-xl bg-white px-3 py-2 text-sm font-semibold">
+                                        <span>{name}</span>
+                                        <input
+                                          type="radio"
+                                          name={`primary-${user.id}`}
+                                          checked={userDraft.primaryCompetency === name}
+                                          onChange={() => setUserDraft((prev) => ({
+                                            ...prev,
+                                            primaryCompetency: name,
+                                            competencies: prev.competencies.includes(name) ? prev.competencies : [name, ...prev.competencies],
+                                          }))}
+                                        />
+                                      </label>
+                                    ))
+                                  )}
+                                </div>
+                              </Field>
                               <Field label="Блоки">
                                 <div className="grid grid-cols-1 gap-2 rounded-2xl border border-slate-200 bg-slate-50 p-2">
                                   {competencies.length === 0 ? (

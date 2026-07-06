@@ -129,6 +129,27 @@ function nextShortDate(daysAhead = 1) {
   return `${String(target.getDate()).padStart(2, '0')}.${String(target.getMonth() + 1).padStart(2, '0')}.${String(target.getFullYear()).slice(2)}`;
 }
 
+function currentWeekStartIso() {
+  const today = new Date();
+  const jsDay = today.getDay() === 0 ? 6 : today.getDay() - 1;
+  const monday = new Date(today);
+  monday.setHours(0, 0, 0, 0);
+  monday.setDate(today.getDate() - jsDay);
+  return `${monday.getFullYear()}-${String(monday.getMonth() + 1).padStart(2, '0')}-${String(monday.getDate()).padStart(2, '0')}`;
+}
+
+function alignedAvailabilitySlots(availability?: Availability) {
+  const result: Record<number, number[]> = {};
+  if (!availability?.slots) return result;
+  const savedWeekStart = availability.weekStart || currentWeekStartIso();
+  const weekOffset = Math.floor((new Date(currentWeekStartIso()).getTime() - new Date(savedWeekStart).getTime()) / (7 * 24 * 60 * 60 * 1000));
+  for (const [key, value] of Object.entries(availability.slots)) {
+    const nextKey = Number(key) - weekOffset * 7;
+    if (nextKey >= 0 && nextKey < 35) result[nextKey] = Array.isArray(value) ? value : [];
+  }
+  return result;
+}
+
 function formatDateTimeShort(value?: string) {
   if (!value) return '';
   const date = new Date(value);
@@ -173,6 +194,10 @@ function loadDatabase(): SimulationState {
 
   state.users.forEach((user) => {
     if (!Array.isArray(user.competencies)) user.competencies = [];
+    if (user.primaryCompetency === undefined) user.primaryCompetency = user.competencies[0] || '';
+    if (user.primaryCompetency && !user.competencies.includes(user.primaryCompetency)) {
+      user.competencies = [user.primaryCompetency, ...user.competencies];
+    }
   });
   state.meetings.forEach((meeting: any) => {
     if (meeting.competency === undefined) meeting.competency = '';
@@ -184,6 +209,9 @@ function loadDatabase(): SimulationState {
     if (task.competency === undefined) task.competency = '';
     if (task.createdAt === undefined) task.createdAt = new Date().toISOString();
     if (task.completedAt === undefined) task.completedAt = task.status === 'completed' ? new Date().toISOString() : '';
+  });
+  Object.values(state.availabilities).forEach((availability: any) => {
+    if (availability.weekStart === undefined) availability.weekStart = '';
   });
 
   return state;
@@ -368,16 +396,18 @@ async function startServer() {
 
     try {
       const tgApiBase = process.env.TELEGRAM_API_BASE || 'https://api.telegram.org';
-      await fetch(`${tgApiBase}/bot${botToken}/sendMessage`, {
+      const response = await fetch(`${tgApiBase}/bot${botToken}/sendMessage`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           chat_id: chatId,
           text: text,
-          parse_mode: 'Markdown',
           reply_markup: Object.keys(replyMarkup).length > 0 ? replyMarkup : undefined
         })
       });
+      if (!response.ok) {
+        console.error('Telegram sendMessage failed:', response.status, await response.text());
+      }
     } catch (err) {
       console.error('Telegram sendMessage failed:', err);
     }
@@ -599,8 +629,12 @@ async function startServer() {
           { text: 'Посмотреть в приложении', action: 'open_tasks' },
         ]);
         const creator = state.users.find(u => u.id === task.creatorId);
+        const notifyClaimText = `Задачу "${task.title}" подхватил ${userMention(user)}.\n\nСвязаться: ${user.username}`;
         if (creator?.telegramId && creator.id !== user.id) {
-          await sendTelegramMessage(creator.telegramId, `Задачу *"${task.title}"* подхватил ${userMention(user)}.\n\nСвязаться: ${user.username}`);
+          await sendTelegramMessage(creator.telegramId, notifyClaimText);
+        }
+        for (const admin of state.users.filter(u => u.role === 'admin' && u.telegramId && u.id !== user.id && u.id !== creator?.id)) {
+          await sendTelegramMessage(admin.telegramId!, notifyClaimText);
         }
         return res.json({ ok: true });
       }
@@ -979,10 +1013,10 @@ async function startServer() {
 
   // Update user birthday or details
   app.post('/api/user/update', (req, res) => {
-    const { requesterId, userId, realName, username, role, birthday, competencies } = req.body;
+    const { requesterId, userId, realName, username, role, birthday, competencies, primaryCompetency } = req.body;
     const state = loadDatabase();
 
-    const selfEditOnly = requesterId === userId && !realName && !username && !role && !birthday && Array.isArray(competencies);
+    const selfEditOnly = requesterId === userId && !realName && !username && !role && !birthday && (Array.isArray(competencies) || primaryCompetency !== undefined);
     if (!isAdminUser(state, requesterId) && !selfEditOnly) {
       return res.status(403).json({ error: 'Редактировать участников может только админ' });
     }
@@ -998,6 +1032,13 @@ async function startServer() {
     if (birthday) user.birthday = birthday;
     if (Array.isArray(competencies)) {
       user.competencies = competencies.filter((item: string) => state.competencies?.includes(item));
+    }
+    if (primaryCompetency !== undefined) {
+      const cleanPrimary = String(primaryCompetency || '').trim();
+      user.primaryCompetency = state.competencies?.includes(cleanPrimary) ? cleanPrimary : '';
+      if (user.primaryCompetency && !user.competencies?.includes(user.primaryCompetency)) {
+        user.competencies = [user.primaryCompetency, ...(user.competencies || [])];
+      }
     }
 
     saveDatabase(state);
@@ -1030,6 +1071,7 @@ async function startServer() {
     state.competencies = (state.competencies || []).filter((item) => item !== cleanName);
     state.users.forEach((user) => {
       user.competencies = (user.competencies || []).filter((item) => item !== cleanName);
+      if (user.primaryCompetency === cleanName) user.primaryCompetency = '';
     });
     saveDatabase(state);
     res.json({ success: true, competencies: state.competencies });
@@ -1037,7 +1079,7 @@ async function startServer() {
 
   // Save/Update User Availability
   app.post('/api/availability', (req, res) => {
-    const { userId, slots } = req.body;
+    const { userId, slots, weekStart } = req.body;
     const state = loadDatabase();
 
     if (!isRegisteredUser(state, userId)) {
@@ -1047,6 +1089,7 @@ async function startServer() {
     state.availabilities[userId] = {
       userId,
       slots,
+      weekStart: String(weekStart || ''),
       updatedAt: new Date().toISOString()
     };
 
@@ -1232,9 +1275,9 @@ async function startServer() {
     });
 
     const creator = state.users.find(u => u.id === task.creatorId);
+    const text = `${user.realName} взял задачу с доски:\n"${task.title}"\n\nСвязаться: ${user.username}`;
     if (creator && creator.id !== userId) {
       if (!state.messages[creator.id]) state.messages[creator.id] = [];
-      const text = `*${user.realName}* взял задачу с доски:\n*"${task.title}"*\n\nСвязаться: ${user.username}`;
       state.messages[creator.id].push({
         id: 'task_claim_creator_' + Date.now() + '_' + creator.id,
         userId: creator.id,
@@ -1245,6 +1288,17 @@ async function startServer() {
       if (creator.telegramId) {
         await sendTelegramMessage(creator.telegramId, text);
       }
+    }
+    for (const admin of state.users.filter(u => u.role === 'admin' && u.id !== userId && u.id !== creator?.id)) {
+      if (!state.messages[admin.id]) state.messages[admin.id] = [];
+      state.messages[admin.id].push({
+        id: 'task_claim_admin_' + Date.now() + '_' + admin.id,
+        userId: admin.id,
+        sender: 'bot',
+        text,
+        timestamp: new Date().toISOString()
+      });
+      if (admin.telegramId) await sendTelegramMessage(admin.telegramId, text);
     }
 
     saveDatabase(state);
@@ -1405,7 +1459,7 @@ async function startServer() {
           const hoursWindow = Array.from({ length: duration }, (_, index) => h + index);
           const availableUsers = state.users
             .filter(u => {
-              const daySlots = state.availabilities[u.id]?.slots?.[d] || [];
+              const daySlots = alignedAvailabilitySlots(state.availabilities[u.id])?.[d] || [];
               return hoursWindow.every(hour => daySlots.includes(hour));
             })
             .map(u => u.realName);
@@ -1441,7 +1495,7 @@ async function startServer() {
     const suggestions = picked.map(s => {
       const hoursWindow = Array.from({ length: s.duration }, (_, index) => s.hour + index);
       const missingUsers = state.users.filter(u => {
-        const daySlots = state.availabilities[u.id]?.slots?.[s.day] || [];
+        const daySlots = alignedAvailabilitySlots(state.availabilities[u.id])?.[s.day] || [];
         return !hoursWindow.every(hour => daySlots.includes(hour));
       }).map(u => ({
         id: u.id,
