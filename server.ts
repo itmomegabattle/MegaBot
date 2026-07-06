@@ -1386,6 +1386,35 @@ async function startServer() {
     res.json({ success: true, user });
   });
 
+  app.post('/api/faculty/user/update', (req, res) => {
+    const { requesterId, userId, realName, username, role, facultyId, competencies } = req.body;
+    const state = loadDatabase();
+    if (!isAdminUser(state, requesterId)) {
+      return res.status(403).json({ error: 'Редактировать ответственных может только админ' });
+    }
+    const user = state.users.find((u) => u.id === userId);
+    if (!user || !isFacultyUser(user)) return res.status(404).json({ error: 'Ответственный не найден' });
+    if (!realName || !username || !facultyId || !['faculty_responsible', 'faculty_helper'].includes(role)) {
+      return res.status(400).json({ error: 'Заполни имя, Telegram, факультет и роль' });
+    }
+    const sanitizedUsername = username.startsWith('@') ? username : '@' + username;
+    const duplicate = state.users.find((u) => u.id !== userId && u.username.toLowerCase() === sanitizedUsername.toLowerCase());
+    if (duplicate) {
+      return res.status(400).json({ error: 'Пользователь с таким Telegram username уже есть' });
+    }
+    const cleanCompetencies = Array.isArray(competencies)
+      ? competencies.filter((item: string) => state.facultyCompetencies?.includes(item))
+      : [];
+    user.realName = realName;
+    user.username = sanitizedUsername;
+    user.role = role;
+    user.facultyId = facultyId;
+    user.competencies = role === 'faculty_helper' ? cleanCompetencies : [];
+    user.primaryCompetency = user.competencies[0] || '';
+    saveDatabase(state);
+    res.json({ success: true, user });
+  });
+
   app.post('/api/faculty/user/delete', (req, res) => {
     const { requesterId, userId } = req.body;
     const state = loadDatabase();

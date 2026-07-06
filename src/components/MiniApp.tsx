@@ -187,10 +187,13 @@ export default function MiniApp({
   const [newCompetency, setNewCompetency] = useState('');
   const [facultyUserDraft, setFacultyUserDraft] = useState({ realName: '', username: '', role: 'faculty_responsible' as User['role'], facultyId: '', competencies: [] as string[] });
   const [facultyTaskDraft, setFacultyTaskDraft] = useState({ facultyId: '', competency: '', title: '', description: '', deadline: '', assignedTo: [] as string[], reminders: [] as any[] });
+  const [facultyTaskErrors, setFacultyTaskErrors] = useState<Record<string, boolean>>({});
   const [editingFacultyTaskId, setEditingFacultyTaskId] = useState<string | null>(null);
   const [newFacultyCompetency, setNewFacultyCompetency] = useState('');
   const [showFacultyPeople, setShowFacultyPeople] = useState(false);
   const [collapsedFacultyReminders, setCollapsedFacultyReminders] = useState<number[]>([]);
+  const [editingFacultyUserId, setEditingFacultyUserId] = useState<string | null>(null);
+  const [facultyEditDraft, setFacultyEditDraft] = useState({ realName: '', username: '', role: 'faculty_responsible' as User['role'], facultyId: '', competencies: [] as string[] });
 
   const isAdmin = currentUser.role === 'admin';
   const votedUsers = useMemo(
@@ -638,6 +641,15 @@ export default function MiniApp({
 
   const createFacultyTask = async (event: React.FormEvent) => {
     event.preventDefault();
+    const nextErrors = {
+      facultyId: !facultyTaskDraft.facultyId,
+      assignedTo: facultyTaskDraft.assignedTo.length === 0,
+      title: !facultyTaskDraft.title.trim(),
+      description: !facultyTaskDraft.description.trim(),
+      deadline: !facultyTaskDraft.deadline.trim(),
+    };
+    setFacultyTaskErrors(nextErrors);
+    if (Object.values(nextErrors).some(Boolean)) return;
     const res = await fetch(editingFacultyTaskId ? '/api/faculty/task/update' : '/api/faculty/task/create', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -645,6 +657,7 @@ export default function MiniApp({
     });
     if (res.ok) {
       setFacultyTaskDraft({ facultyId: faculties[0]?.id || '', competency: '', title: '', description: '', deadline: '', assignedTo: [], reminders: [] });
+      setFacultyTaskErrors({});
       setCollapsedFacultyReminders([]);
       setEditingFacultyTaskId(null);
       onRefreshState();
@@ -660,7 +673,41 @@ export default function MiniApp({
     }));
   };
 
+  const startFacultyUserEdit = (user: User) => {
+    setEditingFacultyUserId(user.id);
+    setFacultyEditDraft({
+      realName: user.realName,
+      username: user.username,
+      role: user.role,
+      facultyId: user.facultyId || '',
+      competencies: user.competencies || [],
+    });
+  };
+
+  const toggleFacultyEditCompetency = (name: string) => {
+    setFacultyEditDraft((prev) => ({
+      ...prev,
+      competencies: prev.competencies.includes(name)
+        ? prev.competencies.filter((item) => item !== name)
+        : [...prev.competencies, name],
+    }));
+  };
+
+  const updateFacultyUser = async (userId: string) => {
+    if (!isAdmin) return;
+    const res = await fetch('/api/faculty/user/update', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ requesterId: currentUser.id, userId, ...facultyEditDraft }),
+    });
+    if (res.ok) {
+      setEditingFacultyUserId(null);
+      onRefreshState();
+    }
+  };
+
   const setFacultyTaskScope = (facultyId: string) => {
+    setFacultyTaskErrors((prev) => ({ ...prev, facultyId: false, assignedTo: false }));
     setFacultyTaskDraft((prev) => {
       const scopedUsers = facultyUsers.filter((user) => facultyId === 'all' || user.facultyId === facultyId);
       const matched = prev.competency
@@ -675,6 +722,7 @@ export default function MiniApp({
   };
 
   const setFacultyTaskCompetency = (competency: string) => {
+    setFacultyTaskErrors((prev) => ({ ...prev, assignedTo: false }));
     setFacultyTaskDraft((prev) => {
       const scopedUsers = facultyUsers.filter((user) => prev.facultyId === 'all' || user.facultyId === prev.facultyId);
       const matched = competency
@@ -1308,6 +1356,9 @@ export default function MiniApp({
                         </div>
                         <div className="text-right">
                           <div className="rounded-full bg-blue-50 px-3 py-1 text-xs font-black text-[#0050ff]">{user.primaryCompetency || 'Блок не выбран'}</div>
+                          <div className={`mt-1 rounded-full px-2.5 py-1 text-[10px] font-black ${user.registered ? 'bg-emerald-50 text-emerald-600' : 'bg-slate-100 text-slate-400'}`}>
+                            {user.registered ? 'В боте' : 'Не в боте'}
+                          </div>
                           <div className="mt-1 text-xs text-slate-500">{formatDateShort(user.birthday || '01.01')}</div>
                         </div>
                       </div>
@@ -1319,6 +1370,7 @@ export default function MiniApp({
                               <InfoRow label="Имя" value={user.realName} />
                               <InfoRow label="Telegram" value={user.username} href={telegramLink(user.username)} />
                               <InfoRow label="Дата рождения" value={formatDateShort(user.birthday || '01.01')} />
+                              <InfoRow label="Регистрация" value={user.registered ? 'зарегистрирован в боте' : 'ещё не заходил в бот'} />
                               <InfoRow label="Главный блок" value={user.primaryCompetency || 'не выбран'} />
                               <InfoRow label="Блоки" value={(user.competencies || []).join(', ') || 'не выбраны'} />
                               {(isAdmin || user.id === currentUser.id) && (
@@ -1498,29 +1550,83 @@ export default function MiniApp({
                           <div className="mt-2 space-y-2">
                             {people.length === 0 ? (
                               <div className="text-sm font-bold text-slate-400">Пока никого нет</div>
-                            ) : people.map((user) => (
-                              <div key={user.id} className="rounded-xl bg-white px-3 py-2 text-sm">
-                                <div className="flex items-center justify-between gap-3">
-                                  <div>
-                                    <div className="font-black">{user.realName}</div>
-                                    <a href={telegramLink(user.username)} target="_blank" rel="noreferrer" className="font-bold text-[#0050ff]">{user.username}</a>
-                                  </div>
-                                  <div className="flex items-center gap-2">
-                                    <span className="rounded-full bg-blue-50 px-2.5 py-1 text-xs font-black text-[#0050ff]">{user.role === 'faculty_helper' ? 'Хэлпер' : 'Ответственный'}</span>
-                                    <button onClick={() => deleteFacultyUser(user.id)} className={`${miniButtonClass} border-rose-100 bg-rose-50 text-rose-600`}>
-                                      <Trash2 className="h-4 w-4" />
-                                    </button>
-                                  </div>
+                            ) : people.map((user) => {
+                              const editing = editingFacultyUserId === user.id;
+                              return (
+                                <div key={user.id} className="rounded-xl bg-white px-3 py-2 text-sm">
+                                  {!editing ? (
+                                    <>
+                                      <div className="flex items-start justify-between gap-3">
+                                        <div>
+                                          <div className="font-black">{user.realName}</div>
+                                          <a href={telegramLink(user.username)} target="_blank" rel="noreferrer" className="font-bold text-[#0050ff]">{user.username}</a>
+                                          <div className={`mt-1 inline-flex rounded-full px-2.5 py-1 text-[10px] font-black ${user.registered ? 'bg-emerald-50 text-emerald-600' : 'bg-slate-100 text-slate-400'}`}>
+                                            {user.registered ? 'Зарегистрирован' : 'Не зарегистрирован'}
+                                          </div>
+                                        </div>
+                                        <div className="flex flex-wrap justify-end gap-2">
+                                          <span className="rounded-full bg-blue-50 px-2.5 py-1 text-xs font-black text-[#0050ff]">{user.role === 'faculty_helper' ? 'Хэлпер' : 'Ответственный'}</span>
+                                          <button onClick={() => startFacultyUserEdit(user)} className={miniButtonClass}>
+                                            <Pencil className="h-4 w-4" />
+                                            Редактировать
+                                          </button>
+                                          <button onClick={() => deleteFacultyUser(user.id)} className={`${miniButtonClass} border-rose-100 bg-rose-50 text-rose-600`}>
+                                            <Trash2 className="h-4 w-4" />
+                                          </button>
+                                        </div>
+                                      </div>
+                                      {user.competencies?.length ? (
+                                        <div className="mt-2 flex flex-wrap gap-1">
+                                          {user.competencies.map((name) => (
+                                            <span key={name} className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-bold text-slate-500">{name}</span>
+                                          ))}
+                                        </div>
+                                      ) : null}
+                                    </>
+                                  ) : (
+                                    <div className="space-y-3">
+                                      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                                        <Field label="Имя">
+                                          <input value={facultyEditDraft.realName} onChange={(e) => setFacultyEditDraft((prev) => ({ ...prev, realName: e.target.value }))} className={inputClass} />
+                                        </Field>
+                                        <Field label="Telegram">
+                                          <input value={facultyEditDraft.username} onChange={(e) => setFacultyEditDraft((prev) => ({ ...prev, username: e.target.value }))} className={inputClass} />
+                                        </Field>
+                                        <Field label="Факультет">
+                                          <select value={facultyEditDraft.facultyId} onChange={(e) => setFacultyEditDraft((prev) => ({ ...prev, facultyId: e.target.value }))} className={selectClass}>
+                                            {faculties.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+                                          </select>
+                                        </Field>
+                                        <Field label="Роль">
+                                          <select value={facultyEditDraft.role} onChange={(e) => setFacultyEditDraft((prev) => ({ ...prev, role: e.target.value as User['role'], competencies: e.target.value === 'faculty_helper' ? prev.competencies : [] }))} className={selectClass}>
+                                            <option value="faculty_responsible">Ответственный</option>
+                                            <option value="faculty_helper">Хэлпер</option>
+                                          </select>
+                                        </Field>
+                                      </div>
+                                      {facultyEditDraft.role === 'faculty_helper' && (
+                                        <Field label="Компетенции">
+                                          <div className="grid grid-cols-1 gap-2 rounded-2xl border border-slate-200 bg-slate-50 p-2 sm:grid-cols-2">
+                                            {facultyCompetencies.length === 0 ? (
+                                              <div className="text-sm font-bold text-slate-400">Сначала добавь компетенции выше</div>
+                                            ) : facultyCompetencies.map((name) => (
+                                              <label key={name} className="flex items-center gap-2 rounded-xl bg-white px-3 py-2 text-sm font-semibold">
+                                                <input type="checkbox" checked={facultyEditDraft.competencies.includes(name)} onChange={() => toggleFacultyEditCompetency(name)} />
+                                                <span>{name}</span>
+                                              </label>
+                                            ))}
+                                          </div>
+                                        </Field>
+                                      )}
+                                      <div className="flex gap-2">
+                                        <button onClick={() => updateFacultyUser(user.id)} className={miniButtonClass}>OK</button>
+                                        <button onClick={() => setEditingFacultyUserId(null)} className={miniButtonClass}>Отмена</button>
+                                      </div>
+                                    </div>
+                                  )}
                                 </div>
-                                {user.competencies?.length ? (
-                                  <div className="mt-2 flex flex-wrap gap-1">
-                                    {user.competencies.map((name) => (
-                                      <span key={name} className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-bold text-slate-500">{name}</span>
-                                    ))}
-                                  </div>
-                                ) : null}
-                              </div>
-                            ))}
+                              );
+                            })}
                           </div>
                         </div>
                       );
@@ -1532,11 +1638,12 @@ export default function MiniApp({
                 <form onSubmit={createFacultyTask} className="space-y-3 rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
                   <h2 className="font-black">{editingFacultyTaskId ? 'Редактировать задачу' : 'Задача факультету'}</h2>
                   <Field label="Факультет">
-                    <select value={facultyTaskDraft.facultyId} onChange={(e) => setFacultyTaskScope(e.target.value)} className={selectClass}>
+                    <select value={facultyTaskDraft.facultyId} onChange={(e) => setFacultyTaskScope(e.target.value)} className={`${selectClass} ${facultyTaskErrors.facultyId ? 'border-rose-300 bg-rose-50 focus:border-rose-500 focus:shadow-[0_0_0_4px_rgba(244,63,94,0.12)]' : ''}`}>
                       <option value="">Выбери факультет</option>
                       <option value="all">Все факультеты</option>
                       {faculties.map((faculty) => <option key={faculty.id} value={faculty.id}>{faculty.name}</option>)}
                     </select>
+                    {facultyTaskErrors.facultyId && <RequiredHint />}
                   </Field>
                   <Field label="Исполнители">
                     <div className="space-y-2">
@@ -1546,24 +1653,28 @@ export default function MiniApp({
                         {facultyCompetencies.map((name) => <option key={name} value={name}>{name}</option>)}
                       </select>
                       {facultyTaskUsers.map((user) => (
-                        <label key={user.id} className={`flex items-center justify-between rounded-xl px-3 py-2 text-sm font-semibold ${facultyTaskDraft.competency && facultyTaskMatchedUsers.some((item) => item.id === user.id) ? 'bg-blue-50 text-[#0050ff]' : 'bg-white'}`}>
+                        <label key={user.id} className={`flex items-center justify-between rounded-xl px-3 py-2 text-sm font-semibold ${facultyTaskDraft.competency && facultyTaskMatchedUsers.some((item) => item.id === user.id) ? 'bg-blue-50 text-[#0050ff]' : 'bg-white'} ${facultyTaskErrors.assignedTo ? 'ring-2 ring-rose-200' : ''}`}>
                           <span>
                             {user.realName}
                             {user.competencies?.length ? <span className="ml-2 text-xs text-slate-400">{user.competencies.join(', ')}</span> : null}
                           </span>
-                          <input type="checkbox" checked={facultyTaskDraft.assignedTo.includes(user.id)} onChange={() => setFacultyTaskDraft((prev) => ({ ...prev, assignedTo: prev.assignedTo.includes(user.id) ? prev.assignedTo.filter((id) => id !== user.id) : [...prev.assignedTo, user.id] }))} />
+                          <input type="checkbox" checked={facultyTaskDraft.assignedTo.includes(user.id)} onChange={() => { setFacultyTaskErrors((prev) => ({ ...prev, assignedTo: false })); setFacultyTaskDraft((prev) => ({ ...prev, assignedTo: prev.assignedTo.includes(user.id) ? prev.assignedTo.filter((id) => id !== user.id) : [...prev.assignedTo, user.id] })); }} />
                         </label>
                       ))}
+                      {facultyTaskErrors.assignedTo && <RequiredHint text="Выбери хотя бы одного исполнителя" />}
                     </div>
                   </Field>
                   <Field label="Название">
-                    <input value={facultyTaskDraft.title} onChange={(e) => setFacultyTaskDraft((prev) => ({ ...prev, title: e.target.value }))} className={inputClass} />
+                    <input value={facultyTaskDraft.title} onChange={(e) => { setFacultyTaskErrors((prev) => ({ ...prev, title: false })); setFacultyTaskDraft((prev) => ({ ...prev, title: e.target.value })); }} className={`${inputClass} ${facultyTaskErrors.title ? 'border-rose-300 bg-rose-50 focus:border-rose-500' : ''}`} />
+                    {facultyTaskErrors.title && <RequiredHint />}
                   </Field>
                   <Field label="Описание">
-                    <textarea value={facultyTaskDraft.description} onChange={(e) => setFacultyTaskDraft((prev) => ({ ...prev, description: e.target.value }))} className={inputClass} rows={3} />
+                    <textarea value={facultyTaskDraft.description} onChange={(e) => { setFacultyTaskErrors((prev) => ({ ...prev, description: false })); setFacultyTaskDraft((prev) => ({ ...prev, description: e.target.value })); }} className={`${inputClass} ${facultyTaskErrors.description ? 'border-rose-300 bg-rose-50 focus:border-rose-500' : ''}`} rows={3} />
+                    {facultyTaskErrors.description && <RequiredHint />}
                   </Field>
                   <Field label="Дедлайн">
-                    <input value={facultyTaskDraft.deadline} onChange={(e) => setFacultyTaskDraft((prev) => ({ ...prev, deadline: e.target.value }))} className={inputClass} placeholder="20.10.26" />
+                    <input value={facultyTaskDraft.deadline} onChange={(e) => { setFacultyTaskErrors((prev) => ({ ...prev, deadline: false })); setFacultyTaskDraft((prev) => ({ ...prev, deadline: e.target.value })); }} className={`${inputClass} ${facultyTaskErrors.deadline ? 'border-rose-300 bg-rose-50 focus:border-rose-500' : ''}`} placeholder="20.10.26" />
+                    {facultyTaskErrors.deadline && <RequiredHint />}
                   </Field>
                   <Field label="Напоминания">
                     <div className="space-y-2">
@@ -1653,6 +1764,7 @@ export default function MiniApp({
                                   type="button"
                                   onClick={() => {
                                     setEditingFacultyTaskId(task.id);
+                                    setFacultyTaskErrors({});
                                     setFacultyTaskDraft({
                                       facultyId: task.facultyId || '',
                                       competency: task.competency || '',
@@ -1747,6 +1859,10 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       {children}
     </label>
   );
+}
+
+function RequiredHint({ text = 'Обязательное поле' }: { text?: string }) {
+  return <div className="mt-1 text-xs font-black text-rose-500">{text}</div>;
 }
 
 function HeroCard({ title, text, right, caption }: { title: string; text: string; right: string | number; caption: string }) {
