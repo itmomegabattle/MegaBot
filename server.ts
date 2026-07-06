@@ -4,6 +4,7 @@ dotenv.config();
 import express from 'express';
 import path from 'path';
 import fs from 'fs';
+import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
 import { SimulationState, User, Availability, Meeting, Task, BotMessage, Faculty, TaskReminder } from './src/types.js';
@@ -62,8 +63,42 @@ function getRoleForTelegramUser(telegramId: string | number, username?: string):
   return 'organizer';
 }
 
+function isEnvAdmin(telegramId: string | number, username?: string) {
+  const id = String(telegramId);
+  const normalizedUsername = (username || '').replace(/^@/, '').toLowerCase();
+  return getAdminTelegramIds().includes(id) || getAdminUsernames().includes(normalizedUsername);
+}
+
 function isFacultyUser(user?: User) {
   return user?.role === 'faculty_responsible' || user?.role === 'faculty_helper';
+}
+
+function findUserByTelegramIdentity(state: SimulationState, telegramId: string | number, username?: string) {
+  const id = String(telegramId);
+  const normalizedUsername = (username || '').replace(/^@/, '').toLowerCase();
+  return state.users.find((user) => user.telegramId === id)
+    || (normalizedUsername
+      ? state.users.find((user) => user.username.replace(/^@/, '').toLowerCase() === normalizedUsername)
+      : undefined);
+}
+
+function verifyTelegramInitData(initData: string, botToken?: string) {
+  if (!botToken || !initData) return false;
+  const params = new URLSearchParams(initData);
+  const hash = params.get('hash');
+  if (!hash) return false;
+  params.delete('hash');
+  const dataCheckString = [...params.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, value]) => `${key}=${value}`)
+    .join('\n');
+  const secretKey = crypto.createHmac('sha256', 'WebAppData').update(botToken).digest();
+  const calculated = crypto.createHmac('sha256', secretKey).update(dataCheckString).digest('hex');
+  try {
+    return crypto.timingSafeEqual(Buffer.from(calculated, 'hex'), Buffer.from(hash, 'hex'));
+  } catch {
+    return false;
+  }
 }
 
 function isValidBirthday(value?: string) {
@@ -362,7 +397,7 @@ async function startServer() {
     if (!botToken) return;
     const tgApiBase = process.env.TELEGRAM_API_BASE || 'https://api.telegram.org';
     const webAppUrl = process.env.WEBAPP_URL;
-    const menuButton = !isFacultyUser(user) && webAppUrl
+    const menuButton = user && !isFacultyUser(user) && webAppUrl
       ? {
           type: 'web_app',
           text: 'Открыть',
@@ -608,64 +643,47 @@ async function startServer() {
     if (changed) saveDatabase(state);
   }
 
-  // Get or create user inside Telegram WebApp
+  // Resolve an already allowed user inside Telegram WebApp.
   app.post('/api/user/get-or-create', (req, res) => {
-    const { telegramId, username, first_name, last_name } = req.body;
+    const { telegramId, username, initData } = req.body;
     if (!telegramId) {
       return res.status(400).json({ error: 'telegramId is required' });
     }
-
-    const state = loadDatabase();
-
-    let user = state.users.find(u => u.telegramId === String(telegramId));
-    if (!user && username) {
-      user = state.users.find(u => u.username.toLowerCase() === `@${username.toLowerCase()}`);
+    const botToken = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
+    if (!verifyTelegramInitData(String(initData || ''), botToken)) {
+      return res.status(403).json({ success: false, error: 'Не удалось подтвердить Telegram-аккаунт. Открой приложение кнопкой в боте.' });
     }
 
+    const state = loadDatabase();
+    const user = findUserByTelegramIdentity(state, telegramId, username);
+
     if (!user) {
-      const newUserId = 'u_' + Date.now();
-      const sanitizedUsername = username ? `@${username}` : `@tg_${telegramId}`;
-      const realName = first_name + (last_name ? ' ' + last_name : '');
-      user = {
-        id: newUserId,
-        username: sanitizedUsername,
-        realName,
-        role: getRoleForTelegramUser(telegramId, username),
-        avatarSeed: (username || 'user').toLowerCase(),
-        birthday: '01.01',
-        telegramId: String(telegramId),
-        registered: false
-      };
-      state.users.push(user);
-      state.messages[newUserId] = [];
+      return res.status(403).json({ success: false, error: 'Вас нет в списке участников. Попросите админа добавить ваш Telegram в раздел «Команда».' });
+    }
+
+    let changed = false;
+    if (!user.telegramId) {
+      user.telegramId = String(telegramId);
+      changed = true;
+    }
+    if (username && user.username !== `@${username}`) {
+      user.username = `@${username}`;
+      changed = true;
+    }
+    if (isEnvAdmin(telegramId, username) && user.role !== 'admin') {
+      user.role = 'admin';
+      changed = true;
+    }
+    if (user.registered === undefined) {
+      user.registered = false;
+      changed = true;
+    }
+    if (changed) saveDatabase(state);
+
+    if (isFacultyUser(user)) {
+      user.registered = true;
       saveDatabase(state);
-    } else {
-      let changed = false;
-      if (!user.telegramId) {
-        user.telegramId = String(telegramId);
-        changed = true;
-      }
-      if (username && user.username !== `@${username}`) {
-        user.username = `@${username}`;
-        changed = true;
-      }
-      if (changed) {
-        saveDatabase(state);
-      }
-      if (isFacultyUser(user)) {
-        user.registered = true;
-        saveDatabase(state);
-        return res.json({ success: false, externalOnly: true, user, error: 'Для вашей роли Mini App закрыт. Пользуйтесь задачами в чате с ботом.' });
-      }
-      const envRole = getRoleForTelegramUser(telegramId, username);
-      if (envRole === 'admin' && user.role !== 'admin') {
-        user.role = 'admin';
-        saveDatabase(state);
-      }
-      if (user.registered === undefined) {
-        user.registered = false;
-        saveDatabase(state);
-      }
+      return res.json({ success: false, externalOnly: true, user, error: 'Для вашей роли Mini App закрыт. Пользуйтесь задачами в чате с ботом.' });
     }
 
     res.json({ success: true, user });
@@ -809,33 +827,24 @@ async function startServer() {
 
       const state = loadDatabase();
 
-      let user = state.users.find(u => u.telegramId === String(fromUser.id));
-      if (!user && fromUser.username) {
-        user = state.users.find(u => u.username.toLowerCase() === `@${fromUser.username.toLowerCase()}`);
-      }
+      const user = findUserByTelegramIdentity(state, fromUser.id, fromUser.username);
 
       if (!user) {
-        const newUserId = 'u_' + Date.now();
-        user = {
-          id: newUserId,
-          username: fromUser.username ? `@${fromUser.username}` : `@tg_${fromUser.id}`,
-          realName: fromUser.first_name + (fromUser.last_name ? ' ' + fromUser.last_name : ''),
-          role: getRoleForTelegramUser(fromUser.id, fromUser.username),
-          avatarSeed: (fromUser.username || 'user').toLowerCase(),
-          birthday: '01.01',
-          telegramId: String(fromUser.id),
-          registered: false
-        };
-        state.users.push(user);
-        state.messages[newUserId] = [];
+        await configureChatMenuButton(chatId, undefined);
+        await sendTelegramKeyboard(
+          chatId,
+          'Вас нет в списке участников. Попросите админа добавить ваш Telegram в раздел «Команда», а потом нажмите /start ещё раз.',
+          [['Помощь']],
+          false,
+        );
+        return res.json({ ok: true });
       } else if (!user.telegramId) {
         user.telegramId = String(fromUser.id);
       }
       if (user.registered === undefined) {
         user.registered = false;
       }
-      const envRole = getRoleForTelegramUser(fromUser.id, fromUser.username);
-      if (envRole === 'admin' && user.role !== 'admin') {
+      if (isEnvAdmin(fromUser.id, fromUser.username) && user.role !== 'admin') {
         user.role = 'admin';
       }
       await configureChatMenuButton(chatId, user);

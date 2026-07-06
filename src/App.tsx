@@ -18,7 +18,6 @@ export default function App() {
       const res = await fetch('/api/state');
       const data = await res.json();
       setState(data);
-      setCurrentUserId((current) => current || data.users?.[0]?.id || '');
     } catch (err) {
       console.error('Error fetching app state:', err);
     } finally {
@@ -38,6 +37,7 @@ export default function App() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          initData: tg.initData,
           telegramId: String(tgUser.id),
           username: tgUser.username,
           first_name: tgUser.first_name,
@@ -51,6 +51,8 @@ export default function App() {
           } else if (data.externalOnly) {
             setExternalOnlyMessage(data.error || 'Mini App закрыт для вашей роли. Пользуйтесь задачами в чате с ботом.');
             if (data.user) setCurrentUserId(data.user.id);
+          } else {
+            setExternalOnlyMessage(data.error || 'Вас нет в списке участников. Напишите админу, чтобы вас добавили в команду.');
           }
           fetchState();
         })
@@ -211,15 +213,18 @@ export default function App() {
     );
   }
 
-  const currentUser = state.users.find((u) => u.id === currentUserId) || state.users[0];
+  const currentUser = state.users.find((u) => u.id === currentUserId);
 
   if (!currentUser) {
     return (
-      <div className="min-h-screen bg-slate-50 text-slate-900 flex flex-col justify-center items-center gap-4 px-6 text-center">
-        <div className="w-12 h-12 border-4 border-blue-500/30 border-t-blue-500 rounded-full animate-spin" />
-        <p className="text-sm text-slate-500 font-medium">
-          Создаём профиль. Если экран не обновился, открой приложение через кнопку в Telegram ещё раз.
-        </p>
+      <div className="flex min-h-screen items-center justify-center bg-[#f4f7ff] px-6 text-center text-slate-900">
+        <div className="max-w-sm rounded-3xl border border-blue-100 bg-white p-6 shadow-sm">
+          <div className="text-sm font-black uppercase text-[#0050ff]">MegaBot</div>
+          <h1 className="mt-2 text-2xl font-black">Открой через Telegram</h1>
+          <p className="mt-3 text-sm font-semibold text-slate-500">
+            Mini App показывает данные только после проверки Telegram-аккаунта. Открой приложение кнопкой в чате с ботом.
+          </p>
+        </div>
       </div>
     );
   }
