@@ -1405,7 +1405,7 @@ async function startServer() {
       return res.status(400).json({ error: 'Заполни факультет, название, описание, дедлайн и исполнителей' });
     }
     const cleanReminders: TaskReminder[] = Array.isArray(reminders)
-      ? reminders.slice(0, 3).map((item: any, index: number) => ({
+      ? reminders.filter((item: any) => Number(item.value) > 0).slice(0, 3).map((item: any, index: number) => ({
           id: 'rem_' + Date.now() + '_' + index,
           type: item.type === 'repeat' ? 'repeat' : 'before_deadline',
           value: Math.max(1, Number(item.value) || 1),
@@ -1456,7 +1456,7 @@ async function startServer() {
     if (competency !== undefined) task.competency = String(competency || '').trim() || 'Факультет';
     if (Array.isArray(assignedTo)) task.assignedTo = assignedTo.filter(Boolean);
     if (Array.isArray(reminders)) {
-      task.reminders = reminders.slice(0, 3).map((item: any, index: number) => ({
+      task.reminders = reminders.filter((item: any) => Number(item.value) > 0).slice(0, 3).map((item: any, index: number) => ({
         id: item.id || 'rem_' + Date.now() + '_' + index,
         type: item.type === 'repeat' ? 'repeat' : 'before_deadline',
         value: Math.max(1, Number(item.value) || 1),

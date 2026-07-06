@@ -186,10 +186,11 @@ export default function MiniApp({
   const [userDraft, setUserDraft] = useState({ realName: '', username: '', birthday: '', role: 'organizer' as User['role'], competencies: [] as string[], primaryCompetency: '' });
   const [newCompetency, setNewCompetency] = useState('');
   const [facultyUserDraft, setFacultyUserDraft] = useState({ realName: '', username: '', role: 'faculty_responsible' as User['role'], facultyId: '', competencies: [] as string[] });
-  const [facultyTaskDraft, setFacultyTaskDraft] = useState({ facultyId: '', competency: '', title: '', description: '', deadline: '', assignedTo: [] as string[], reminders: [{ type: 'before_deadline', value: 2, unit: 'days' }] as any[] });
+  const [facultyTaskDraft, setFacultyTaskDraft] = useState({ facultyId: '', competency: '', title: '', description: '', deadline: '', assignedTo: [] as string[], reminders: [] as any[] });
   const [editingFacultyTaskId, setEditingFacultyTaskId] = useState<string | null>(null);
   const [newFacultyCompetency, setNewFacultyCompetency] = useState('');
   const [showFacultyPeople, setShowFacultyPeople] = useState(false);
+  const [collapsedFacultyReminders, setCollapsedFacultyReminders] = useState<number[]>([]);
 
   const isAdmin = currentUser.role === 'admin';
   const votedUsers = useMemo(
@@ -643,7 +644,8 @@ export default function MiniApp({
       body: JSON.stringify({ requesterId: currentUser.id, taskId: editingFacultyTaskId, ...facultyTaskDraft }),
     });
     if (res.ok) {
-      setFacultyTaskDraft({ facultyId: faculties[0]?.id || '', competency: '', title: '', description: '', deadline: '', assignedTo: [], reminders: [{ type: 'before_deadline', value: 2, unit: 'days' }] });
+      setFacultyTaskDraft({ facultyId: faculties[0]?.id || '', competency: '', title: '', description: '', deadline: '', assignedTo: [], reminders: [] });
+      setCollapsedFacultyReminders([]);
       setEditingFacultyTaskId(null);
       onRefreshState();
     }
@@ -868,10 +870,10 @@ export default function MiniApp({
         {activeTab === 'meetings' && (
           <section className="space-y-4">
             <HeroCard
-              title="Подобрать время для собрания"
+              title="Назначить собрание"
               text=""
-              right={votedUsers.length >= majority ? 'Можно' : `${majority - votedUsers.length}`}
-              caption={votedUsers.length >= majority ? 'назначать' : 'до большинства'}
+              right={votedUsers.length >= majority ? 'Удобное' : `${majority - votedUsers.length}`}
+              caption={votedUsers.length >= majority ? 'время' : 'до большинства'}
             />
 
             <div className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
@@ -1537,7 +1539,7 @@ export default function MiniApp({
                     </select>
                   </Field>
                   <Field label="Исполнители">
-                    <div className="space-y-2 rounded-2xl border border-slate-200 bg-slate-50 p-2">
+                    <div className="space-y-2">
                       <select value={facultyTaskDraft.competency} onChange={(e) => setFacultyTaskCompetency(e.target.value)} className={selectClass}>
                         <option value="">Все люди выбранного факультета</option>
                         <option value="Ответственные">Ответственные</option>
@@ -1564,12 +1566,26 @@ export default function MiniApp({
                     <input value={facultyTaskDraft.deadline} onChange={(e) => setFacultyTaskDraft((prev) => ({ ...prev, deadline: e.target.value }))} className={inputClass} placeholder="20.10.26" />
                   </Field>
                   <Field label="Напоминания">
-                    <div className="space-y-2 rounded-2xl border border-slate-200 bg-slate-50 p-2">
+                    <div className="space-y-2">
                       {facultyTaskDraft.reminders.map((reminder, index) => (
                         <div key={index} className="rounded-2xl border border-blue-100 bg-white p-3 shadow-sm">
-                          <div className="mb-2 text-xs font-black uppercase text-slate-400">
-                            {['Первое напоминание', 'Второе напоминание', 'Третье напоминание'][index] || 'Напоминание'}
+                          <div className="mb-2 flex items-center justify-between gap-2">
+                            <div className="text-xs font-black uppercase text-slate-400">
+                              {['Первое напоминание', 'Второе напоминание', 'Третье напоминание'][index] || 'Напоминание'}
+                            </div>
+                            {index > 0 && (
+                              <button
+                                type="button"
+                                onClick={() => setCollapsedFacultyReminders((prev) => (
+                                  prev.includes(index) ? prev.filter((item) => item !== index) : [...prev, index]
+                                ))}
+                                className={miniButtonClass}
+                              >
+                                {collapsedFacultyReminders.includes(index) ? 'Развернуть' : 'Свернуть'}
+                              </button>
+                            )}
                           </div>
+                          {(index === 0 || !collapsedFacultyReminders.includes(index)) && (
                           <div className="grid grid-cols-1 gap-2 sm:grid-cols-[1.2fr_0.9fr_1fr]">
                             <select value={reminder.type} onChange={(e) => setFacultyTaskDraft((prev) => ({ ...prev, reminders: prev.reminders.map((item, i) => i === index ? { ...item, type: e.target.value } : item) }))} className={selectClass}>
                               <option value="before_deadline">За N до дедлайна</option>
@@ -1584,10 +1600,19 @@ export default function MiniApp({
                               <option value="hours">часов</option>
                             </select>
                           </div>
+                          )}
                         </div>
                       ))}
                       {facultyTaskDraft.reminders.length < 3 && (
-                        <button type="button" onClick={() => setFacultyTaskDraft((prev) => ({ ...prev, reminders: [...prev.reminders, { type: 'before_deadline', value: 1, unit: 'days' }] }))} className={miniButtonClass}>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const nextIndex = facultyTaskDraft.reminders.length;
+                            setFacultyTaskDraft((prev) => ({ ...prev, reminders: [...prev.reminders, { type: 'before_deadline', value: '', unit: 'days' }] }));
+                            setCollapsedFacultyReminders((prev) => prev.filter((item) => item !== nextIndex));
+                          }}
+                          className={miniButtonClass}
+                        >
                           <Plus className="h-4 w-4" />
                           Добавить напоминание
                         </button>
@@ -1596,7 +1621,7 @@ export default function MiniApp({
                   </Field>
                   <button className={primaryButtonClass}>{editingFacultyTaskId ? 'Сохранить изменения' : 'Назначить задачу'}</button>
                   {editingFacultyTaskId && (
-                    <button type="button" onClick={() => { setEditingFacultyTaskId(null); setFacultyTaskDraft({ facultyId: faculties[0]?.id || '', competency: '', title: '', description: '', deadline: '', assignedTo: [], reminders: [{ type: 'before_deadline', value: 2, unit: 'days' }] }); }} className={secondaryButtonClass}>
+                    <button type="button" onClick={() => { setEditingFacultyTaskId(null); setCollapsedFacultyReminders([]); setFacultyTaskDraft({ facultyId: faculties[0]?.id || '', competency: '', title: '', description: '', deadline: '', assignedTo: [], reminders: [] }); }} className={secondaryButtonClass}>
                       Отмена
                     </button>
                   )}
@@ -1635,8 +1660,9 @@ export default function MiniApp({
                                       description: task.description,
                                       deadline: formatDateShort(task.deadline),
                                       assignedTo: taskAssigneeIds(task),
-                                      reminders: task.reminders?.length ? task.reminders : [{ type: 'before_deadline', value: 2, unit: 'days' }],
+                                      reminders: task.reminders?.length ? task.reminders : [],
                                     });
+                                    setCollapsedFacultyReminders([]);
                                   }}
                                   className={miniButtonClass}
                                 >
