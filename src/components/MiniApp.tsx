@@ -147,7 +147,6 @@ export default function MiniApp({
     .slice()
     .sort((a, b) => String(b.completedAt || b.createdAt || '').localeCompare(String(a.completedAt || a.createdAt || '')));
   const latestCompletedTasks = completedTasks.slice(0, 10);
-  const canSeeTaskLog = isAdmin || state.taskLogVisible !== false;
   const tasksByCompetency = state.tasks.reduce<Record<string, Task[]>>((acc, task) => {
     const key = task.competency || 'Без блока';
     if (!acc[key]) acc[key] = [];
@@ -408,16 +407,16 @@ export default function MiniApp({
     await onClaimTask(taskId);
   };
 
-  const setTaskLogVisibility = async (visible: boolean) => {
+  const clearTaskLog = async () => {
     if (!isAdmin) return;
-    if (!visible) {
-      const confirmed = window.confirm('Скрыть лог задач из общего доступа? Участники больше не увидят полный бэклог, но данные останутся в базе и будут доступны админу.');
-      if (!confirmed) return;
-    }
-    const res = await fetch('/api/task/log/visibility', {
+    const confirmed = window.confirm('Удалить весь бэклог задач из базы? Это безвозвратное действие: исчезнут все открытые, активные и выполненные задачи, а также история для экспорта.');
+    if (!confirmed) return;
+    const secondConfirm = window.confirm('Точно удалить ВСЕ задачи? Отменить это действие нельзя.');
+    if (!secondConfirm) return;
+    const res = await fetch('/api/task/log/clear', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ requesterId: currentUser.id, visible }),
+      body: JSON.stringify({ requesterId: currentUser.id }),
     });
     if (res.ok) onRefreshState();
   };
@@ -959,15 +958,14 @@ export default function MiniApp({
                   <p className="text-xs font-semibold text-slate-500">Все задачи за всё время, разбитые по блокам.</p>
                 </div>
                 <div className="flex flex-wrap gap-2">
-                  {canSeeTaskLog && (
-                    <a href={`/api/task/export?requesterId=${encodeURIComponent(currentUser.id)}`} className={miniButtonClass}>
-                      <Download className="h-4 w-4" />
-                      Excel
-                    </a>
-                  )}
+                  <a href="/api/task/export" className={miniButtonClass}>
+                    <Download className="h-4 w-4" />
+                    Excel
+                  </a>
                   {isAdmin && (
-                    <button onClick={() => setTaskLogVisibility(state.taskLogVisible === false)} className={`${miniButtonClass} ${state.taskLogVisible === false ? 'border-emerald-100 bg-emerald-50 text-emerald-700' : 'border-rose-100 bg-rose-50 text-rose-600'}`}>
-                      {state.taskLogVisible === false ? 'Вернуть доступ' : 'Скрыть лог'}
+                    <button onClick={clearTaskLog} className={`${miniButtonClass} border-rose-100 bg-rose-50 text-rose-600 hover:bg-rose-100 active:bg-rose-200`}>
+                      <Trash2 className="h-4 w-4" />
+                      Удалить лог
                     </button>
                   )}
                   <button onClick={() => setShowTaskLog((value) => !value)} className={miniButtonClass}>
@@ -975,8 +973,7 @@ export default function MiniApp({
                   </button>
                 </div>
               </div>
-              {!canSeeTaskLog && <EmptyState text="Админ скрыл общий лог задач." />}
-              {showTaskLog && canSeeTaskLog && (
+              {showTaskLog && (
                 <TaskLogView tasksByCompetency={tasksByCompetency} users={state.users} />
               )}
             </div>

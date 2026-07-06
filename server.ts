@@ -169,7 +169,6 @@ function loadDatabase(): SimulationState {
   if (!state.availabilities) state.availabilities = {};
   if (!Array.isArray(state.meetings)) state.meetings = [];
   if (!Array.isArray(state.tasks)) state.tasks = [];
-  if (state.taskLogVisible === undefined) state.taskLogVisible = true;
   if (!state.messages) state.messages = {};
 
   state.users.forEach((user) => {
@@ -1315,23 +1314,19 @@ async function startServer() {
     res.json({ success: true, task });
   });
 
-  app.post('/api/task/log/visibility', (req, res) => {
-    const { requesterId, visible } = req.body;
+  app.post('/api/task/log/clear', (req, res) => {
+    const { requesterId } = req.body;
     const state = loadDatabase();
     if (!isAdminUser(state, requesterId)) {
-      return res.status(403).json({ error: 'Только админ может менять доступ к логу задач' });
+      return res.status(403).json({ error: 'Только админ может удалить бэклог задач' });
     }
-    state.taskLogVisible = Boolean(visible);
+    state.tasks = [];
     saveDatabase(state);
-    res.json({ success: true, taskLogVisible: state.taskLogVisible });
+    res.json({ success: true });
   });
 
   app.get('/api/task/export', (req, res) => {
-    const requesterId = String(req.query.requesterId || '');
     const state = loadDatabase();
-    if (!isAdminUser(state, requesterId) && state.taskLogVisible === false) {
-      return res.status(403).send('Лог задач скрыт админом');
-    }
 
     const rows = state.tasks
       .slice()

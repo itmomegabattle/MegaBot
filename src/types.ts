@@ -69,6 +69,5 @@ export interface SimulationState {
   availabilities: Record<string, Availability>;
   meetings: Meeting[];
   tasks: Task[];
-  taskLogVisible?: boolean;
   messages: Record<string, BotMessage[]>;
 }
