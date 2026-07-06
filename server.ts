@@ -115,18 +115,39 @@ function taskDetailsText(task: Task, state: SimulationState) {
       ? executors.map(userMention).join(', ')
       : 'не указан';
 
-  return `*${task.title}*\n\n${task.description}\n\n*Автор:* ${userMention(creator)}\n*Срок:* ${formatShortDate(task.deadline)}\n*Исполнитель:* ${executorText}${task.sow ? `\n\n*ТЗ:* ${task.sow}` : ''}${task.tips?.length ? `\n\n*Подсказки:*\n${task.tips.map((tip) => `• ${tip}`).join('\n')}` : ''}`;
+  return `*${task.title}*\n\n${task.description}\n\n*Блок:* ${task.competency || 'не указан'}\n*Автор:* ${userMention(creator)}\n*Срок:* ${formatShortDate(task.deadline)}\n*Исполнитель:* ${executorText}${task.sow ? `\n\n*ТЗ:* ${task.sow}` : ''}${task.tips?.length ? `\n\n*Подсказки:*\n${task.tips.map((tip) => `• ${tip}`).join('\n')}` : ''}`;
 }
 
 function meetingDetailsText(meeting: Meeting, state: SimulationState) {
   const host = state.users.find((user) => user.id === meeting.hostId);
-  return `*${meeting.title}*\n\n*Дата:* ${formatShortDate(meeting.date)}\n*Время:* ${meeting.time}\n*Организатор:* ${userMention(host)}${meeting.competency ? `\n*Блок:* ${meeting.competency}` : ''}${meeting.topic ? `\n*Описание:* ${meeting.topic}` : ''}`;
+  return `*${meeting.title}*\n\n*Дата:* ${formatShortDate(meeting.date)}\n*Время:* ${meeting.time}\n*Организатор:* ${userMention(host)}${meeting.competency ? `\n*Блок:* ${meeting.competency}` : ''}${meeting.topic ? `\n*Тема:* ${meeting.topic}` : ''}${meeting.description ? `\n*Описание:* ${meeting.description}` : ''}`;
 }
 
 function nextShortDate(daysAhead = 1) {
   const target = new Date();
   target.setDate(target.getDate() + daysAhead);
   return `${String(target.getDate()).padStart(2, '0')}.${String(target.getMonth() + 1).padStart(2, '0')}.${String(target.getFullYear()).slice(2)}`;
+}
+
+function formatDateTimeShort(value?: string) {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return `${String(date.getDate()).padStart(2, '0')}.${String(date.getMonth() + 1).padStart(2, '0')}.${String(date.getFullYear()).slice(2)} ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+}
+
+function escapeHtml(value: unknown) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function taskStatusLabel(status: Task['status']) {
+  if (status === 'completed') return 'Выполнена';
+  if (status === 'assigned') return 'В работе';
+  return 'Открытая';
 }
 
 function loadDatabase(): SimulationState {
@@ -148,6 +169,7 @@ function loadDatabase(): SimulationState {
   if (!state.availabilities) state.availabilities = {};
   if (!Array.isArray(state.meetings)) state.meetings = [];
   if (!Array.isArray(state.tasks)) state.tasks = [];
+  if (state.taskLogVisible === undefined) state.taskLogVisible = true;
   if (!state.messages) state.messages = {};
 
   state.users.forEach((user) => {
@@ -155,10 +177,14 @@ function loadDatabase(): SimulationState {
   });
   state.meetings.forEach((meeting: any) => {
     if (meeting.competency === undefined) meeting.competency = '';
+    if (meeting.description === undefined) meeting.description = '';
   });
   state.tasks.forEach((task: any) => {
     if (task.creatorId === undefined) task.creatorId = '';
     if (task.assignedTo === undefined) task.assignedTo = null;
+    if (task.competency === undefined) task.competency = '';
+    if (task.createdAt === undefined) task.createdAt = new Date().toISOString();
+    if (task.completedAt === undefined) task.completedAt = task.status === 'completed' ? new Date().toISOString() : '';
   });
 
   return state;
@@ -175,7 +201,14 @@ function saveDatabase(state: SimulationState) {
 async function startServer() {
   const app = express();
   app.use(express.json());
-  const chatSessions = new Map<string, { flow: string; competency?: string; participantIds?: string[] }>();
+  const chatSessions = new Map<string, {
+    flow: string;
+    meetingKind?: 'general' | 'competency';
+    competency?: string;
+    participantIds?: string[];
+    topic?: string;
+    description?: string;
+  }>();
 
   // API Routes
 
@@ -260,6 +293,7 @@ async function startServer() {
     hostId: string;
     participants: string[] | 'all';
     topic?: string;
+    description?: string;
     competency?: string;
   }) {
     const meeting: Meeting = {
@@ -272,6 +306,7 @@ async function startServer() {
       hostId: data.hostId,
       participants: data.participants,
       topic: data.topic || '',
+      description: data.description || '',
       status: 'scheduled',
       competency: data.competency || '',
     };
@@ -663,6 +698,21 @@ async function startServer() {
 
       if (normalizedText === 'назад' || normalizedText === 'меню') {
         const currentSession = chatSessions.get(chatKey);
+        if (normalizedText === 'назад' && currentSession?.flow === 'meeting_enter_description') {
+          chatSessions.set(chatKey, { ...currentSession, flow: 'meeting_enter_topic', topic: '' });
+          await sendTelegramKeyboard(chatId, 'Напиши тему собрания одним сообщением.', [['Назад']]);
+          return res.json({ ok: true });
+        }
+        if (normalizedText === 'назад' && currentSession?.flow === 'meeting_enter_topic') {
+          if (currentSession.meetingKind === 'competency') {
+            chatSessions.set(chatKey, { flow: 'meeting_confirm_competency', meetingKind: 'competency', competency: currentSession.competency, participantIds: currentSession.participantIds });
+            await sendTelegramKeyboard(chatId, 'Вернулся к подтверждению блока.', [['Подтвердить'], ['Назад']]);
+            return res.json({ ok: true });
+          }
+          chatSessions.set(chatKey, { flow: 'meeting_choose_type' });
+          await sendTelegramKeyboard(chatId, 'Какое собрание назначаем?', [['Собрать всю команду'], ['Выбрать блок'], ['Назад']]);
+          return res.json({ ok: true });
+        }
         if (normalizedText === 'назад' && currentSession?.flow === 'meeting_confirm_competency') {
           const freshState = loadDatabase();
           const competencies = freshState.competencies || [];
@@ -696,18 +746,8 @@ async function startServer() {
           await sendTelegramKeyboard(chatId, 'Сначала зарегистрируйся: напиши `Имя Фамилия ДД.ММ`.', [['Профиль'], ['Назад']]);
           return res.json({ ok: true });
         }
-        const freshState = loadDatabase();
-        const meeting = await createMeetingAndNotify(freshState, {
-          title: 'Общее собрание',
-          type: 'general',
-          date: nextShortDate(1),
-          time: '18:00',
-          hostId: user.id,
-          participants: 'all',
-        });
-        saveDatabase(freshState);
-        chatSessions.delete(chatKey);
-        await sendTelegramKeyboard(chatId, `Готово, назначил общее собрание:\n\n${meetingDetailsText(meeting, freshState)}`, [['Назначить собрание'], ['Назад']], true);
+        chatSessions.set(chatKey, { flow: 'meeting_enter_topic', meetingKind: 'general', participantIds: [] });
+        await sendTelegramKeyboard(chatId, 'Напиши тему собрания одним сообщением.', [['Назад']]);
         return res.json({ ok: true });
       }
 
@@ -732,31 +772,57 @@ async function startServer() {
           const memberText = members.length
             ? members.map((member) => `• ${userMention(member)}`).join('\n')
             : 'В этом блоке пока никого нет.';
-          chatSessions.set(chatKey, { flow: 'meeting_confirm_competency', competency, participantIds: members.map((member) => member.id) });
+          chatSessions.set(chatKey, { flow: 'meeting_confirm_competency', meetingKind: 'competency', competency, participantIds: members.map((member) => member.id) });
           await sendTelegramKeyboard(chatId, `Выбран блок *${competency}*.\n\nУчастники:\n${memberText}`, [['Подтвердить'], ['Назад']]);
           return res.json({ ok: true });
         }
       }
 
       if (session?.flow === 'meeting_confirm_competency' && normalizedText === 'подтвердить') {
-        const freshState = loadDatabase();
         const participantIds = session.participantIds || [];
         if (participantIds.length === 0) {
           await sendTelegramKeyboard(chatId, 'В этом блоке нет участников. Выбери другой блок.', [['Выбрать блок'], ['Назад']]);
           return res.json({ ok: true });
         }
+        chatSessions.set(chatKey, { ...session, flow: 'meeting_enter_topic' });
+        await sendTelegramKeyboard(chatId, 'Напиши тему собрания блока одним сообщением.', [['Назад']]);
+        return res.json({ ok: true });
+      }
+
+      if (session?.flow === 'meeting_enter_topic') {
+        if (!text.trim()) {
+          await sendTelegramKeyboard(chatId, 'Тема не должна быть пустой. Напиши тему собрания.', [['Назад']]);
+          return res.json({ ok: true });
+        }
+        chatSessions.set(chatKey, { ...session, flow: 'meeting_enter_description', topic: text.trim() });
+        await sendTelegramKeyboard(chatId, 'Теперь напиши описание собрания или нажми «Пропустить».', [['Пропустить'], ['Назад']]);
+        return res.json({ ok: true });
+      }
+
+      if (session?.flow === 'meeting_enter_description') {
+        const freshState = loadDatabase();
+        const description = normalizedText === 'пропустить' ? '' : text.trim();
+        const topic = session.topic || 'Собрание';
+        const isBlockMeeting = session.meetingKind === 'competency';
+        const participantIds = session.participantIds || [];
+        if (isBlockMeeting && participantIds.length === 0) {
+          await sendTelegramKeyboard(chatId, 'В этом блоке нет участников. Выбери другой блок.', [['Выбрать блок'], ['Назад']]);
+          return res.json({ ok: true });
+        }
         const meeting = await createMeetingAndNotify(freshState, {
-          title: `Собрание блока ${session.competency}`,
-          type: 'custom',
+          title: isBlockMeeting ? `Собрание блока ${session.competency}` : 'Общее собрание',
+          type: isBlockMeeting ? 'custom' : 'general',
           date: nextShortDate(1),
           time: '18:00',
           hostId: user.id,
-          participants: participantIds,
-          competency: session.competency,
+          participants: isBlockMeeting ? participantIds : 'all',
+          topic,
+          description,
+          competency: isBlockMeeting ? session.competency : '',
         });
         saveDatabase(freshState);
         chatSessions.delete(chatKey);
-        await sendTelegramKeyboard(chatId, `Готово, назначил собрание блока:\n\n${meetingDetailsText(meeting, freshState)}`, [['Назначить собрание'], ['Назад']], true);
+        await sendTelegramKeyboard(chatId, `Готово, назначил собрание:\n\n${meetingDetailsText(meeting, freshState)}`, [['Назначить собрание'], ['Назад']], true);
         return res.json({ ok: true });
       }
 
@@ -991,7 +1057,7 @@ async function startServer() {
 
   // Schedule a new meeting
   app.post('/api/meeting', async (req, res) => {
-    const { title, type, date, time, duration, hostId, participants, topic, competency } = req.body;
+    const { title, type, date, time, duration, hostId, participants, topic, description, competency } = req.body;
     const state = loadDatabase();
 
     if (!isRegisteredUser(state, hostId)) {
@@ -1007,6 +1073,7 @@ async function startServer() {
       hostId,
       participants,
       topic,
+      description,
       competency,
     });
 
@@ -1015,7 +1082,7 @@ async function startServer() {
   });
 
   app.post('/api/meeting/update', (req, res) => {
-    const { requesterId, meetingId, title, type, date, time, duration, participants, topic, competency } = req.body;
+    const { requesterId, meetingId, title, type, date, time, duration, participants, topic, description, competency } = req.body;
     const state = loadDatabase();
     const meeting = state.meetings.find(m => m.id === meetingId);
 
@@ -1031,6 +1098,7 @@ async function startServer() {
     if (duration) meeting.duration = duration;
     if (participants) meeting.participants = participants;
     meeting.topic = topic || '';
+    meeting.description = description || '';
     meeting.competency = competency || '';
 
     saveDatabase(state);
@@ -1054,15 +1122,19 @@ async function startServer() {
 
   // Create a new task
   app.post('/api/task/create', async (req, res) => {
-    const { title, description, deadline, assignedTo, sow, tips, workload, creatorId } = req.body;
+    const { title, description, deadline, assignedTo, sow, tips, workload, creatorId, competency } = req.body;
     const state = loadDatabase();
 
     if (!isRegisteredUser(state, creatorId)) {
       return res.status(403).json({ error: 'Сначала нужно зарегистрироваться в чате с ботом' });
     }
+    if (!String(competency || '').trim()) {
+      return res.status(400).json({ error: 'Укажи блок задачи' });
+    }
 
     const weightMap = { low: 1, medium: 2, high: 3 };
     const assigneeIds = Array.isArray(assignedTo) ? assignedTo.filter(Boolean) : assignedTo ? [assignedTo] : [];
+    const now = new Date().toISOString();
     const newTask: Task = {
       id: 't_' + Date.now(),
       title,
@@ -1070,11 +1142,14 @@ async function startServer() {
       deadline,
       assignedTo: assigneeIds.length === 0 ? null : assigneeIds,
       creatorId,
+      competency: String(competency).trim(),
       sow: sow || '',
       tips: tips || [],
       status: assigneeIds.length ? 'assigned' : 'open',
       workload: workload || 'medium',
-      weightValue: weightMap[workload as 'low' | 'medium' | 'high'] || 2
+      weightValue: weightMap[workload as 'low' | 'medium' | 'high'] || 2,
+      createdAt: now,
+      completedAt: '',
     };
 
     state.tasks.push(newTask);
@@ -1153,7 +1228,7 @@ async function startServer() {
       id: 'task_claim_bot_' + Date.now(),
       userId,
       sender: 'bot',
-      text: `Ты закрепил за собой задачу: *"${task.title}"*\nДедлайн: ${formatShortDate(task.deadline)}.\nТЗ можно проверить в Mini App.`,
+      text: `Ты закрепил за собой задачу: *"${task.title}"*\nБлок: ${task.competency || 'не указан'}\nДедлайн: ${formatShortDate(task.deadline)}.\nТЗ можно проверить в Mini App.`,
       timestamp: new Date().toISOString()
     });
 
@@ -1191,6 +1266,7 @@ async function startServer() {
 
     task.assignedTo = null;
     task.status = 'open';
+    task.completedAt = '';
     saveDatabase(state);
 
     const creator = state.users.find(u => u.id === task.creatorId);
@@ -1214,6 +1290,8 @@ async function startServer() {
     if (!task) return res.status(404).json({ error: 'Задача не найдена' });
 
     task.status = status;
+    if (status === 'completed') task.completedAt = new Date().toISOString();
+    if (status !== 'completed') task.completedAt = '';
 
     // If completed and was assigned to someone, notify admins
     if (status === 'completed' && task.assignedTo) {
@@ -1227,7 +1305,7 @@ async function startServer() {
           id: 'task_comp_admin_' + Date.now() + '_' + admin.id,
           userId: admin.id,
           sender: 'bot',
-          text: `Задача выполнена!\n*Исполнитель:* ${workerName}\n*Задача:* "${task.title}"`,
+          text: `Задача выполнена!\n*Блок:* ${task.competency || 'не указан'}\n*Исполнитель:* ${workerName}\n*Задача:* "${task.title}"`,
           timestamp: new Date().toISOString()
         });
       });
@@ -1235,6 +1313,82 @@ async function startServer() {
 
     saveDatabase(state);
     res.json({ success: true, task });
+  });
+
+  app.post('/api/task/log/visibility', (req, res) => {
+    const { requesterId, visible } = req.body;
+    const state = loadDatabase();
+    if (!isAdminUser(state, requesterId)) {
+      return res.status(403).json({ error: 'Только админ может менять доступ к логу задач' });
+    }
+    state.taskLogVisible = Boolean(visible);
+    saveDatabase(state);
+    res.json({ success: true, taskLogVisible: state.taskLogVisible });
+  });
+
+  app.get('/api/task/export', (req, res) => {
+    const requesterId = String(req.query.requesterId || '');
+    const state = loadDatabase();
+    if (!isAdminUser(state, requesterId) && state.taskLogVisible === false) {
+      return res.status(403).send('Лог задач скрыт админом');
+    }
+
+    const rows = state.tasks
+      .slice()
+      .sort((a, b) => String(a.competency || '').localeCompare(String(b.competency || ''), 'ru') || String(a.createdAt || '').localeCompare(String(b.createdAt || '')))
+      .map((task) => {
+        const creator = state.users.find((u) => u.id === task.creatorId);
+        const executors = assignedIds(task)
+          .map((id) => state.users.find((u) => u.id === id)?.realName)
+          .filter(Boolean)
+          .join(', ');
+        return `
+          <tr>
+            <td>${escapeHtml(task.competency || 'Без блока')}</td>
+            <td>${escapeHtml(taskStatusLabel(task.status))}</td>
+            <td>${escapeHtml(task.title)}</td>
+            <td>${escapeHtml(task.description)}</td>
+            <td>${escapeHtml(task.sow)}</td>
+            <td>${escapeHtml(task.deadline)}</td>
+            <td>${escapeHtml(formatDateTimeShort(task.createdAt))}</td>
+            <td>${escapeHtml(formatDateTimeShort(task.completedAt))}</td>
+            <td>${escapeHtml(creator?.realName || 'Не указан')}</td>
+            <td>${escapeHtml(executors || 'Не назначен')}</td>
+            <td>${escapeHtml(task.workload === 'high' ? 'Высокая' : task.workload === 'medium' ? 'Средняя' : 'Низкая')}</td>
+            <td>${escapeHtml((task.tips || []).join('\\n'))}</td>
+          </tr>`;
+      })
+      .join('');
+
+    const html = `<!doctype html>
+      <html>
+        <head><meta charset="utf-8" /></head>
+        <body>
+          <table border="1">
+            <thead>
+              <tr>
+                <th>Блок</th>
+                <th>Статус</th>
+                <th>Название</th>
+                <th>Описание</th>
+                <th>ТЗ</th>
+                <th>Дедлайн</th>
+                <th>Дата назначения</th>
+                <th>Дата выполнения</th>
+                <th>Автор</th>
+                <th>Исполнитель</th>
+                <th>Нагрузка</th>
+                <th>Подсказки</th>
+              </tr>
+            </thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </body>
+      </html>`;
+
+    res.setHeader('Content-Type', 'application/vnd.ms-excel; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename=\"megabot-task-log.xls\"');
+    res.send(html);
   });
   // Suggest meeting windows with a pure algorithm.
   app.post('/api/meeting/suggest', async (req, res) => {

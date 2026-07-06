@@ -31,6 +31,7 @@ export interface Meeting {
   participants: string[] | 'all';
   competency?: string;
   topic?: string;
+  description?: string;
   status: 'scheduled' | 'completed' | 'cancelled';
 }
 
@@ -43,11 +44,14 @@ export interface Task {
   deadline: string;
   assignedTo: string | string[] | null;
   creatorId?: string;
+  competency?: string;
   sow: string;
   tips: string[];
   status: TaskStatus;
   workload: 'low' | 'medium' | 'high';
   weightValue: number;
+  createdAt?: string;
+  completedAt?: string;
 }
 
 export interface BotMessage {
@@ -65,5 +69,6 @@ export interface SimulationState {
   availabilities: Record<string, Availability>;
   meetings: Meeting[];
   tasks: Task[];
+  taskLogVisible?: boolean;
   messages: Record<string, BotMessage[]>;
 }

@@ -120,8 +120,10 @@ export default function App() {
         triggerToast('Задача создана', 'success');
         return true;
       }
+      triggerToast(data.error || 'Не удалось создать задачу', 'warning');
     } catch (err) {
       console.error(err);
+      triggerToast('Не удалось создать задачу', 'warning');
     }
     return false;
   };

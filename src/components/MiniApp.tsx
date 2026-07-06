@@ -69,6 +69,13 @@ const formatDateShort = (value?: string) => {
   return value;
 };
 
+const formatDateTimeShort = (value?: string) => {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return formatDateShort(value);
+  return `${String(date.getDate()).padStart(2, '0')}.${String(date.getMonth() + 1).padStart(2, '0')}.${String(date.getFullYear()).slice(2)} ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+};
+
 export default function MiniApp({
   state,
   currentUser,
@@ -97,6 +104,7 @@ export default function MiniApp({
   const [meetingDate, setMeetingDate] = useState('');
   const [meetingTime, setMeetingTime] = useState('18:00');
   const [meetingTopic, setMeetingTopic] = useState('');
+  const [meetingDescription, setMeetingDescription] = useState('');
   const [meetingType, setMeetingType] = useState<'general' | 'custom' | 'competency'>('general');
   const [meetingCompetency, setMeetingCompetency] = useState('');
   const [participants, setParticipants] = useState<string[]>([]);
@@ -106,12 +114,15 @@ export default function MiniApp({
   const [savingTask, setSavingTask] = useState(false);
   const [taskTitle, setTaskTitle] = useState('');
   const [taskDesc, setTaskDesc] = useState('');
+  const [taskCompetency, setTaskCompetency] = useState('');
   const [taskDeadline, setTaskDeadline] = useState('');
   const [taskAssignedTo, setTaskAssignedTo] = useState<string[]>([]);
   const [taskSow, setTaskSow] = useState('');
   const [taskTips, setTaskTips] = useState('');
   const [taskWorkload, setTaskWorkload] = useState<'low' | 'medium' | 'high'>('medium');
   const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
+  const [showCompletedTasks, setShowCompletedTasks] = useState(false);
+  const [showTaskLog, setShowTaskLog] = useState(false);
 
   const [newUserRealName, setNewUserRealName] = useState('');
   const [newUserUsername, setNewUserUsername] = useState('');
@@ -131,6 +142,18 @@ export default function MiniApp({
   const majority = Math.floor(state.users.length / 2) + 1;
   const myTasks = state.tasks.filter((task) => taskAssigneeIds(task).includes(currentUser.id) && task.status !== 'completed');
   const openTasks = state.tasks.filter((task) => task.status === 'open');
+  const completedTasks = state.tasks
+    .filter((task) => task.status === 'completed')
+    .slice()
+    .sort((a, b) => String(b.completedAt || b.createdAt || '').localeCompare(String(a.completedAt || a.createdAt || '')));
+  const latestCompletedTasks = completedTasks.slice(0, 10);
+  const canSeeTaskLog = isAdmin || state.taskLogVisible !== false;
+  const tasksByCompetency = state.tasks.reduce<Record<string, Task[]>>((acc, task) => {
+    const key = task.competency || 'Без блока';
+    if (!acc[key]) acc[key] = [];
+    acc[key].push(task);
+    return acc;
+  }, {});
   const teamUsers = isAdmin ? state.users : [currentUser, ...state.users.filter((user) => user.id !== currentUser.id)];
   const competencies = state.competencies || [];
 
@@ -245,6 +268,7 @@ export default function MiniApp({
   };
 
   const selectMeetingCompetency = (name: string) => {
+    setMeetingType('competency');
     setMeetingCompetency(name);
     setParticipants(state.users.filter((user) => user.competencies?.includes(name)).map((user) => user.id));
   };
@@ -264,6 +288,7 @@ export default function MiniApp({
     setMeetingDate('');
     setMeetingTime('18:00');
     setMeetingTopic('');
+    setMeetingDescription('');
     setMeetingType('general');
     setMeetingCompetency('');
     setParticipants([]);
@@ -276,6 +301,7 @@ export default function MiniApp({
     setMeetingDate(formatDateShort(meeting.date));
     setMeetingTime(meeting.time);
     setMeetingTopic(meeting.topic || '');
+    setMeetingDescription(meeting.description || '');
     setMeetingType(meeting.competency ? 'competency' : meeting.type);
     setMeetingCompetency(meeting.competency || '');
     setParticipants(Array.isArray(meeting.participants) ? meeting.participants : []);
@@ -293,6 +319,7 @@ export default function MiniApp({
       hostId: currentUser.id,
       participants: meetingType === 'general' ? 'all' : participants,
       topic: meetingTopic,
+      description: meetingDescription,
       competency: meetingType === 'competency' ? meetingCompetency : '',
     };
 
@@ -329,6 +356,7 @@ export default function MiniApp({
   const resetTaskForm = () => {
     setTaskTitle('');
     setTaskDesc('');
+    setTaskCompetency('');
     setTaskDeadline('');
     setTaskAssignedTo([]);
     setTaskSow('');
@@ -346,8 +374,8 @@ export default function MiniApp({
 
   const submitTask = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (!taskTitle.trim() || !taskDesc.trim()) {
-      setTaskError('Заполни название и описание задачи. Эти поля обязательные.');
+    if (!taskTitle.trim() || !taskDesc.trim() || !taskCompetency.trim()) {
+      setTaskError('Заполни название, описание и блок задачи. Эти поля обязательные.');
       return;
     }
     setTaskError('');
@@ -355,6 +383,7 @@ export default function MiniApp({
     const ok = await onCreateTask({
       title: taskTitle.trim(),
       description: taskDesc.trim(),
+      competency: taskCompetency.trim(),
       deadline: taskDeadline || nextDateForDay(4),
       assignedTo: taskAssignedTo,
       sow: taskSow,
@@ -377,6 +406,20 @@ export default function MiniApp({
       return;
     }
     await onClaimTask(taskId);
+  };
+
+  const setTaskLogVisibility = async (visible: boolean) => {
+    if (!isAdmin) return;
+    if (!visible) {
+      const confirmed = window.confirm('Скрыть лог задач из общего доступа? Участники больше не увидят полный бэклог, но данные останутся в базе и будут доступны админу.');
+      if (!confirmed) return;
+    }
+    const res = await fetch('/api/task/log/visibility', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ requesterId: currentUser.id, visible }),
+    });
+    if (res.ok) onRefreshState();
   };
 
   const addUser = async (event: React.FormEvent) => {
@@ -748,6 +791,9 @@ export default function MiniApp({
               <Field label="Тема">
                 <textarea value={meetingTopic} onChange={(e) => setMeetingTopic(e.target.value)} className={inputClass} rows={3} />
               </Field>
+              <Field label="Описание">
+                <textarea value={meetingDescription} onChange={(e) => setMeetingDescription(e.target.value)} className={inputClass} rows={3} placeholder="Можно оставить пустым" />
+              </Field>
               {meetingType === 'competency' && (
                 <Field label="Блок">
                   <select value={meetingCompetency} onChange={(e) => selectMeetingCompetency(e.target.value)} className={inputClass}>
@@ -810,6 +856,7 @@ export default function MiniApp({
                           <InfoRow label="Тип" value={meeting.type === 'general' ? 'Вся команда' : 'Выбранные люди'} />
                           {meeting.competency && <InfoRow label="Блок" value={meeting.competency} />}
                           <InfoRow label="Тема" value={meeting.topic || 'Без темы'} />
+                          {meeting.description && <InfoRow label="Описание" value={meeting.description} />}
                           {canManage && (
                             <div className="flex gap-2 pt-2">
                               <button onClick={() => startMeetingEdit(meeting)} className={miniButtonClass}>
@@ -846,6 +893,15 @@ export default function MiniApp({
                 </Field>
                 <Field label="Описание">
                   <textarea value={taskDesc} onChange={(e) => setTaskDesc(e.target.value)} className={inputClass} rows={3} />
+                </Field>
+                <Field label="Блок">
+                  <select value={taskCompetency} onChange={(e) => setTaskCompetency(e.target.value)} className={inputClass}>
+                    <option value="">Выбери блок задачи</option>
+                    {competencies.map((name) => (
+                      <option key={name} value={name}>{name}</option>
+                    ))}
+                    {competencies.length === 0 && <option value="Общее">Общее</option>}
+                  </select>
                 </Field>
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                   <Field label="Дедлайн">
@@ -888,6 +944,42 @@ export default function MiniApp({
             {taskError && <div className="rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm font-bold text-amber-800">{taskError}</div>}
             <TaskList title="Мои задачи" tasks={myTasks} users={state.users} currentUser={currentUser} actionLabel="Готово" onAction={(id) => onCompleteTask(id)} onRelease={onReleaseTask} />
             <TaskList title="Открытые задачи" tasks={openTasks} users={state.users} currentUser={currentUser} actionLabel="Взять" onAction={claimTask} />
+            <button onClick={() => setShowCompletedTasks((value) => !value)} className={secondaryButtonClass}>
+              {showCompletedTasks ? <Minus className="h-4 w-4" /> : <Check className="h-4 w-4" />}
+              {showCompletedTasks ? 'Скрыть выполненные задачи' : 'Посмотреть выполненные задачи'}
+            </button>
+            {showCompletedTasks && (
+              <TaskList title="Последние выполненные" tasks={latestCompletedTasks} users={state.users} currentUser={currentUser} actionLabel="Готово" onAction={() => undefined} />
+            )}
+
+            <div className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <h2 className="font-black">Бэклог задач</h2>
+                  <p className="text-xs font-semibold text-slate-500">Все задачи за всё время, разбитые по блокам.</p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {canSeeTaskLog && (
+                    <a href={`/api/task/export?requesterId=${encodeURIComponent(currentUser.id)}`} className={miniButtonClass}>
+                      <Download className="h-4 w-4" />
+                      Excel
+                    </a>
+                  )}
+                  {isAdmin && (
+                    <button onClick={() => setTaskLogVisibility(state.taskLogVisible === false)} className={`${miniButtonClass} ${state.taskLogVisible === false ? 'border-emerald-100 bg-emerald-50 text-emerald-700' : 'border-rose-100 bg-rose-50 text-rose-600'}`}>
+                      {state.taskLogVisible === false ? 'Вернуть доступ' : 'Скрыть лог'}
+                    </button>
+                  )}
+                  <button onClick={() => setShowTaskLog((value) => !value)} className={miniButtonClass}>
+                    {showTaskLog ? 'Свернуть' : 'Открыть лог'}
+                  </button>
+                </div>
+              </div>
+              {!canSeeTaskLog && <EmptyState text="Админ скрыл общий лог задач." />}
+              {showTaskLog && canSeeTaskLog && (
+                <TaskLogView tasksByCompetency={tasksByCompetency} users={state.users} />
+              )}
+            </div>
           </section>
         )}
 
@@ -1163,11 +1255,16 @@ function TaskList({
                 <h3 className="font-black">{task.title}</h3>
                 <p className="mt-1 text-sm text-slate-500">{task.description}</p>
               </div>
-              <button onClick={(event) => { event.stopPropagation(); onAction(task.id); }} className={`shrink-0 rounded-full bg-[#0050ff] px-3 py-2 text-xs font-black text-white hover:bg-[#0a5cff] active:bg-[#0045d8] ${pressClass}`}>
-                {actionLabel}
-              </button>
+              {task.status !== 'completed' && (
+                <button onClick={(event) => { event.stopPropagation(); onAction(task.id); }} className={`shrink-0 rounded-full bg-[#0050ff] px-3 py-2 text-xs font-black text-white hover:bg-[#0a5cff] active:bg-[#0045d8] ${pressClass}`}>
+                  {actionLabel}
+                </button>
+              )}
             </div>
             <div className="mt-3 flex flex-wrap gap-2 text-xs font-bold text-slate-500">
+              <span className="rounded-full bg-blue-50 px-2.5 py-1 text-[#0050ff]">
+                {task.competency || 'Без блока'}
+              </span>
               <span className="flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-1">
                 <Clock className="h-3 w-3" />
                 {formatDateShort(task.deadline)}
@@ -1181,8 +1278,11 @@ function TaskList({
             {expanded && (
               <div className="mt-4 space-y-2 border-t border-slate-100 pt-4 text-sm text-slate-600" onClick={(event) => event.stopPropagation()}>
                 {creator && <InfoRow label="Автор" value={creator.realName} href={telegramLink(creator.username)} />}
+                <InfoRow label="Блок" value={task.competency || 'Без блока'} />
                 <InfoRow label="Статус" value={task.status === 'open' ? 'Открытая' : task.status === 'completed' ? 'Готово' : 'В работе'} />
                 <InfoRow label="Исполнители" value={executors.length ? executors.map((user) => user.realName).join(', ') : 'пока никто'} />
+                <InfoRow label="Дата назначения" value={formatDateTimeShort(task.createdAt)} />
+                {task.completedAt && <InfoRow label="Дата выполнения" value={formatDateTimeShort(task.completedAt)} />}
                 <InfoRow label="Дедлайн" value={formatDateShort(task.deadline)} />
                 <InfoRow label="Нагрузка" value={task.workload === 'high' ? 'Высокая' : task.workload === 'medium' ? 'Средняя' : 'Низкая'} />
                 {task.sow && <p className="rounded-2xl bg-slate-50 p-3 text-xs text-slate-600">{task.sow}</p>}
@@ -1204,6 +1304,59 @@ function TaskList({
         );
         })
       )}
+    </div>
+  );
+}
+
+function TaskLogView({ tasksByCompetency, users }: { tasksByCompetency: Record<string, Task[]>; users: User[] }) {
+  const blockNames = Object.keys(tasksByCompetency).sort((a, b) => a.localeCompare(b, 'ru'));
+  if (blockNames.length === 0) return <EmptyState text="В логе пока нет задач" />;
+
+  return (
+    <div className="mt-4 space-y-4">
+      {blockNames.map((blockName) => (
+        <div key={blockName} className="rounded-2xl border border-slate-100 bg-slate-50 p-3">
+          <div className="mb-3 flex items-center justify-between gap-2">
+            <h3 className="font-black">{blockName}</h3>
+            <span className="rounded-full bg-white px-2.5 py-1 text-xs font-black text-[#0050ff]">
+              {tasksByCompetency[blockName].length}
+            </span>
+          </div>
+          <div className="space-y-2">
+            {tasksByCompetency[blockName]
+              .slice()
+              .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')))
+              .map((task) => {
+                const creator = users.find((user) => user.id === task.creatorId);
+                const executors = taskAssigneeIds(task)
+                  .map((id) => users.find((user) => user.id === id)?.realName)
+                  .filter(Boolean)
+                  .join(', ');
+                return (
+                  <div key={task.id} className="rounded-2xl bg-white p-3 text-sm">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <div className="font-black">{task.title}</div>
+                        <div className="mt-1 text-xs text-slate-500">{task.description}</div>
+                      </div>
+                      <span className="shrink-0 rounded-full bg-blue-50 px-2.5 py-1 text-xs font-black text-[#0050ff]">
+                        {task.status === 'completed' ? 'Готово' : task.status === 'assigned' ? 'В работе' : 'Открытая'}
+                      </span>
+                    </div>
+                    <div className="mt-3 grid grid-cols-1 gap-1 text-xs text-slate-500 sm:grid-cols-2">
+                      <span>Автор: <b>{creator?.realName || 'Не указан'}</b></span>
+                      <span>Исполнитель: <b>{executors || 'Не назначен'}</b></span>
+                      <span>Назначена: <b>{formatDateTimeShort(task.createdAt)}</b></span>
+                      <span>Дедлайн: <b>{formatDateShort(task.deadline)}</b></span>
+                      {task.completedAt && <span>Выполнена: <b>{formatDateTimeShort(task.completedAt)}</b></span>}
+                    </div>
+                    {task.sow && <div className="mt-2 rounded-xl bg-slate-50 p-2 text-xs text-slate-600">{task.sow}</div>}
+                  </div>
+                );
+              })}
+          </div>
+        </div>
+      ))}
     </div>
   );
 }
