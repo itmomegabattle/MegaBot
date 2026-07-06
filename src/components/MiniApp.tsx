@@ -1,7 +1,8 @@
-import React, { useEffect, useMemo, useState } from 'react';
+﻿import React, { useEffect, useMemo, useState } from 'react';
 import {
   CalendarDays,
   Users,
+  GraduationCap,
   BriefcaseBusiness,
   Shield,
   Check,
@@ -188,6 +189,7 @@ export default function MiniApp({
   const [facultyTaskDraft, setFacultyTaskDraft] = useState({ facultyId: '', competency: '', title: '', description: '', deadline: '', assignedTo: [] as string[], reminders: [{ type: 'before_deadline', value: 2, unit: 'days' }] as any[] });
   const [editingFacultyTaskId, setEditingFacultyTaskId] = useState<string | null>(null);
   const [newFacultyCompetency, setNewFacultyCompetency] = useState('');
+  const [showFacultyPeople, setShowFacultyPeople] = useState(false);
 
   const isAdmin = currentUser.role === 'admin';
   const votedUsers = useMemo(
@@ -226,7 +228,11 @@ export default function MiniApp({
   const facultyUsers = state.users.filter((user) => user.role === 'faculty_responsible' || user.role === 'faculty_helper');
   const facultyTaskUsers = facultyUsers.filter((user) => facultyTaskDraft.facultyId === 'all' || user.facultyId === facultyTaskDraft.facultyId);
   const facultyTaskMatchedUsers = facultyTaskDraft.competency
-    ? facultyTaskUsers.filter((user) => user.competencies?.includes(facultyTaskDraft.competency))
+    ? facultyTaskUsers.filter((user) => (
+        facultyTaskDraft.competency === 'Ответственные'
+          ? user.role === 'faculty_responsible'
+          : user.competencies?.includes(facultyTaskDraft.competency)
+      ))
     : facultyTaskUsers;
 
   const availabilityByDay = useMemo(
@@ -656,7 +662,11 @@ export default function MiniApp({
     setFacultyTaskDraft((prev) => {
       const scopedUsers = facultyUsers.filter((user) => facultyId === 'all' || user.facultyId === facultyId);
       const matched = prev.competency
-        ? scopedUsers.filter((user) => user.competencies?.includes(prev.competency)).map((user) => user.id)
+        ? scopedUsers.filter((user) => (
+            prev.competency === 'Ответственные'
+              ? user.role === 'faculty_responsible'
+              : user.competencies?.includes(prev.competency)
+          )).map((user) => user.id)
         : [];
       return { ...prev, facultyId, assignedTo: matched };
     });
@@ -666,7 +676,11 @@ export default function MiniApp({
     setFacultyTaskDraft((prev) => {
       const scopedUsers = facultyUsers.filter((user) => prev.facultyId === 'all' || user.facultyId === prev.facultyId);
       const matched = competency
-        ? scopedUsers.filter((user) => user.competencies?.includes(competency)).map((user) => user.id)
+        ? scopedUsers.filter((user) => (
+            competency === 'Ответственные'
+              ? user.role === 'faculty_responsible'
+              : user.competencies?.includes(competency)
+          )).map((user) => user.id)
         : [];
       return { ...prev, competency, assignedTo: matched };
     });
@@ -699,7 +713,7 @@ export default function MiniApp({
     meetings: 'Собрания',
     tasks: 'Задачи',
     team: 'Мегаорги',
-    faculties: 'Факультеты',
+    faculties: 'Мегафакеры',
   }[activeTab] || 'Моя неделя';
 
   return (
@@ -1024,7 +1038,7 @@ export default function MiniApp({
               </Field>
               {meetingType === 'competency' && (
                 <Field label="Блок">
-                  <select value={meetingCompetency} onChange={(e) => selectMeetingCompetency(e.target.value)} className={inputClass}>
+                  <select value={meetingCompetency} onChange={(e) => selectMeetingCompetency(e.target.value)} className={selectClass}>
                     <option value="">Выбери блок</option>
                     {competencies.map((name) => (
                       <option key={name} value={name}>{name}</option>
@@ -1125,7 +1139,7 @@ export default function MiniApp({
                   <textarea value={taskDesc} onChange={(e) => setTaskDesc(e.target.value)} className={inputClass} rows={3} />
                 </Field>
                 <Field label="Блок">
-                  <select value={taskCompetency} onChange={(e) => setTaskCompetency(e.target.value)} className={inputClass}>
+                  <select value={taskCompetency} onChange={(e) => setTaskCompetency(e.target.value)} className={selectClass}>
                     <option value="">Выбери блок задачи</option>
                     {competencies.map((name) => (
                       <option key={name} value={name}>{name}</option>
@@ -1138,7 +1152,7 @@ export default function MiniApp({
                     <input value={taskDeadline} onChange={(e) => setTaskDeadline(e.target.value)} className={inputClass} inputMode="numeric" placeholder="10.07.26" />
                   </Field>
                   <Field label="Нагрузка">
-                    <select value={taskWorkload} onChange={(e) => setTaskWorkload(e.target.value as any)} className={inputClass}>
+                    <select value={taskWorkload} onChange={(e) => setTaskWorkload(e.target.value as any)} className={selectClass}>
                       <option value="low">Низкая</option>
                       <option value="medium">Средняя</option>
                       <option value="high">Высокая</option>
@@ -1236,7 +1250,7 @@ export default function MiniApp({
                 </Field>
                 <div className="grid grid-cols-2 gap-3">
                   <Field label="Роль">
-                    <select value={newUserRole} onChange={(e) => setNewUserRole(e.target.value as any)} className={inputClass}>
+                    <select value={newUserRole} onChange={(e) => setNewUserRole(e.target.value as any)} className={selectClass}>
                       <option value="organizer">Организатор</option>
                       <option value="admin">Админ</option>
                     </select>
@@ -1334,7 +1348,7 @@ export default function MiniApp({
                                 </Field>
                                 {isAdmin && (
                                   <Field label="Роль">
-                                    <select value={userDraft.role} onChange={(e) => setUserDraft((prev) => ({ ...prev, role: e.target.value as User['role'] }))} className={inputClass}>
+                                    <select value={userDraft.role} onChange={(e) => setUserDraft((prev) => ({ ...prev, role: e.target.value as User['role'] }))} className={selectClass}>
                                       <option value="organizer">Организатор</option>
                                       <option value="admin">Админ</option>
                                     </select>
@@ -1396,7 +1410,7 @@ export default function MiniApp({
 
         {activeTab === 'faculties' && (
           <section className="space-y-4">
-            <HeroCard title="Факультеты" text="" right={faculties.length} caption="факультетов" />
+            <HeroCard title="Мегафакеры" text="" right={faculties.length} caption="факультетов" />
             {!isAdmin ? (
               <EmptyState text="Раздел доступен админу" />
             ) : (
@@ -1426,16 +1440,16 @@ export default function MiniApp({
                 </div>
 
                 <div className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
-                  <h2 className="font-black">Ответственные и хэлперы</h2>
+                  <h2 className="font-black">Добавить человека</h2>
                   <form onSubmit={addFacultyUser} className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
                     <Field label="Факультет">
-                      <select value={facultyUserDraft.facultyId} onChange={(e) => setFacultyUserDraft((prev) => ({ ...prev, facultyId: e.target.value }))} className={inputClass}>
+                      <select value={facultyUserDraft.facultyId} onChange={(e) => setFacultyUserDraft((prev) => ({ ...prev, facultyId: e.target.value }))} className={selectClass}>
                         <option value="">Выбери факультет</option>
                         {faculties.map((faculty) => <option key={faculty.id} value={faculty.id}>{faculty.name}</option>)}
                       </select>
                     </Field>
                     <Field label="Роль">
-                      <select value={facultyUserDraft.role} onChange={(e) => setFacultyUserDraft((prev) => ({ ...prev, role: e.target.value as User['role'] }))} className={inputClass}>
+                      <select value={facultyUserDraft.role} onChange={(e) => setFacultyUserDraft((prev) => ({ ...prev, role: e.target.value as User['role'] }))} className={selectClass}>
                         <option value="faculty_responsible">Ответственный</option>
                         <option value="faculty_helper">Хэлпер</option>
                       </select>
@@ -1460,8 +1474,19 @@ export default function MiniApp({
                         </div>
                       </Field>
                     )}
-                    <button className={`${primaryButtonClass} sm:col-span-2`}>Добавить ответственного</button>
+                    <button className={`${primaryButtonClass} sm:col-span-2`}>Добавить</button>
                   </form>
+                </div>
+
+                <div className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
+                  <button type="button" onClick={() => setShowFacultyPeople((value) => !value)} className="flex w-full items-center justify-between gap-3 text-left">
+                    <span className="font-black">Люди на факультетах</span>
+                    <span className={`${miniButtonClass} w-auto`}>
+                      {showFacultyPeople ? <Minus className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
+                      {showFacultyPeople ? 'Свернуть' : 'Показать'}
+                    </span>
+                  </button>
+                  {showFacultyPeople && (
                   <div className="mt-4 space-y-3">
                     {faculties.map((faculty) => {
                       const people = facultyUsers.filter((user) => user.facultyId === faculty.id);
@@ -1499,25 +1524,25 @@ export default function MiniApp({
                       );
                     })}
                   </div>
+                  )}
                 </div>
 
                 <form onSubmit={createFacultyTask} className="space-y-3 rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
                   <h2 className="font-black">{editingFacultyTaskId ? 'Редактировать задачу' : 'Задача факультету'}</h2>
                   <Field label="Факультет">
-                    <select value={facultyTaskDraft.facultyId} onChange={(e) => setFacultyTaskScope(e.target.value)} className={inputClass}>
+                    <select value={facultyTaskDraft.facultyId} onChange={(e) => setFacultyTaskScope(e.target.value)} className={selectClass}>
                       <option value="">Выбери факультет</option>
                       <option value="all">Все факультеты</option>
                       {faculties.map((faculty) => <option key={faculty.id} value={faculty.id}>{faculty.name}</option>)}
                     </select>
                   </Field>
-                  <Field label="Компетенция">
-                    <select value={facultyTaskDraft.competency} onChange={(e) => setFacultyTaskCompetency(e.target.value)} className={inputClass}>
-                      <option value="">Без фильтра</option>
-                      {facultyCompetencies.map((name) => <option key={name} value={name}>{name}</option>)}
-                    </select>
-                  </Field>
                   <Field label="Исполнители">
                     <div className="space-y-2 rounded-2xl border border-slate-200 bg-slate-50 p-2">
+                      <select value={facultyTaskDraft.competency} onChange={(e) => setFacultyTaskCompetency(e.target.value)} className={selectClass}>
+                        <option value="">Все люди выбранного факультета</option>
+                        <option value="Ответственные">Ответственные</option>
+                        {facultyCompetencies.map((name) => <option key={name} value={name}>{name}</option>)}
+                      </select>
                       {facultyTaskUsers.length === 0 ? (
                         <div className="px-3 py-2 text-sm font-bold text-slate-400">Выбери факультет</div>
                       ) : facultyTaskUsers.map((user) => (
@@ -1543,13 +1568,16 @@ export default function MiniApp({
                   <Field label="Напоминания">
                     <div className="space-y-2 rounded-2xl border border-slate-200 bg-slate-50 p-2">
                       {facultyTaskDraft.reminders.map((reminder, index) => (
-                        <div key={index} className="grid grid-cols-3 gap-2">
-                          <select value={reminder.type} onChange={(e) => setFacultyTaskDraft((prev) => ({ ...prev, reminders: prev.reminders.map((item, i) => i === index ? { ...item, type: e.target.value } : item) }))} className={inputClass}>
-                            <option value="before_deadline">За дедлайн</option>
-                            <option value="repeat">Каждые</option>
+                        <div key={index} className="grid grid-cols-1 gap-2 sm:grid-cols-[1.2fr_0.9fr_1fr]">
+                          <select value={reminder.type} onChange={(e) => setFacultyTaskDraft((prev) => ({ ...prev, reminders: prev.reminders.map((item, i) => i === index ? { ...item, type: e.target.value } : item) }))} className={selectClass}>
+                            <option value="before_deadline">За N до дедлайна</option>
+                            <option value="repeat">Каждые N</option>
                           </select>
-                          <input value={reminder.value} onChange={(e) => setFacultyTaskDraft((prev) => ({ ...prev, reminders: prev.reminders.map((item, i) => i === index ? { ...item, value: Number(e.target.value) || 1 } : item) }))} className={inputClass} inputMode="numeric" />
-                          <select value={reminder.unit} onChange={(e) => setFacultyTaskDraft((prev) => ({ ...prev, reminders: prev.reminders.map((item, i) => i === index ? { ...item, unit: e.target.value } : item) }))} className={inputClass}>
+                          <label className="flex items-center gap-2 rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-black text-slate-500 transition focus-within:border-[#0050ff] focus-within:bg-white">
+                            <span>N =</span>
+                            <input value={reminder.value} onChange={(e) => setFacultyTaskDraft((prev) => ({ ...prev, reminders: prev.reminders.map((item, i) => i === index ? { ...item, value: Number(e.target.value) || 1 } : item) }))} className="min-w-0 flex-1 bg-transparent text-slate-950 outline-none" inputMode="numeric" />
+                          </label>
+                          <select value={reminder.unit} onChange={(e) => setFacultyTaskDraft((prev) => ({ ...prev, reminders: prev.reminders.map((item, i) => i === index ? { ...item, unit: e.target.value } : item) }))} className={selectClass}>
                             <option value="days">дней</option>
                             <option value="hours">часов</option>
                           </select>
@@ -1667,7 +1695,7 @@ export default function MiniApp({
           <NavButton icon={<Users />} label="Встречи" active={activeTab === 'meetings'} onClick={() => setActiveTab('meetings')} />
           <NavButton icon={<BriefcaseBusiness />} label="Задачи" active={activeTab === 'tasks'} onClick={() => setActiveTab('tasks')} />
           <NavButton icon={<Shield />} label="Команда" active={activeTab === 'team'} onClick={() => setActiveTab('team')} />
-          <NavButton icon={<Users />} label="Факультеты" active={activeTab === 'faculties'} onClick={() => setActiveTab('faculties')} />
+          <NavButton icon={<GraduationCap />} label="Мегафакеры" active={activeTab === 'faculties'} onClick={() => setActiveTab('faculties')} />
         </div>
       </nav>
     </div>
@@ -1676,6 +1704,7 @@ export default function MiniApp({
 
 const pressClass = 'transition duration-150 hover:brightness-105 active:scale-[0.97] active:brightness-90 active:rounded-2xl';
 const inputClass = 'w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-3 text-sm font-semibold outline-none transition focus:border-[#0050ff] focus:bg-white';
+const selectClass = `${inputClass} appearance-none cursor-pointer bg-[linear-gradient(45deg,transparent_50%,#0050ff_50%),linear-gradient(135deg,#0050ff_50%,transparent_50%)] bg-[length:6px_6px,6px_6px] bg-[position:calc(100%-18px)_50%,calc(100%-13px)_50%] bg-no-repeat pr-10 hover:border-blue-200 hover:bg-white`;
 const primaryButtonClass = `flex w-full items-center justify-center gap-2 rounded-3xl bg-[#0050ff] px-5 py-3 text-sm font-black text-white shadow-[0_12px_28px_rgba(0,80,255,0.24)] hover:bg-[#0a5cff] active:bg-[#0045d8] ${pressClass}`;
 const primaryCompactButtonClass = `flex items-center justify-center gap-2 rounded-full bg-[#0050ff] px-4 py-2 text-xs font-black text-white shadow-[0_10px_24px_rgba(0,80,255,0.22)] hover:bg-[#0a5cff] active:bg-[#0045d8] ${pressClass}`;
 const secondaryButtonClass = `flex items-center justify-center gap-2 rounded-full border border-blue-100 bg-blue-50 px-3 py-2 text-xs font-black text-[#0050ff] hover:bg-blue-100 active:bg-blue-200 ${pressClass}`;
@@ -1905,3 +1934,4 @@ function WaveMark() {
     </svg>
   );
 }
+
