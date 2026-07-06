@@ -6,7 +6,7 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
-import { SimulationState, User, Availability, Meeting, Task, BotMessage } from './src/types.js';
+import { SimulationState, User, Availability, Meeting, Task, BotMessage, Faculty, TaskReminder } from './src/types.js';
 
 // Setup __dirname for ES modules
 const __filename = fileURLToPath(import.meta.url);
@@ -21,10 +21,15 @@ const INITIAL_AVAILABILITIES: Record<string, Availability> = {};
 const INITIAL_MEETINGS: Meeting[] = [];
 const INITIAL_TASKS: Task[] = [];
 const INITIAL_MESSAGES: Record<string, BotMessage[]> = {};
+const DEFAULT_FACULTIES: Faculty[] = ['КТУ', 'НОЖ', 'ТИНТ', 'ФТМФ', 'ФТМИ'].map((name) => ({
+  id: 'fac_' + name.toLowerCase(),
+  name,
+}));
 
 function createEmptyState(): SimulationState {
   return {
     users: [...INITIAL_USERS],
+    faculties: [...DEFAULT_FACULTIES],
     competencies: [],
     availabilities: { ...INITIAL_AVAILABILITIES },
     meetings: [...INITIAL_MEETINGS],
@@ -56,6 +61,10 @@ function getRoleForTelegramUser(telegramId: string | number, username?: string):
   return 'organizer';
 }
 
+function isFacultyUser(user?: User) {
+  return user?.role === 'faculty_lead' || user?.role === 'faculty_helper';
+}
+
 function isValidBirthday(value?: string) {
   if (!value || !/^\d{2}\.\d{2}$/.test(value)) return false;
   const [day, month] = value.split('.').map(Number);
@@ -68,6 +77,15 @@ function formatShortDate(value?: string) {
   const match = value.match(/^(\d{4})-(\d{2})-(\d{2})/);
   if (match) return `${match[3]}.${match[2]}.${match[1].slice(2)}`;
   return value;
+}
+
+function parseShortDate(value?: string) {
+  if (!value) return null;
+  const normalized = formatShortDate(value);
+  const match = normalized.match(/^(\d{2})\.(\d{2})(?:\.(\d{2}))?$/);
+  if (!match) return null;
+  const year = match[3] ? Number(`20${match[3]}`) : new Date().getFullYear();
+  return new Date(year, Number(match[2]) - 1, Number(match[1]), 18, 0, 0, 0);
 }
 
 function parseRegistrationInput(text: string) {
@@ -167,8 +185,18 @@ function escapeHtml(value: unknown) {
 
 function taskStatusLabel(status: Task['status']) {
   if (status === 'completed') return 'Выполнена';
+  if (status === 'in_progress') return 'В работе';
+  if (status === 'waiting') return 'Ждет';
   if (status === 'assigned') return 'В работе';
   return 'Открытая';
+}
+
+function parseFacultyTaskStatus(text: string): Task['status'] | null {
+  const normalized = text.trim().toLowerCase();
+  if (normalized === 'ждет' || normalized === 'ждёт') return 'waiting';
+  if (normalized === 'в работе') return 'in_progress';
+  if (normalized === 'выполнено' || normalized === 'выполнена') return 'completed';
+  return null;
 }
 
 function loadDatabase(): SimulationState {
@@ -186,6 +214,12 @@ function loadDatabase(): SimulationState {
   }
 
   if (!Array.isArray(state.users)) state.users = [];
+  if (!Array.isArray(state.faculties)) state.faculties = [];
+  DEFAULT_FACULTIES.forEach((faculty) => {
+    if (!state.faculties!.some((item) => item.id === faculty.id || item.name === faculty.name)) {
+      state.faculties!.push(faculty);
+    }
+  });
   if (!Array.isArray(state.competencies)) state.competencies = [];
   if (!state.availabilities) state.availabilities = {};
   if (!Array.isArray(state.meetings)) state.meetings = [];
@@ -198,6 +232,7 @@ function loadDatabase(): SimulationState {
     if (user.primaryCompetency && !user.competencies.includes(user.primaryCompetency)) {
       user.competencies = [user.primaryCompetency, ...user.competencies];
     }
+    if (user.facultyId === undefined) user.facultyId = '';
   });
   state.meetings.forEach((meeting: any) => {
     if (meeting.competency === undefined) meeting.competency = '';
@@ -209,6 +244,8 @@ function loadDatabase(): SimulationState {
     if (task.competency === undefined) task.competency = '';
     if (task.createdAt === undefined) task.createdAt = new Date().toISOString();
     if (task.completedAt === undefined) task.completedAt = task.status === 'completed' ? new Date().toISOString() : '';
+    if (task.facultyId === undefined) task.facultyId = '';
+    if (!Array.isArray(task.reminders)) task.reminders = [];
   });
   Object.values(state.availabilities).forEach((availability: any) => {
     if (availability.weekStart === undefined) availability.weekStart = '';
@@ -235,6 +272,9 @@ async function startServer() {
     participantIds?: string[];
     topic?: string;
     description?: string;
+    taskIds?: string[];
+    selectedTaskId?: string;
+    selectedStatus?: Task['status'];
   }>();
 
   // API Routes
@@ -254,7 +294,14 @@ async function startServer() {
   }
 
   // Helper to send message to Telegram
-  function buildChatKeyboard(includeWebApp = true) {
+  function buildChatKeyboard(includeWebApp = true, user?: User) {
+    if (isFacultyUser(user)) {
+      return {
+        keyboard: [[{ text: 'Мои задачи' }, { text: 'Помощь' }]],
+        resize_keyboard: true,
+        is_persistent: true,
+      };
+    }
     const webAppUrl = process.env.WEBAPP_URL;
     const keyboard: any[] = [];
 
@@ -274,7 +321,8 @@ async function startServer() {
     };
   }
 
-  function buildKeyboard(rows: string[][], includeWebApp = false) {
+  function buildKeyboard(rows: string[][], includeWebApp = false, user?: User) {
+    if (isFacultyUser(user)) includeWebApp = false;
     const webAppUrl = process.env.WEBAPP_URL;
     const keyboard: any[] = [];
     if (includeWebApp && webAppUrl) {
@@ -284,7 +332,7 @@ async function startServer() {
     return { keyboard, resize_keyboard: true, is_persistent: true };
   }
 
-  async function sendTelegramKeyboard(chatId: string | number, text: string, rows: string[][], includeWebApp = false) {
+  async function sendTelegramKeyboard(chatId: string | number, text: string, rows: string[][], includeWebApp = false, user?: User) {
     const botToken = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
     if (!botToken) return;
     const tgApiBase = process.env.TELEGRAM_API_BASE || 'https://api.telegram.org';
@@ -294,8 +342,7 @@ async function startServer() {
       body: JSON.stringify({
         chat_id: chatId,
         text,
-        parse_mode: 'Markdown',
-        reply_markup: buildKeyboard(rows, includeWebApp),
+        reply_markup: buildKeyboard(rows, includeWebApp, user),
       }),
     });
   }
@@ -367,7 +414,7 @@ async function startServer() {
     return meeting;
   }
 
-  async function sendTelegramMessage(chatId: string | number, text: string, buttons?: { text: string; action: string }[], keyboardOnly = false) {
+  async function sendTelegramMessage(chatId: string | number, text: string, buttons?: { text: string; action: string }[], keyboardOnly = false, recipient?: User) {
     const botToken = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
     if (!botToken) {
       console.warn('TELEGRAM_BOT_TOKEN is not set. Telegram message was not sent.');
@@ -375,9 +422,9 @@ async function startServer() {
     }
     const webAppUrl = process.env.WEBAPP_URL;
 
-    let replyMarkup: any = buildChatKeyboard();
+    let replyMarkup: any = buildChatKeyboard(true, recipient);
     if (keyboardOnly) {
-      replyMarkup = buildChatKeyboard(false);
+      replyMarkup = buildChatKeyboard(false, recipient);
     } else if (buttons && buttons.length > 0) {
       replyMarkup = {};
       replyMarkup.inline_keyboard = buttons.map(b => {
@@ -487,6 +534,39 @@ async function startServer() {
     }
   }
 
+  async function sendTaskReminders() {
+    const state = loadDatabase();
+    const now = new Date();
+    let changed = false;
+    for (const task of state.tasks) {
+      if (task.status === 'completed' || !task.reminders?.length) continue;
+      const deadline = parseShortDate(task.deadline);
+      if (!deadline) continue;
+      for (const reminder of task.reminders) {
+        const intervalMs = reminder.value * (reminder.unit === 'hours' ? 60 * 60 * 1000 : 24 * 60 * 60 * 1000);
+        let shouldSend = false;
+        if (reminder.type === 'before_deadline') {
+          const remindAt = new Date(deadline.getTime() - intervalMs);
+          shouldSend = now >= remindAt && !reminder.sentAt;
+        } else {
+          const last = reminder.lastSentAt ? new Date(reminder.lastSentAt) : new Date(task.createdAt || now);
+          shouldSend = now.getTime() - last.getTime() >= intervalMs;
+        }
+        if (!shouldSend) continue;
+        for (const id of assignedIds(task)) {
+          const target = state.users.find((user) => user.id === id);
+          if (target?.telegramId) {
+            await sendTelegramMessage(target.telegramId, `Напоминание по задаче:\n\n${taskDetailsText(task, state)}\n\nТекущий статус: ${taskStatusLabel(task.status)}`, undefined, false, target);
+          }
+        }
+        if (reminder.type === 'before_deadline') reminder.sentAt = now.toISOString();
+        else reminder.lastSentAt = now.toISOString();
+        changed = true;
+      }
+    }
+    if (changed) saveDatabase(state);
+  }
+
   // Get or create user inside Telegram WebApp
   app.post('/api/user/get-or-create', (req, res) => {
     const { telegramId, username, first_name, last_name } = req.body;
@@ -530,6 +610,11 @@ async function startServer() {
       }
       if (changed) {
         saveDatabase(state);
+      }
+      if (isFacultyUser(user)) {
+        user.registered = true;
+        saveDatabase(state);
+        return res.json({ success: false, externalOnly: true, user, error: 'Для вашей роли Mini App закрыт. Пользуйтесь задачами в чате с ботом.' });
       }
       const envRole = getRoleForTelegramUser(telegramId, username);
       if (envRole === 'admin' && user.role !== 'admin') {
@@ -728,6 +813,105 @@ async function startServer() {
       const registration = parseRegistrationInput(text);
       const chatKey = String(chatId);
       const normalizedText = text.trim().toLowerCase();
+      const session = chatSessions.get(chatKey);
+
+      if (isFacultyUser(user)) {
+        user.registered = true;
+        if (normalizedText === 'назад' || normalizedText === 'меню') {
+          chatSessions.delete(chatKey);
+          await sendTelegramKeyboard(chatId, 'Меню задач.', [['Мои задачи', 'Помощь']], false, user);
+          return res.json({ ok: true });
+        }
+
+        const myTasks = state.tasks.filter((task) => assignedIds(task).includes(user.id) && task.status !== 'completed');
+        if (cmd.startsWith('/start')) {
+          await sendTelegramKeyboard(chatId, `Привет, ${user.realName}! Здесь будут только задачи от команды MEGABATTLE.`, [['Мои задачи', 'Помощь']], false, user);
+          saveDatabase(state);
+          return res.json({ ok: true });
+        }
+
+        if (normalizedText === 'мои задачи' || cmd.startsWith('/tasks')) {
+          if (myTasks.length === 0) {
+            await sendTelegramKeyboard(chatId, 'Активных задач пока нет.', [['Мои задачи', 'Помощь']], false, user);
+            return res.json({ ok: true });
+          }
+          chatSessions.set(chatKey, { flow: 'faculty_task_pick', taskIds: myTasks.map((task) => task.id) });
+          const list = myTasks.map((task, index) => {
+            const creator = state.users.find((item) => item.id === task.creatorId);
+            return `${index + 1}. ${task.title}\nСтатус: ${taskStatusLabel(task.status)}\nДедлайн: ${formatShortDate(task.deadline)}\nАвтор: ${userMention(creator)}\n${task.description}`;
+          }).join('\n\n');
+          await sendTelegramKeyboard(chatId, `Твои задачи:\n\n${list}`, [['Установить статус задачи'], ['Мои задачи', 'Помощь']], false, user);
+          return res.json({ ok: true });
+        }
+
+        if (normalizedText === 'установить статус задачи') {
+          if (myTasks.length === 0) {
+            await sendTelegramKeyboard(chatId, 'Активных задач пока нет.', [['Мои задачи', 'Помощь']], false, user);
+            return res.json({ ok: true });
+          }
+          chatSessions.set(chatKey, { flow: 'faculty_task_pick', taskIds: myTasks.map((task) => task.id) });
+          await sendTelegramKeyboard(chatId, 'Введи порядковый номер задачи из списка.', [['Назад']], false, user);
+          return res.json({ ok: true });
+        }
+
+        if (session?.flow === 'faculty_task_pick') {
+          const index = Number(normalizedText) - 1;
+          const selectedTaskId = session.taskIds?.[index];
+          const task = state.tasks.find((item) => item.id === selectedTaskId);
+          if (!task) {
+            await sendTelegramKeyboard(chatId, 'Не нашёл задачу с таким номером. Введи номер ещё раз.', [['Назад']], false, user);
+            return res.json({ ok: true });
+          }
+          chatSessions.set(chatKey, { flow: 'faculty_task_status', selectedTaskId: task.id });
+          await sendTelegramKeyboard(chatId, `Задача: ${task.title}\nВыбери новый статус.`, [['Ждет', 'В работе'], ['Выполнено', 'Назад']], false, user);
+          return res.json({ ok: true });
+        }
+
+        if (session?.flow === 'faculty_task_status') {
+          const selectedStatus = parseFacultyTaskStatus(text);
+          if (!selectedStatus) {
+            await sendTelegramKeyboard(chatId, 'Выбери статус кнопкой: Ждет, В работе или Выполнено.', [['Ждет', 'В работе'], ['Выполнено', 'Назад']], false, user);
+            return res.json({ ok: true });
+          }
+          const task = state.tasks.find((item) => item.id === session.selectedTaskId);
+          if (!task) {
+            chatSessions.delete(chatKey);
+            await sendTelegramKeyboard(chatId, 'Задача не найдена. Открой список заново.', [['Мои задачи', 'Помощь']], false, user);
+            return res.json({ ok: true });
+          }
+          chatSessions.set(chatKey, { flow: 'faculty_task_confirm', selectedTaskId: task.id, selectedStatus });
+          await sendTelegramKeyboard(chatId, `Подтвердить смену статуса?\n\n${task.title}\nНовый статус: ${taskStatusLabel(selectedStatus)}`, [['Подтвердить'], ['Назад']], false, user);
+          return res.json({ ok: true });
+        }
+
+        if (session?.flow === 'faculty_task_confirm' && normalizedText === 'подтвердить') {
+          const task = state.tasks.find((item) => item.id === session.selectedTaskId);
+          if (!task || !session.selectedStatus) {
+            chatSessions.delete(chatKey);
+            await sendTelegramKeyboard(chatId, 'Задача не найдена. Открой список заново.', [['Мои задачи', 'Помощь']], false, user);
+            return res.json({ ok: true });
+          }
+          task.status = session.selectedStatus;
+          task.completedAt = session.selectedStatus === 'completed' ? new Date().toISOString() : '';
+          const creator = state.users.find((item) => item.id === task.creatorId);
+          if (creator?.telegramId) {
+            await sendTelegramMessage(creator.telegramId, `Статус задачи изменён.\n\nЗадача: ${task.title}\nИсполнитель: ${userMention(user)}\nСтатус: ${taskStatusLabel(task.status)}`);
+          }
+          chatSessions.delete(chatKey);
+          saveDatabase(state);
+          await sendTelegramKeyboard(chatId, `Готово. Статус задачи "${task.title}" теперь: ${taskStatusLabel(task.status)}.`, [['Мои задачи', 'Помощь']], false, user);
+          return res.json({ ok: true });
+        }
+
+        if (normalizedText === 'помощь' || cmd.startsWith('/help')) {
+          await sendTelegramKeyboard(chatId, 'Здесь ты получаешь задачи от организаторов. В «Мои задачи» можно посмотреть дедлайны и поменять статус задачи. Если нужна помощь, напиши автору задачи из карточки.', [['Мои задачи', 'Помощь']], false, user);
+          return res.json({ ok: true });
+        }
+
+        await sendTelegramKeyboard(chatId, 'Пользуйся кнопками: Мои задачи и Помощь.', [['Мои задачи', 'Помощь']], false, user);
+        saveDatabase(state);
+        return res.json({ ok: true });
+      }
 
       if (normalizedText === 'назад' || normalizedText === 'меню') {
         const currentSession = chatSessions.get(chatKey);
@@ -796,7 +980,7 @@ async function startServer() {
         return res.json({ ok: true });
       }
 
-      const session = chatSessions.get(chatKey);
+      
       if (session?.flow === 'meeting_pick_competency') {
         const freshState = loadDatabase();
         const competency = (freshState.competencies || []).find((item) => item.toLowerCase() === normalizedText);
@@ -1075,6 +1259,132 @@ async function startServer() {
     });
     saveDatabase(state);
     res.json({ success: true, competencies: state.competencies });
+  });
+
+  app.post('/api/faculty/user/add', (req, res) => {
+    const { requesterId, realName, username, role, facultyId } = req.body;
+    const state = loadDatabase();
+    if (!isAdminUser(state, requesterId)) {
+      return res.status(403).json({ error: 'Добавлять ответственных может только админ' });
+    }
+    if (!realName || !username || !facultyId || !['faculty_lead', 'faculty_helper'].includes(role)) {
+      return res.status(400).json({ error: 'Заполни имя, Telegram, факультет и роль' });
+    }
+    const sanitizedUsername = username.startsWith('@') ? username : '@' + username;
+    let user = state.users.find((u) => u.username.toLowerCase() === sanitizedUsername.toLowerCase());
+    if (user) {
+      user.realName = realName;
+      user.role = role;
+      user.facultyId = facultyId;
+      user.registered = Boolean(user.telegramId);
+    } else {
+      user = {
+        id: 'u_' + Date.now(),
+        username: sanitizedUsername,
+        realName,
+        role,
+        facultyId,
+        avatarSeed: sanitizedUsername.toLowerCase(),
+        birthday: '01.01',
+        registered: false,
+        competencies: [],
+        primaryCompetency: '',
+      };
+      state.users.push(user);
+      state.messages[user.id] = [];
+    }
+    saveDatabase(state);
+    res.json({ success: true, user });
+  });
+
+  app.post('/api/faculty/user/delete', (req, res) => {
+    const { requesterId, userId } = req.body;
+    const state = loadDatabase();
+    if (!isAdminUser(state, requesterId)) {
+      return res.status(403).json({ error: 'Удалять ответственных может только админ' });
+    }
+    const user = state.users.find((u) => u.id === userId);
+    if (!user || !isFacultyUser(user)) return res.status(404).json({ error: 'Ответственный не найден' });
+    state.users = state.users.filter((u) => u.id !== userId);
+    state.tasks.forEach((task) => {
+      const ids = assignedIds(task).filter((id) => id !== userId);
+      task.assignedTo = ids.length === 0 ? null : ids;
+    });
+    saveDatabase(state);
+    res.json({ success: true });
+  });
+
+  app.post('/api/faculty/task/create', async (req, res) => {
+    const { requesterId, facultyId, title, description, deadline, assignedTo, reminders } = req.body;
+    const state = loadDatabase();
+    if (!isAdminUser(state, requesterId) && !state.users.some((u) => u.id === requesterId && u.role === 'organizer')) {
+      return res.status(403).json({ error: 'Создавать задачи факультетам могут только мегаорги' });
+    }
+    const assigneeIds = Array.isArray(assignedTo) ? assignedTo.filter(Boolean) : [];
+    if (!facultyId || !title || !description || !deadline || assigneeIds.length === 0) {
+      return res.status(400).json({ error: 'Заполни факультет, название, описание, дедлайн и исполнителей' });
+    }
+    const cleanReminders: TaskReminder[] = Array.isArray(reminders)
+      ? reminders.slice(0, 3).map((item: any, index: number) => ({
+          id: 'rem_' + Date.now() + '_' + index,
+          type: item.type === 'repeat' ? 'repeat' : 'before_deadline',
+          value: Math.max(1, Number(item.value) || 1),
+          unit: item.unit === 'hours' ? 'hours' : 'days',
+        }))
+      : [];
+    const task: Task = {
+      id: 't_' + Date.now(),
+      title,
+      description,
+      deadline,
+      assignedTo: assigneeIds,
+      creatorId: requesterId,
+      facultyId,
+      competency: 'Факультет',
+      sow: '',
+      tips: [],
+      status: 'waiting',
+      workload: 'medium',
+      weightValue: 2,
+      createdAt: new Date().toISOString(),
+      completedAt: '',
+      reminders: cleanReminders,
+    };
+    state.tasks.push(task);
+    for (const id of assigneeIds) {
+      const target = state.users.find((u) => u.id === id);
+      if (target?.telegramId) {
+        await sendTelegramMessage(target.telegramId, `Новая задача от MEGABATTLE:\n\n${taskDetailsText(task, state)}\n\nЧтобы поменять статус, нажми «Мои задачи».`, undefined, false, target);
+      }
+    }
+    saveDatabase(state);
+    res.json({ success: true, task });
+  });
+
+  app.post('/api/faculty/task/update', (req, res) => {
+    const { requesterId, taskId, title, description, deadline, assignedTo, reminders } = req.body;
+    const state = loadDatabase();
+    const task = state.tasks.find((item) => item.id === taskId);
+    if (!task) return res.status(404).json({ error: 'Задача не найдена' });
+    if (task.creatorId !== requesterId && !isAdminUser(state, requesterId)) {
+      return res.status(403).json({ error: 'Редактировать задачу может автор или админ' });
+    }
+    if (title !== undefined) task.title = title;
+    if (description !== undefined) task.description = description;
+    if (deadline !== undefined) task.deadline = deadline;
+    if (Array.isArray(assignedTo)) task.assignedTo = assignedTo.filter(Boolean);
+    if (Array.isArray(reminders)) {
+      task.reminders = reminders.slice(0, 3).map((item: any, index: number) => ({
+        id: item.id || 'rem_' + Date.now() + '_' + index,
+        type: item.type === 'repeat' ? 'repeat' : 'before_deadline',
+        value: Math.max(1, Number(item.value) || 1),
+        unit: item.unit === 'hours' ? 'hours' : 'days',
+        sentAt: item.sentAt,
+        lastSentAt: item.lastSentAt,
+      }));
+    }
+    saveDatabase(state);
+    res.json({ success: true, task });
   });
 
   // Save/Update User Availability
@@ -1594,6 +1904,7 @@ async function startServer() {
 
     await sendDueBirthdayReminders();
     await sendSundayAvailabilityReminders();
+    await sendTaskReminders();
     setInterval(() => {
       sendDueBirthdayReminders().catch((err) => {
         console.error('Birthday reminder check failed:', err.message);
@@ -1602,6 +1913,11 @@ async function startServer() {
         console.error('Sunday availability reminder check failed:', err.message);
       });
     }, 24 * 60 * 60 * 1000);
+    setInterval(() => {
+      sendTaskReminders().catch((err) => {
+        console.error('Task reminder check failed:', err.message);
+      });
+    }, 15 * 60 * 1000);
 
     console.log('Telegram long polling started.');
     let offset = 0;

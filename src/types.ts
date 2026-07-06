@@ -1,4 +1,4 @@
-export type UserRole = 'admin' | 'organizer';
+export type UserRole = 'admin' | 'organizer' | 'faculty_lead' | 'faculty_helper';
 
 export interface User {
   id: string;
@@ -11,6 +11,7 @@ export interface User {
   registered?: boolean;
   competencies?: string[];
   primaryCompetency?: string;
+  facultyId?: string;
 }
 
 export interface Availability {
@@ -37,7 +38,16 @@ export interface Meeting {
   status: 'scheduled' | 'completed' | 'cancelled';
 }
 
-export type TaskStatus = 'open' | 'assigned' | 'completed';
+export type TaskStatus = 'open' | 'assigned' | 'completed' | 'waiting' | 'in_progress';
+
+export interface TaskReminder {
+  id: string;
+  type: 'before_deadline' | 'repeat';
+  value: number;
+  unit: 'days' | 'hours';
+  sentAt?: string;
+  lastSentAt?: string;
+}
 
 export interface Task {
   id: string;
@@ -54,6 +64,13 @@ export interface Task {
   weightValue: number;
   createdAt?: string;
   completedAt?: string;
+  facultyId?: string;
+  reminders?: TaskReminder[];
+}
+
+export interface Faculty {
+  id: string;
+  name: string;
 }
 
 export interface BotMessage {
@@ -67,6 +84,7 @@ export interface BotMessage {
 
 export interface SimulationState {
   users: User[];
+  faculties?: Faculty[];
   competencies?: string[];
   availabilities: Record<string, Availability>;
   meetings: Meeting[];

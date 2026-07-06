@@ -11,6 +11,7 @@ export default function App() {
   const [activeMiniAppTab, setActiveMiniAppTab] = useState('slots');
   const [notifications, setNotifications] = useState<{ id: string; text: string; type: ToastType }[]>([]);
   const [currentUserId, setCurrentUserId] = useState('');
+  const [externalOnlyMessage, setExternalOnlyMessage] = useState('');
 
   const fetchState = async () => {
     try {
@@ -47,6 +48,9 @@ export default function App() {
         .then((data) => {
           if (data.success && data.user) {
             setCurrentUserId(data.user.id);
+          } else if (data.externalOnly) {
+            setExternalOnlyMessage(data.error || 'Mini App закрыт для вашей роли. Пользуйтесь задачами в чате с ботом.');
+            if (data.user) setCurrentUserId(data.user.id);
           }
           fetchState();
         })
@@ -192,6 +196,17 @@ export default function App() {
       <div className="min-h-screen bg-slate-50 text-slate-900 flex flex-col justify-center items-center gap-4">
         <div className="w-12 h-12 border-4 border-blue-500/30 border-t-blue-500 rounded-full animate-spin" />
         <p className="text-sm text-slate-500 font-medium">Загрузка приложения...</p>
+      </div>
+    );
+  }
+
+  if (externalOnlyMessage) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-[#f4f7ff] px-6 text-center text-slate-900">
+        <div className="max-w-sm rounded-3xl border border-blue-100 bg-white p-6 shadow-sm">
+          <h1 className="text-xl font-black">Доступ через чат</h1>
+          <p className="mt-3 text-sm font-semibold text-slate-500">{externalOnlyMessage}</p>
+        </div>
       </div>
     );
   }
