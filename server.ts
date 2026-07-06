@@ -30,6 +30,7 @@ function createEmptyState(): SimulationState {
   return {
     users: [...INITIAL_USERS],
     faculties: [...DEFAULT_FACULTIES],
+    facultyCompetencies: [],
     competencies: [],
     availabilities: { ...INITIAL_AVAILABILITIES },
     meetings: [...INITIAL_MEETINGS],
@@ -62,7 +63,7 @@ function getRoleForTelegramUser(telegramId: string | number, username?: string):
 }
 
 function isFacultyUser(user?: User) {
-  return user?.role === 'faculty_lead' || user?.role === 'faculty_helper';
+  return user?.role === 'faculty_responsible' || user?.role === 'faculty_helper';
 }
 
 function isValidBirthday(value?: string) {
@@ -183,6 +184,12 @@ function escapeHtml(value: unknown) {
     .replace(/"/g, '&quot;');
 }
 
+function renderTelegramHtml(text: string) {
+  return escapeHtml(text)
+    .replace(/`([^`\n]+)`/g, '<code>$1</code>')
+    .replace(/\*([^*\n]+)\*/g, '<b>$1</b>');
+}
+
 function taskStatusLabel(status: Task['status']) {
   if (status === 'completed') return 'Выполнена';
   if (status === 'in_progress') return 'В работе';
@@ -221,12 +228,14 @@ function loadDatabase(): SimulationState {
     }
   });
   if (!Array.isArray(state.competencies)) state.competencies = [];
+  if (!Array.isArray(state.facultyCompetencies)) state.facultyCompetencies = [];
   if (!state.availabilities) state.availabilities = {};
   if (!Array.isArray(state.meetings)) state.meetings = [];
   if (!Array.isArray(state.tasks)) state.tasks = [];
   if (!state.messages) state.messages = {};
 
   state.users.forEach((user) => {
+    if ((user.role as string) === 'faculty_lead') user.role = 'faculty_responsible';
     if (!Array.isArray(user.competencies)) user.competencies = [];
     if (user.primaryCompetency === undefined) user.primaryCompetency = user.competencies[0] || '';
     if (user.primaryCompetency && !user.competencies.includes(user.primaryCompetency)) {
@@ -341,7 +350,8 @@ async function startServer() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         chat_id: chatId,
-        text,
+        text: renderTelegramHtml(text),
+        parse_mode: 'HTML',
         reply_markup: buildKeyboard(rows, includeWebApp, user),
       }),
     });
@@ -478,7 +488,8 @@ async function startServer() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           chat_id: chatId,
-          text: text,
+          text: renderTelegramHtml(text),
+          parse_mode: 'HTML',
           reply_markup: Object.keys(replyMarkup).length > 0 ? replyMarkup : undefined
         })
       });
@@ -1292,15 +1303,51 @@ async function startServer() {
     res.json({ success: true, competencies: state.competencies });
   });
 
+  app.post('/api/faculty/competency/add', (req, res) => {
+    const { requesterId, name } = req.body;
+    const state = loadDatabase();
+    if (!isAdminUser(state, requesterId)) {
+      return res.status(403).json({ error: 'Компетенции факультетов может менять только админ' });
+    }
+    const cleanName = String(name || '').trim();
+    if (!cleanName) return res.status(400).json({ error: 'Название компетенции обязательно' });
+    if (!state.facultyCompetencies) state.facultyCompetencies = [];
+    if (!state.facultyCompetencies.some((item) => item.toLowerCase() === cleanName.toLowerCase())) {
+      state.facultyCompetencies.push(cleanName);
+    }
+    saveDatabase(state);
+    res.json({ success: true, facultyCompetencies: state.facultyCompetencies });
+  });
+
+  app.post('/api/faculty/competency/delete', (req, res) => {
+    const { requesterId, name } = req.body;
+    const state = loadDatabase();
+    if (!isAdminUser(state, requesterId)) {
+      return res.status(403).json({ error: 'Компетенции факультетов может менять только админ' });
+    }
+    const cleanName = String(name || '').trim();
+    state.facultyCompetencies = (state.facultyCompetencies || []).filter((item) => item !== cleanName);
+    state.users.forEach((user) => {
+      if (!isFacultyUser(user)) return;
+      user.competencies = (user.competencies || []).filter((item) => item !== cleanName);
+      if (user.primaryCompetency === cleanName) user.primaryCompetency = '';
+    });
+    saveDatabase(state);
+    res.json({ success: true, facultyCompetencies: state.facultyCompetencies });
+  });
+
   app.post('/api/faculty/user/add', (req, res) => {
-    const { requesterId, realName, username, role, facultyId } = req.body;
+    const { requesterId, realName, username, role, facultyId, competencies } = req.body;
     const state = loadDatabase();
     if (!isAdminUser(state, requesterId)) {
       return res.status(403).json({ error: 'Добавлять ответственных может только админ' });
     }
-    if (!realName || !username || !facultyId || !['faculty_lead', 'faculty_helper'].includes(role)) {
+    if (!realName || !username || !facultyId || !['faculty_responsible', 'faculty_helper'].includes(role)) {
       return res.status(400).json({ error: 'Заполни имя, Telegram, факультет и роль' });
     }
+    const cleanCompetencies = Array.isArray(competencies)
+      ? competencies.filter((item: string) => state.facultyCompetencies?.includes(item))
+      : [];
     const sanitizedUsername = username.startsWith('@') ? username : '@' + username;
     let user = state.users.find((u) => u.username.toLowerCase() === sanitizedUsername.toLowerCase());
     if (user) {
@@ -1308,6 +1355,8 @@ async function startServer() {
       user.role = role;
       user.facultyId = facultyId;
       user.registered = Boolean(user.telegramId);
+      user.competencies = role === 'faculty_helper' ? cleanCompetencies : [];
+      user.primaryCompetency = user.competencies[0] || '';
     } else {
       user = {
         id: 'u_' + Date.now(),
@@ -1318,8 +1367,8 @@ async function startServer() {
         avatarSeed: sanitizedUsername.toLowerCase(),
         birthday: '01.01',
         registered: false,
-        competencies: [],
-        primaryCompetency: '',
+        competencies: role === 'faculty_helper' ? cleanCompetencies : [],
+        primaryCompetency: role === 'faculty_helper' ? cleanCompetencies[0] || '' : '',
       };
       state.users.push(user);
       state.messages[user.id] = [];
@@ -1346,7 +1395,7 @@ async function startServer() {
   });
 
   app.post('/api/faculty/task/create', async (req, res) => {
-    const { requesterId, facultyId, title, description, deadline, assignedTo, reminders } = req.body;
+    const { requesterId, facultyId, title, description, deadline, assignedTo, reminders, competency } = req.body;
     const state = loadDatabase();
     if (!isAdminUser(state, requesterId) && !state.users.some((u) => u.id === requesterId && u.role === 'organizer')) {
       return res.status(403).json({ error: 'Создавать задачи факультетам могут только мегаорги' });
@@ -1371,7 +1420,7 @@ async function startServer() {
       assignedTo: assigneeIds,
       creatorId: requesterId,
       facultyId,
-      competency: 'Факультет',
+      competency: String(competency || '').trim() || 'Факультет',
       sow: '',
       tips: [],
       status: 'waiting',
@@ -1393,7 +1442,7 @@ async function startServer() {
   });
 
   app.post('/api/faculty/task/update', (req, res) => {
-    const { requesterId, taskId, title, description, deadline, assignedTo, reminders } = req.body;
+    const { requesterId, taskId, title, description, deadline, assignedTo, reminders, facultyId, competency } = req.body;
     const state = loadDatabase();
     const task = state.tasks.find((item) => item.id === taskId);
     if (!task) return res.status(404).json({ error: 'Задача не найдена' });
@@ -1403,6 +1452,8 @@ async function startServer() {
     if (title !== undefined) task.title = title;
     if (description !== undefined) task.description = description;
     if (deadline !== undefined) task.deadline = deadline;
+    if (facultyId !== undefined) task.facultyId = facultyId;
+    if (competency !== undefined) task.competency = String(competency || '').trim() || 'Факультет';
     if (Array.isArray(assignedTo)) task.assignedTo = assignedTo.filter(Boolean);
     if (Array.isArray(reminders)) {
       task.reminders = reminders.slice(0, 3).map((item: any, index: number) => ({
@@ -1918,9 +1969,13 @@ async function startServer() {
       await fetch(`${tgApiBase}/bot${botToken}/setChatMenuButton`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ menu_button: { type: 'commands' } })
+        body: JSON.stringify({
+          menu_button: webAppUrl
+            ? { type: 'web_app', text: 'Открыть', web_app: { url: webAppUrl } }
+            : { type: 'commands' },
+        })
       });
-      console.log('Telegram commands configured. Mini App menu is set per chat.');
+      console.log('Telegram commands configured. Mini App menu button configured.');
     } catch (err: any) {
       console.error('Failed to configure Telegram commands/menu:', err.message);
     }

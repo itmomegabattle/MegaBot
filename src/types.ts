@@ -1,4 +1,4 @@
-export type UserRole = 'admin' | 'organizer' | 'faculty_lead' | 'faculty_helper';
+export type UserRole = 'admin' | 'organizer' | 'faculty_responsible' | 'faculty_helper';
 
 export interface User {
   id: string;
@@ -85,6 +85,7 @@ export interface BotMessage {
 export interface SimulationState {
   users: User[];
   faculties?: Faculty[];
+  facultyCompetencies?: string[];
   competencies?: string[];
   availabilities: Record<string, Availability>;
   meetings: Meeting[];

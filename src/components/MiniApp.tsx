@@ -184,9 +184,10 @@ export default function MiniApp({
   const [editingUserId, setEditingUserId] = useState<string | null>(null);
   const [userDraft, setUserDraft] = useState({ realName: '', username: '', birthday: '', role: 'organizer' as User['role'], competencies: [] as string[], primaryCompetency: '' });
   const [newCompetency, setNewCompetency] = useState('');
-  const [facultyUserDraft, setFacultyUserDraft] = useState({ realName: '', username: '', role: 'faculty_lead' as User['role'], facultyId: '' });
-  const [facultyTaskDraft, setFacultyTaskDraft] = useState({ facultyId: '', title: '', description: '', deadline: '', assignedTo: [] as string[], reminders: [{ type: 'before_deadline', value: 2, unit: 'days' }] as any[] });
+  const [facultyUserDraft, setFacultyUserDraft] = useState({ realName: '', username: '', role: 'faculty_responsible' as User['role'], facultyId: '', competencies: [] as string[] });
+  const [facultyTaskDraft, setFacultyTaskDraft] = useState({ facultyId: '', competency: '', title: '', description: '', deadline: '', assignedTo: [] as string[], reminders: [{ type: 'before_deadline', value: 2, unit: 'days' }] as any[] });
   const [editingFacultyTaskId, setEditingFacultyTaskId] = useState<string | null>(null);
+  const [newFacultyCompetency, setNewFacultyCompetency] = useState('');
 
   const isAdmin = currentUser.role === 'admin';
   const votedUsers = useMemo(
@@ -208,12 +209,25 @@ export default function MiniApp({
     acc[key].push(task);
     return acc;
   }, {});
+  const facultyTasksByCompetency = state.tasks
+    .filter((task) => task.facultyId)
+    .reduce<Record<string, Task[]>>((acc, task) => {
+      const key = task.competency || 'Факультет';
+      if (!acc[key]) acc[key] = [];
+      acc[key].push(task);
+      return acc;
+    }, {});
   const teamUsers = isAdmin ? state.users : [currentUser, ...state.users.filter((user) => user.id !== currentUser.id)];
   const calendarUsers = [currentUser, ...state.users.filter((user) => user.id !== currentUser.id)];
   const visibleCalendarUsers = showFullCalendar ? calendarUsers : calendarUsers.slice(0, 3);
   const competencies = state.competencies || [];
   const faculties = state.faculties || [];
-  const facultyUsers = state.users.filter((user) => user.role === 'faculty_lead' || user.role === 'faculty_helper');
+  const facultyCompetencies = state.facultyCompetencies || [];
+  const facultyUsers = state.users.filter((user) => user.role === 'faculty_responsible' || user.role === 'faculty_helper');
+  const facultyTaskUsers = facultyUsers.filter((user) => facultyTaskDraft.facultyId === 'all' || user.facultyId === facultyTaskDraft.facultyId);
+  const facultyTaskMatchedUsers = facultyTaskDraft.competency
+    ? facultyTaskUsers.filter((user) => user.competencies?.includes(facultyTaskDraft.competency))
+    : facultyTaskUsers;
 
   const availabilityByDay = useMemo(
     () =>
@@ -566,6 +580,29 @@ export default function MiniApp({
     if (res.ok) onRefreshState();
   };
 
+  const addFacultyCompetency = async () => {
+    if (!newFacultyCompetency.trim()) return;
+    const res = await fetch('/api/faculty/competency/add', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ requesterId: currentUser.id, name: newFacultyCompetency.trim() }),
+    });
+    if (res.ok) {
+      setNewFacultyCompetency('');
+      onRefreshState();
+    }
+  };
+
+  const deleteFacultyCompetency = async (name: string) => {
+    if (!window.confirm(`Удалить компетенцию факультетов "${name}"? Она пропадёт у всех ответственных.`)) return;
+    const res = await fetch('/api/faculty/competency/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ requesterId: currentUser.id, name }),
+    });
+    if (res.ok) onRefreshState();
+  };
+
   const addFacultyUser = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!isAdmin) return;
@@ -575,7 +612,7 @@ export default function MiniApp({
       body: JSON.stringify({ requesterId: currentUser.id, ...facultyUserDraft }),
     });
     if (res.ok) {
-      setFacultyUserDraft({ realName: '', username: '', role: 'faculty_lead', facultyId: faculties[0]?.id || '' });
+      setFacultyUserDraft({ realName: '', username: '', role: 'faculty_responsible', facultyId: faculties[0]?.id || '', competencies: [] });
       onRefreshState();
     }
   };
@@ -600,10 +637,39 @@ export default function MiniApp({
       body: JSON.stringify({ requesterId: currentUser.id, taskId: editingFacultyTaskId, ...facultyTaskDraft }),
     });
     if (res.ok) {
-      setFacultyTaskDraft({ facultyId: faculties[0]?.id || '', title: '', description: '', deadline: '', assignedTo: [], reminders: [{ type: 'before_deadline', value: 2, unit: 'days' }] });
+      setFacultyTaskDraft({ facultyId: faculties[0]?.id || '', competency: '', title: '', description: '', deadline: '', assignedTo: [], reminders: [{ type: 'before_deadline', value: 2, unit: 'days' }] });
       setEditingFacultyTaskId(null);
       onRefreshState();
     }
+  };
+
+  const toggleFacultyDraftCompetency = (name: string) => {
+    setFacultyUserDraft((prev) => ({
+      ...prev,
+      competencies: prev.competencies.includes(name)
+        ? prev.competencies.filter((item) => item !== name)
+        : [...prev.competencies, name],
+    }));
+  };
+
+  const setFacultyTaskScope = (facultyId: string) => {
+    setFacultyTaskDraft((prev) => {
+      const scopedUsers = facultyUsers.filter((user) => facultyId === 'all' || user.facultyId === facultyId);
+      const matched = prev.competency
+        ? scopedUsers.filter((user) => user.competencies?.includes(prev.competency)).map((user) => user.id)
+        : [];
+      return { ...prev, facultyId, assignedTo: matched };
+    });
+  };
+
+  const setFacultyTaskCompetency = (competency: string) => {
+    setFacultyTaskDraft((prev) => {
+      const scopedUsers = facultyUsers.filter((user) => prev.facultyId === 'all' || user.facultyId === prev.facultyId);
+      const matched = competency
+        ? scopedUsers.filter((user) => user.competencies?.includes(competency)).map((user) => user.id)
+        : [];
+      return { ...prev, competency, assignedTo: matched };
+    });
   };
 
   const toggleDraftCompetency = (name: string) => {
@@ -1336,7 +1402,31 @@ export default function MiniApp({
             ) : (
               <>
                 <div className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
-                  <h2 className="font-black">Ответственные</h2>
+                  <div className="flex items-center justify-between gap-3">
+                    <h2 className="font-black">Компетенции факультетов</h2>
+                  </div>
+                  <div className="mt-3 flex gap-2">
+                    <input value={newFacultyCompetency} onChange={(e) => setNewFacultyCompetency(e.target.value)} className={inputClass} placeholder="Звук, экраны, свет" />
+                    <button type="button" onClick={addFacultyCompetency} className={miniButtonClass}>
+                      <Plus className="h-4 w-4" />
+                    </button>
+                  </div>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {facultyCompetencies.length === 0 ? (
+                      <span className="text-sm font-bold text-slate-400">Пока нет компетенций</span>
+                    ) : facultyCompetencies.map((name) => (
+                      <span key={name} className="inline-flex items-center gap-2 rounded-full bg-blue-50 px-3 py-1.5 text-sm font-black text-[#0050ff]">
+                        {name}
+                        <button type="button" onClick={() => deleteFacultyCompetency(name)} className="rounded-full p-0.5 text-[#0050ff] transition hover:bg-blue-100 active:scale-95">
+                          <X className="h-3.5 w-3.5" />
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
+                  <h2 className="font-black">Ответственные и хэлперы</h2>
                   <form onSubmit={addFacultyUser} className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
                     <Field label="Факультет">
                       <select value={facultyUserDraft.facultyId} onChange={(e) => setFacultyUserDraft((prev) => ({ ...prev, facultyId: e.target.value }))} className={inputClass}>
@@ -1346,8 +1436,8 @@ export default function MiniApp({
                     </Field>
                     <Field label="Роль">
                       <select value={facultyUserDraft.role} onChange={(e) => setFacultyUserDraft((prev) => ({ ...prev, role: e.target.value as User['role'] }))} className={inputClass}>
-                        <option value="faculty_lead">Мегаотв</option>
-                        <option value="faculty_helper">Отв</option>
+                        <option value="faculty_responsible">Ответственный</option>
+                        <option value="faculty_helper">Хэлпер</option>
                       </select>
                     </Field>
                     <Field label="Имя">
@@ -1356,6 +1446,20 @@ export default function MiniApp({
                     <Field label="Telegram">
                       <input value={facultyUserDraft.username} onChange={(e) => setFacultyUserDraft((prev) => ({ ...prev, username: e.target.value }))} className={inputClass} placeholder="@username" />
                     </Field>
+                    {facultyUserDraft.role === 'faculty_helper' && (
+                      <Field label="Компетенции">
+                        <div className="grid grid-cols-1 gap-2 rounded-2xl border border-slate-200 bg-slate-50 p-2 sm:grid-cols-2">
+                          {facultyCompetencies.length === 0 ? (
+                            <div className="text-sm font-bold text-slate-400">Сначала добавь компетенции выше</div>
+                          ) : facultyCompetencies.map((name) => (
+                            <label key={name} className="flex items-center gap-2 rounded-xl bg-white px-3 py-2 text-sm font-semibold">
+                              <input type="checkbox" checked={facultyUserDraft.competencies.includes(name)} onChange={() => toggleFacultyDraftCompetency(name)} />
+                              <span>{name}</span>
+                            </label>
+                          ))}
+                        </div>
+                      </Field>
+                    )}
                     <button className={`${primaryButtonClass} sm:col-span-2`}>Добавить ответственного</button>
                   </form>
                   <div className="mt-4 space-y-3">
@@ -1368,17 +1472,26 @@ export default function MiniApp({
                             {people.length === 0 ? (
                               <div className="text-sm font-bold text-slate-400">Пока никого нет</div>
                             ) : people.map((user) => (
-                              <div key={user.id} className="flex items-center justify-between gap-3 rounded-xl bg-white px-3 py-2 text-sm">
-                                <div>
-                                  <div className="font-black">{user.realName}</div>
-                                  <a href={telegramLink(user.username)} target="_blank" rel="noreferrer" className="font-bold text-[#0050ff]">{user.username}</a>
+                              <div key={user.id} className="rounded-xl bg-white px-3 py-2 text-sm">
+                                <div className="flex items-center justify-between gap-3">
+                                  <div>
+                                    <div className="font-black">{user.realName}</div>
+                                    <a href={telegramLink(user.username)} target="_blank" rel="noreferrer" className="font-bold text-[#0050ff]">{user.username}</a>
+                                  </div>
+                                  <div className="flex items-center gap-2">
+                                    <span className="rounded-full bg-blue-50 px-2.5 py-1 text-xs font-black text-[#0050ff]">{user.role === 'faculty_helper' ? 'Хэлпер' : 'Ответственный'}</span>
+                                    <button onClick={() => deleteFacultyUser(user.id)} className={`${miniButtonClass} border-rose-100 bg-rose-50 text-rose-600`}>
+                                      <Trash2 className="h-4 w-4" />
+                                    </button>
+                                  </div>
                                 </div>
-                                <div className="flex items-center gap-2">
-                                  <span className="rounded-full bg-blue-50 px-2.5 py-1 text-xs font-black text-[#0050ff]">{user.role === 'faculty_lead' ? 'Мегаотв' : 'Отв'}</span>
-                                  <button onClick={() => deleteFacultyUser(user.id)} className={`${miniButtonClass} border-rose-100 bg-rose-50 text-rose-600`}>
-                                    <Trash2 className="h-4 w-4" />
-                                  </button>
-                                </div>
+                                {user.competencies?.length ? (
+                                  <div className="mt-2 flex flex-wrap gap-1">
+                                    {user.competencies.map((name) => (
+                                      <span key={name} className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-bold text-slate-500">{name}</span>
+                                    ))}
+                                  </div>
+                                ) : null}
                               </div>
                             ))}
                           </div>
@@ -1391,16 +1504,28 @@ export default function MiniApp({
                 <form onSubmit={createFacultyTask} className="space-y-3 rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
                   <h2 className="font-black">{editingFacultyTaskId ? 'Редактировать задачу' : 'Задача факультету'}</h2>
                   <Field label="Факультет">
-                    <select value={facultyTaskDraft.facultyId} onChange={(e) => setFacultyTaskDraft((prev) => ({ ...prev, facultyId: e.target.value, assignedTo: [] }))} className={inputClass}>
+                    <select value={facultyTaskDraft.facultyId} onChange={(e) => setFacultyTaskScope(e.target.value)} className={inputClass}>
                       <option value="">Выбери факультет</option>
+                      <option value="all">Все факультеты</option>
                       {faculties.map((faculty) => <option key={faculty.id} value={faculty.id}>{faculty.name}</option>)}
+                    </select>
+                  </Field>
+                  <Field label="Компетенция">
+                    <select value={facultyTaskDraft.competency} onChange={(e) => setFacultyTaskCompetency(e.target.value)} className={inputClass}>
+                      <option value="">Без фильтра</option>
+                      {facultyCompetencies.map((name) => <option key={name} value={name}>{name}</option>)}
                     </select>
                   </Field>
                   <Field label="Исполнители">
                     <div className="space-y-2 rounded-2xl border border-slate-200 bg-slate-50 p-2">
-                      {facultyUsers.filter((user) => user.facultyId === facultyTaskDraft.facultyId).map((user) => (
-                        <label key={user.id} className="flex items-center justify-between rounded-xl bg-white px-3 py-2 text-sm font-semibold">
-                          <span>{user.realName}</span>
+                      {facultyTaskUsers.length === 0 ? (
+                        <div className="px-3 py-2 text-sm font-bold text-slate-400">Выбери факультет</div>
+                      ) : facultyTaskUsers.map((user) => (
+                        <label key={user.id} className={`flex items-center justify-between rounded-xl px-3 py-2 text-sm font-semibold ${facultyTaskDraft.competency && facultyTaskMatchedUsers.some((item) => item.id === user.id) ? 'bg-blue-50 text-[#0050ff]' : 'bg-white'}`}>
+                          <span>
+                            {user.realName}
+                            {user.competencies?.length ? <span className="ml-2 text-xs text-slate-400">{user.competencies.join(', ')}</span> : null}
+                          </span>
                           <input type="checkbox" checked={facultyTaskDraft.assignedTo.includes(user.id)} onChange={() => setFacultyTaskDraft((prev) => ({ ...prev, assignedTo: prev.assignedTo.includes(user.id) ? prev.assignedTo.filter((id) => id !== user.id) : [...prev.assignedTo, user.id] }))} />
                         </label>
                       ))}
@@ -1440,7 +1565,7 @@ export default function MiniApp({
                   </Field>
                   <button className={primaryButtonClass}>{editingFacultyTaskId ? 'Сохранить изменения' : 'Назначить задачу'}</button>
                   {editingFacultyTaskId && (
-                    <button type="button" onClick={() => { setEditingFacultyTaskId(null); setFacultyTaskDraft({ facultyId: faculties[0]?.id || '', title: '', description: '', deadline: '', assignedTo: [], reminders: [{ type: 'before_deadline', value: 2, unit: 'days' }] }); }} className={secondaryButtonClass}>
+                    <button type="button" onClick={() => { setEditingFacultyTaskId(null); setFacultyTaskDraft({ facultyId: faculties[0]?.id || '', competency: '', title: '', description: '', deadline: '', assignedTo: [], reminders: [{ type: 'before_deadline', value: 2, unit: 'days' }] }); }} className={secondaryButtonClass}>
                       Отмена
                     </button>
                   )}
@@ -1453,7 +1578,9 @@ export default function MiniApp({
                       <EmptyState text="Пока нет задач факультетам" />
                     ) : (
                       state.tasks.filter((task) => task.facultyId).map((task) => {
-                        const faculty = faculties.find((item) => item.id === task.facultyId);
+                        const faculty = task.facultyId === 'all'
+                          ? { name: 'Все факультеты' }
+                          : faculties.find((item) => item.id === task.facultyId);
                         const executors = taskAssigneeIds(task).map((id) => state.users.find((user) => user.id === id)?.realName).filter(Boolean).join(', ');
                         const canEdit = isAdmin || task.creatorId === currentUser.id;
                         return (
@@ -1472,6 +1599,7 @@ export default function MiniApp({
                                     setEditingFacultyTaskId(task.id);
                                     setFacultyTaskDraft({
                                       facultyId: task.facultyId || '',
+                                      competency: task.competency || '',
                                       title: task.title,
                                       description: task.description,
                                       deadline: formatDateShort(task.deadline),
@@ -1492,14 +1620,49 @@ export default function MiniApp({
                     )}
                   </div>
                 </div>
+
+                <div className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <h2 className="font-black">Бэклог задач факультетов</h2>
+                    <a href="/api/tasks/export" target="_blank" rel="noreferrer" className={miniButtonClass}>
+                      <Download className="h-4 w-4" />
+                      Excel
+                    </a>
+                  </div>
+                  <div className="mt-3 space-y-3">
+                    {Object.keys(facultyTasksByCompetency).length === 0 ? (
+                      <EmptyState text="Бэклог пока пуст" />
+                    ) : Object.entries(facultyTasksByCompetency).map(([name, tasks]) => (
+                      <div key={name} className="rounded-2xl bg-slate-50 p-3">
+                        <div className="font-black">{name}</div>
+                        <div className="mt-2 space-y-2">
+                          {tasks.map((task) => {
+                            const creator = state.users.find((user) => user.id === task.creatorId);
+                            const executors = taskAssigneeIds(task).map((id) => state.users.find((user) => user.id === id)?.realName).filter(Boolean).join(', ');
+                            return (
+                              <div key={task.id} className="rounded-xl bg-white px-3 py-2 text-sm">
+                                <div className="font-black">{task.title}</div>
+                                <div className="mt-1 text-xs font-semibold text-slate-500">
+                                  {taskStatusText(task.status)} · назначено {formatDateShort(task.createdAt)} · дедлайн {formatDateShort(task.deadline)}
+                                </div>
+                                <div className="mt-1 text-xs text-slate-500">Автор: {creator?.realName || 'не указан'} · Исполнители: {executors || 'не выбраны'}</div>
+                                <div className="mt-2 text-sm text-slate-600">{task.description}</div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
               </>
             )}
           </section>
         )}
       </main>
 
-      <nav className="fixed inset-x-0 bottom-0 z-40 border-t border-blue-100 bg-white/95 px-3 pb-[calc(env(safe-area-inset-bottom)+10px)] pt-2 shadow-[0_-12px_30px_rgba(0,80,255,0.08)] backdrop-blur">
-        <div className="mx-auto grid max-w-3xl grid-cols-4 gap-1">
+      <nav className="fixed inset-x-0 bottom-0 z-40 border-t border-blue-100 bg-white/95 px-2 pb-[calc(env(safe-area-inset-bottom)+8px)] pt-2 shadow-[0_-12px_30px_rgba(0,80,255,0.08)] backdrop-blur">
+        <div className="mx-auto grid max-w-3xl grid-cols-5 gap-1">
           <NavButton icon={<CalendarDays />} label="Слоты" active={activeTab === 'slots'} onClick={() => setActiveTab('slots')} />
           <NavButton icon={<Users />} label="Встречи" active={activeTab === 'meetings'} onClick={() => setActiveTab('meetings')} />
           <NavButton icon={<BriefcaseBusiness />} label="Задачи" active={activeTab === 'tasks'} onClick={() => setActiveTab('tasks')} />
@@ -1554,9 +1717,9 @@ function HeroCard({ title, text, right, caption }: { title: string; text: string
 
 function NavButton({ icon, label, active, onClick }: { icon: React.ReactElement; label: string; active: boolean; onClick: () => void }) {
   return (
-    <button onClick={onClick} className={`flex h-16 flex-col items-center justify-center gap-1 rounded-3xl text-xs font-black ${pressClass} ${active ? 'bg-[#0050ff] text-white shadow-[0_10px_24px_rgba(0,80,255,0.24)] hover:bg-[#0a5cff] active:bg-[#0045d8]' : 'text-slate-500 hover:bg-blue-50 active:bg-blue-100'}`}>
-      {React.cloneElement(icon, { className: 'h-5 w-5' })}
-      {label}
+    <button onClick={onClick} className={`flex h-14 min-w-0 flex-col items-center justify-center gap-0.5 rounded-2xl px-1 text-[10px] font-black leading-tight ${pressClass} ${active ? 'bg-[#0050ff] text-white shadow-[0_10px_24px_rgba(0,80,255,0.24)] hover:bg-[#0a5cff] active:bg-[#0045d8]' : 'text-slate-500 hover:bg-blue-50 active:bg-blue-100'}`}>
+      {React.cloneElement(icon, { className: 'h-4 w-4' })}
+      <span className="truncate">{label}</span>
     </button>
   );
 }
