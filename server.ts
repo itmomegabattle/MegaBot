@@ -347,6 +347,36 @@ async function startServer() {
     });
   }
 
+  async function configureChatMenuButton(chatId: string | number, user?: User) {
+    const botToken = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
+    if (!botToken) return;
+    const tgApiBase = process.env.TELEGRAM_API_BASE || 'https://api.telegram.org';
+    const webAppUrl = process.env.WEBAPP_URL;
+    const menuButton = !isFacultyUser(user) && webAppUrl
+      ? {
+          type: 'web_app',
+          text: 'Открыть',
+          web_app: { url: webAppUrl },
+        }
+      : { type: 'commands' };
+
+    try {
+      const response = await fetch(`${tgApiBase}/bot${botToken}/setChatMenuButton`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: chatId,
+          menu_button: menuButton,
+        }),
+      });
+      if (!response.ok) {
+        console.error('Telegram setChatMenuButton failed:', response.status, await response.text());
+      }
+    } catch (err) {
+      console.error('Telegram setChatMenuButton failed:', err);
+    }
+  }
+
   async function answerCallback(callbackQueryId: string, text?: string) {
     const botToken = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
     if (!botToken) return;
@@ -797,6 +827,7 @@ async function startServer() {
       if (envRole === 'admin' && user.role !== 'admin') {
         user.role = 'admin';
       }
+      await configureChatMenuButton(chatId, user);
 
       if (!state.messages[user.id]) state.messages[user.id] = [];
       state.messages[user.id].push({
@@ -1884,20 +1915,12 @@ async function startServer() {
         })
       });
 
-      if (webAppUrl) {
-        await fetch(`${tgApiBase}/bot${botToken}/setChatMenuButton`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            menu_button: {
-              type: 'web_app',
-              text: 'Открыть приложение',
-              web_app: { url: webAppUrl }
-            }
-          })
-        });
-      }
-      console.log('Telegram commands and Mini App menu configured.');
+      await fetch(`${tgApiBase}/bot${botToken}/setChatMenuButton`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ menu_button: { type: 'commands' } })
+      });
+      console.log('Telegram commands configured. Mini App menu is set per chat.');
     } catch (err: any) {
       console.error('Failed to configure Telegram commands/menu:', err.message);
     }
