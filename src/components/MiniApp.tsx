@@ -713,7 +713,7 @@ export default function MiniApp({
     meetings: 'Собрания',
     tasks: 'Задачи',
     team: 'Мегаорги',
-    faculties: 'Мегафакеры',
+    faculties: 'Факультеты',
   }[activeTab] || 'Моя неделя';
 
   return (
@@ -1480,7 +1480,7 @@ export default function MiniApp({
 
                 <div className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
                   <button type="button" onClick={() => setShowFacultyPeople((value) => !value)} className="flex w-full items-center justify-between gap-3 text-left">
-                    <span className="font-black">Люди на факультетах</span>
+                    <span className="font-black">Составы ответственных</span>
                     <span className={`${miniButtonClass} w-auto`}>
                       {showFacultyPeople ? <Minus className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
                       {showFacultyPeople ? 'Свернуть' : 'Показать'}
@@ -1543,9 +1543,7 @@ export default function MiniApp({
                         <option value="Ответственные">Ответственные</option>
                         {facultyCompetencies.map((name) => <option key={name} value={name}>{name}</option>)}
                       </select>
-                      {facultyTaskUsers.length === 0 ? (
-                        <div className="px-3 py-2 text-sm font-bold text-slate-400">Выбери факультет</div>
-                      ) : facultyTaskUsers.map((user) => (
+                      {facultyTaskUsers.map((user) => (
                         <label key={user.id} className={`flex items-center justify-between rounded-xl px-3 py-2 text-sm font-semibold ${facultyTaskDraft.competency && facultyTaskMatchedUsers.some((item) => item.id === user.id) ? 'bg-blue-50 text-[#0050ff]' : 'bg-white'}`}>
                           <span>
                             {user.realName}
@@ -1568,19 +1566,24 @@ export default function MiniApp({
                   <Field label="Напоминания">
                     <div className="space-y-2 rounded-2xl border border-slate-200 bg-slate-50 p-2">
                       {facultyTaskDraft.reminders.map((reminder, index) => (
-                        <div key={index} className="grid grid-cols-1 gap-2 sm:grid-cols-[1.2fr_0.9fr_1fr]">
-                          <select value={reminder.type} onChange={(e) => setFacultyTaskDraft((prev) => ({ ...prev, reminders: prev.reminders.map((item, i) => i === index ? { ...item, type: e.target.value } : item) }))} className={selectClass}>
-                            <option value="before_deadline">За N до дедлайна</option>
-                            <option value="repeat">Каждые N</option>
-                          </select>
-                          <label className="flex items-center gap-2 rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-black text-slate-500 transition focus-within:border-[#0050ff] focus-within:bg-white">
-                            <span>N =</span>
-                            <input value={reminder.value} onChange={(e) => setFacultyTaskDraft((prev) => ({ ...prev, reminders: prev.reminders.map((item, i) => i === index ? { ...item, value: Number(e.target.value) || 1 } : item) }))} className="min-w-0 flex-1 bg-transparent text-slate-950 outline-none" inputMode="numeric" />
-                          </label>
-                          <select value={reminder.unit} onChange={(e) => setFacultyTaskDraft((prev) => ({ ...prev, reminders: prev.reminders.map((item, i) => i === index ? { ...item, unit: e.target.value } : item) }))} className={selectClass}>
-                            <option value="days">дней</option>
-                            <option value="hours">часов</option>
-                          </select>
+                        <div key={index} className="rounded-2xl border border-blue-100 bg-white p-3 shadow-sm">
+                          <div className="mb-2 text-xs font-black uppercase text-slate-400">
+                            {['Первое напоминание', 'Второе напоминание', 'Третье напоминание'][index] || 'Напоминание'}
+                          </div>
+                          <div className="grid grid-cols-1 gap-2 sm:grid-cols-[1.2fr_0.9fr_1fr]">
+                            <select value={reminder.type} onChange={(e) => setFacultyTaskDraft((prev) => ({ ...prev, reminders: prev.reminders.map((item, i) => i === index ? { ...item, type: e.target.value } : item) }))} className={selectClass}>
+                              <option value="before_deadline">За N до дедлайна</option>
+                              <option value="repeat">Каждые N</option>
+                            </select>
+                            <label className="flex items-center gap-2 rounded-2xl border border-blue-100 bg-white px-3 py-2 text-sm font-black text-slate-500 shadow-sm transition focus-within:border-[#0050ff] focus-within:bg-white">
+                              <span>N =</span>
+                              <input value={reminder.value ?? ''} onChange={(e) => setFacultyTaskDraft((prev) => ({ ...prev, reminders: prev.reminders.map((item, i) => i === index ? { ...item, value: e.target.value === '' ? '' : Number(e.target.value) } : item) }))} className="min-w-0 flex-1 bg-transparent text-slate-950 outline-none" inputMode="numeric" />
+                            </label>
+                            <select value={reminder.unit} onChange={(e) => setFacultyTaskDraft((prev) => ({ ...prev, reminders: prev.reminders.map((item, i) => i === index ? { ...item, unit: e.target.value } : item) }))} className={selectClass}>
+                              <option value="days">дней</option>
+                              <option value="hours">часов</option>
+                            </select>
+                          </div>
                         </div>
                       ))}
                       {facultyTaskDraft.reminders.length < 3 && (
@@ -1695,7 +1698,7 @@ export default function MiniApp({
           <NavButton icon={<Users />} label="Встречи" active={activeTab === 'meetings'} onClick={() => setActiveTab('meetings')} />
           <NavButton icon={<BriefcaseBusiness />} label="Задачи" active={activeTab === 'tasks'} onClick={() => setActiveTab('tasks')} />
           <NavButton icon={<Shield />} label="Команда" active={activeTab === 'team'} onClick={() => setActiveTab('team')} />
-          <NavButton icon={<GraduationCap />} label="Мегафакеры" active={activeTab === 'faculties'} onClick={() => setActiveTab('faculties')} />
+          <NavButton icon={<GraduationCap />} label="Факультеты" active={activeTab === 'faculties'} onClick={() => setActiveTab('faculties')} />
         </div>
       </nav>
     </div>
@@ -1704,7 +1707,7 @@ export default function MiniApp({
 
 const pressClass = 'transition duration-150 hover:brightness-105 active:scale-[0.97] active:brightness-90 active:rounded-2xl';
 const inputClass = 'w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-3 text-sm font-semibold outline-none transition focus:border-[#0050ff] focus:bg-white';
-const selectClass = `${inputClass} appearance-none cursor-pointer bg-[linear-gradient(45deg,transparent_50%,#0050ff_50%),linear-gradient(135deg,#0050ff_50%,transparent_50%)] bg-[length:6px_6px,6px_6px] bg-[position:calc(100%-18px)_50%,calc(100%-13px)_50%] bg-no-repeat pr-10 hover:border-blue-200 hover:bg-white`;
+const selectClass = 'w-full appearance-none rounded-2xl border border-blue-100 bg-white px-3 py-3 pr-10 text-sm font-black text-slate-950 shadow-sm outline-none transition hover:border-[#0050ff]/40 hover:bg-blue-50/40 focus:border-[#0050ff] focus:bg-white focus:shadow-[0_0_0_4px_rgba(0,80,255,0.10)] [background-image:linear-gradient(45deg,transparent_50%,#0050ff_50%),linear-gradient(135deg,#0050ff_50%,transparent_50%)] [background-position:calc(100%-18px)_50%,calc(100%-13px)_50%] [background-repeat:no-repeat] [background-size:6px_6px,6px_6px]';
 const primaryButtonClass = `flex w-full items-center justify-center gap-2 rounded-3xl bg-[#0050ff] px-5 py-3 text-sm font-black text-white shadow-[0_12px_28px_rgba(0,80,255,0.24)] hover:bg-[#0a5cff] active:bg-[#0045d8] ${pressClass}`;
 const primaryCompactButtonClass = `flex items-center justify-center gap-2 rounded-full bg-[#0050ff] px-4 py-2 text-xs font-black text-white shadow-[0_10px_24px_rgba(0,80,255,0.22)] hover:bg-[#0a5cff] active:bg-[#0045d8] ${pressClass}`;
 const secondaryButtonClass = `flex items-center justify-center gap-2 rounded-full border border-blue-100 bg-blue-50 px-3 py-2 text-xs font-black text-[#0050ff] hover:bg-blue-100 active:bg-blue-200 ${pressClass}`;
