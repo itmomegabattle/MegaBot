@@ -96,6 +96,14 @@ const dateForSlotDay = (absoluteDayIndex: number) => {
 };
 
 const formatDayMonth = (date: Date) => `${String(date.getDate()).padStart(2, '0')}.${String(date.getMonth() + 1).padStart(2, '0')}`;
+const weekdayShortByDate = (value?: string) => {
+  const normalized = formatDateShort(value);
+  const match = normalized.match(/^(\d{2})\.(\d{2})(?:\.(\d{2}))?$/);
+  if (!match) return '';
+  const year = match[3] ? Number(`20${match[3]}`) : new Date().getFullYear();
+  const date = new Date(year, Number(match[2]) - 1, Number(match[1]));
+  return dayLabels[date.getDay() === 0 ? 6 : date.getDay() - 1]?.short || '';
+};
 
 const alignedSlots = (availability?: { slots?: Record<number, number[]>; weekStart?: string }) => {
   const result: Record<number, number[]> = {};
@@ -158,6 +166,7 @@ export default function MiniApp({
   const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
   const [showCompletedTasks, setShowCompletedTasks] = useState(false);
   const [showTaskLog, setShowTaskLog] = useState(false);
+  const [showFullCalendar, setShowFullCalendar] = useState(false);
 
   const [newUserRealName, setNewUserRealName] = useState('');
   const [newUserUsername, setNewUserUsername] = useState('');
@@ -190,6 +199,8 @@ export default function MiniApp({
     return acc;
   }, {});
   const teamUsers = isAdmin ? state.users : [currentUser, ...state.users.filter((user) => user.id !== currentUser.id)];
+  const calendarUsers = [currentUser, ...state.users.filter((user) => user.id !== currentUser.id)];
+  const visibleCalendarUsers = showFullCalendar ? calendarUsers : calendarUsers.slice(0, 3);
   const competencies = state.competencies || [];
 
   const availabilityByDay = useMemo(
@@ -772,7 +783,7 @@ export default function MiniApp({
                       </tr>
                     </thead>
                     <tbody>
-                      {state.users.map((user) => (
+                      {visibleCalendarUsers.map((user) => (
                         <tr key={user.id} className="border-t border-slate-100">
                           <td className="sticky left-0 z-10 bg-white px-3 py-2">
                             <div className="font-black">{user.realName}</div>
@@ -794,6 +805,11 @@ export default function MiniApp({
                     </tbody>
                   </table>
                 </div>
+                {calendarUsers.length > 3 && (
+                  <button onClick={() => setShowFullCalendar((value) => !value)} className={`${secondaryButtonClass} mt-3`}>
+                    {showFullCalendar ? 'Скрыть участников' : `Показать всех (${calendarUsers.length})`}
+                  </button>
+                )}
               </div>
             )}
 
@@ -934,6 +950,8 @@ export default function MiniApp({
                           <p className="mt-1 text-sm text-slate-500">{meeting.topic || 'Нажми, чтобы посмотреть детали'}</p>
                         </div>
                         <div className="rounded-2xl bg-blue-50 px-3 py-2 text-right text-xs font-black text-[#0050ff]">
+                          {weekdayShortByDate(meeting.date)}
+                          <br />
                           {formatDateShort(meeting.date)}
                           <br />
                           {meeting.time}
@@ -944,7 +962,7 @@ export default function MiniApp({
                         <div className="mt-4 space-y-2 border-t border-slate-100 pt-4 text-sm text-slate-600" onClick={(event) => event.stopPropagation()}>
                           <InfoRow label="Автор" value={host?.realName || 'Организатор'} />
                           {host?.username && <InfoRow label="Telegram" value={host.username} href={telegramLink(host.username)} />}
-                          <InfoRow label="Дата" value={formatDateShort(meeting.date)} />
+                          <InfoRow label="Дата" value={`${weekdayShortByDate(meeting.date)} ${formatDateShort(meeting.date)}`} />
                           <InfoRow label="Время" value={meeting.time} />
                           <InfoRow label="Тип" value={meeting.type === 'general' ? 'Вся команда' : 'Выбранные люди'} />
                           {meeting.competency && <InfoRow label="Блок" value={meeting.competency} />}
