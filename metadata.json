@@ -1,0 +1,6 @@
+{
+  "name": "MegaBot Mini App",
+  "description": "Telegram Mini App для команды организаторов проекта: занятость, встречи, задачи и админ-панель.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
