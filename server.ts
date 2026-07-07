@@ -212,6 +212,15 @@ function alignedAvailabilitySlots(availability?: Availability) {
   return result;
 }
 
+function alignedHardUnavailableDays(availability?: Availability) {
+  if (!availability?.hardUnavailableDays) return [];
+  const savedWeekStart = availability.weekStart || currentWeekStartIso();
+  const weekOffset = Math.floor((new Date(currentWeekStartIso()).getTime() - new Date(savedWeekStart).getTime()) / (7 * 24 * 60 * 60 * 1000));
+  return availability.hardUnavailableDays
+    .map((day) => Number(day) - weekOffset * 7)
+    .filter((day) => Number.isFinite(day) && day >= 0 && day < 35);
+}
+
 function formatDateTimeShort(value?: string) {
   if (!value) return '';
   const date = new Date(value);
@@ -301,6 +310,7 @@ function loadDatabase(): SimulationState {
   });
   Object.values(state.availabilities).forEach((availability: any) => {
     if (availability.weekStart === undefined) availability.weekStart = '';
+    if (!Array.isArray(availability.hardUnavailableDays)) availability.hardUnavailableDays = [];
   });
 
   return state;
@@ -1507,7 +1517,7 @@ async function startServer() {
 
   // Save/Update User Availability
   app.post('/api/availability', (req, res) => {
-    const { userId, slots, weekStart } = req.body;
+    const { userId, slots, weekStart, hardUnavailableDays } = req.body;
     const state = loadDatabase();
 
     if (!isRegisteredUser(state, userId)) {
@@ -1517,6 +1527,9 @@ async function startServer() {
     state.availabilities[userId] = {
       userId,
       slots,
+      hardUnavailableDays: Array.isArray(hardUnavailableDays)
+        ? [...new Set(hardUnavailableDays.map((day: unknown) => Number(day)).filter((day: number) => Number.isFinite(day) && day >= 0 && day < 35))]
+        : [],
       weekStart: String(weekStart || ''),
       updatedAt: new Date().toISOString()
     };
@@ -1877,16 +1890,19 @@ async function startServer() {
       endHour: number;
       duration: number;
       count: number;
+      hardUnavailableCount: number;
       users: string[];
     }[] = [];
 
-    const durations = [8, 7, 6, 5, 4, 3, 2, 1];
+    const durations = [3, 4, 5, 6, 7, 8, 2, 1];
     for (let d = 0; d < 7; d++) {
+      const hardUnavailableUsers = state.users.filter((u) => alignedHardUnavailableDays(state.availabilities[u.id]).includes(d));
       for (const duration of durations) {
         for (let h = 16; h <= 24 - duration; h++) {
           const hoursWindow = Array.from({ length: duration }, (_, index) => h + index);
           const availableUsers = state.users
             .filter(u => {
+              if (alignedHardUnavailableDays(state.availabilities[u.id]).includes(d)) return false;
               const daySlots = alignedAvailabilitySlots(state.availabilities[u.id])?.[d] || [];
               return hoursWindow.every(hour => daySlots.includes(hour));
             })
@@ -1899,6 +1915,7 @@ async function startServer() {
               endHour: h + duration,
               duration,
               count: availableUsers.length,
+              hardUnavailableCount: hardUnavailableUsers.length,
               users: availableUsers
             });
           }
@@ -1907,9 +1924,11 @@ async function startServer() {
     }
 
     windowScores.sort((a, b) => {
-      const scoreA = a.count * a.duration;
-      const scoreB = b.count * b.duration;
-      return scoreB - scoreA || b.count - a.count || b.duration - a.duration || a.day - b.day || a.hour - b.hour;
+      return b.count - a.count
+        || a.hardUnavailableCount - b.hardUnavailableCount
+        || b.duration - a.duration
+        || a.day - b.day
+        || a.hour - b.hour;
     });
 
     const bestByDay = new Map<number, typeof windowScores[number]>();
@@ -1922,7 +1941,9 @@ async function startServer() {
 
     const suggestions = picked.map(s => {
       const hoursWindow = Array.from({ length: s.duration }, (_, index) => s.hour + index);
+      const hardUnavailableUsers = state.users.filter(u => alignedHardUnavailableDays(state.availabilities[u.id]).includes(s.day));
       const missingUsers = state.users.filter(u => {
+        if (alignedHardUnavailableDays(state.availabilities[u.id]).includes(s.day)) return true;
         const daySlots = alignedAvailabilitySlots(state.availabilities[u.id])?.[s.day] || [];
         return !hoursWindow.every(hour => daySlots.includes(hour));
       }).map(u => ({
@@ -1940,7 +1961,12 @@ async function startServer() {
         count: s.count,
         total: state.users.length,
         users: s.users,
-        missingUsers: missingUsers
+        missingUsers: missingUsers,
+        hardUnavailableUsers: hardUnavailableUsers.map(u => ({
+          id: u.id,
+          realName: u.realName,
+          username: u.username
+        }))
       };
     });
 

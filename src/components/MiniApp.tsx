@@ -25,7 +25,7 @@ interface MiniAppProps {
   currentUser: User;
   activeTab: string;
   setActiveTab: (tab: string) => void;
-  onSaveAvailability: (slots: Record<number, number[]>, weekStart: string) => Promise<boolean>;
+  onSaveAvailability: (slots: Record<number, number[]>, weekStart: string, hardUnavailableDays?: number[]) => Promise<boolean>;
   onScheduleMeeting: (meetingData: any) => Promise<boolean>;
   onCreateTask: (taskData: any) => Promise<boolean>;
   onClaimTask: (taskId: string) => void;
@@ -43,6 +43,7 @@ type MeetingSuggestion = {
   total: number;
   users: string[];
   missingUsers: Pick<User, 'id' | 'realName' | 'username'>[];
+  hardUnavailableUsers?: Pick<User, 'id' | 'realName' | 'username'>[];
 };
 
 const dayLabels = [
@@ -125,6 +126,15 @@ const alignedSlots = (availability?: { slots?: Record<number, number[]>; weekSta
   return result;
 };
 
+const alignedHardUnavailableDays = (availability?: { hardUnavailableDays?: number[]; weekStart?: string }) => {
+  if (!availability?.hardUnavailableDays) return [];
+  const savedWeekStart = availability.weekStart || currentWeekStart();
+  const weekOffset = Math.floor((new Date(currentWeekStart()).getTime() - new Date(savedWeekStart).getTime()) / (7 * 24 * 60 * 60 * 1000));
+  return availability.hardUnavailableDays
+    .map((day) => Number(day) - weekOffset * 7)
+    .filter((day) => Number.isFinite(day) && day >= 0 && day < maxSlotWeeks * 7);
+};
+
 export default function MiniApp({
   state,
   currentUser,
@@ -139,6 +149,7 @@ export default function MiniApp({
   onRefreshState,
 }: MiniAppProps) {
   const [slots, setSlots] = useState<Record<number, number[]>>({});
+  const [hardUnavailableDays, setHardUnavailableDays] = useState<number[]>([]);
   const [visibleWeeks, setVisibleWeeks] = useState(1);
   const [suggestions, setSuggestions] = useState<MeetingSuggestion[]>([]);
   const [suggesting, setSuggesting] = useState(false);
@@ -175,6 +186,7 @@ export default function MiniApp({
   const [showCompletedTasks, setShowCompletedTasks] = useState(false);
   const [showTaskLog, setShowTaskLog] = useState(false);
   const [showFullCalendar, setShowFullCalendar] = useState(false);
+  const [expandedAvailabilityDay, setExpandedAvailabilityDay] = useState<number | null>(null);
 
   const [newUserRealName, setNewUserRealName] = useState('');
   const [newUserUsername, setNewUserUsername] = useState('');
@@ -197,11 +209,15 @@ export default function MiniApp({
 
   const isAdmin = currentUser.role === 'admin';
   const votedUsers = useMemo(
-    () => state.users.filter((user) => Object.values(alignedSlots(state.availabilities[user.id])).some((day) => day.length > 0)),
+    () => state.users.filter((user) => {
+      const availability = state.availabilities[user.id];
+      return Object.values(alignedSlots(availability)).some((day) => day.length > 0)
+        || alignedHardUnavailableDays(availability).length > 0;
+    }),
     [state.availabilities, state.users],
   );
   const majority = Math.floor(state.users.length / 2) + 1;
-  const firstWeekFilled = Array.from({ length: 7 }, (_, dayIndex) => slots[dayIndex] || []).some((day) => day.length > 0);
+  const firstWeekFilled = Array.from({ length: 7 }, (_, dayIndex) => (slots[dayIndex] || []).length > 0 || hardUnavailableDays.includes(dayIndex)).some(Boolean);
   const myTasks = state.tasks.filter((task) => taskAssigneeIds(task).includes(currentUser.id) && task.status !== 'completed');
   const openTasks = state.tasks.filter((task) => task.status === 'open');
   const completedTasks = state.tasks
@@ -243,6 +259,14 @@ export default function MiniApp({
     () =>
       dayLabels.map((day, dayIndex) => ({
         ...day,
+        users: state.users
+          .map((user) => ({
+            ...user,
+            daySlots: alignedSlots(state.availabilities[user.id])?.[dayIndex] || [],
+            hardUnavailable: alignedHardUnavailableDays(state.availabilities[user.id]).includes(dayIndex),
+          }))
+          .filter((user) => user.daySlots.length > 0),
+        hardUnavailableUsers: state.users.filter((user) => alignedHardUnavailableDays(state.availabilities[user.id]).includes(dayIndex)),
         count: state.users.filter((user) => {
           const daySlots = alignedSlots(state.availabilities[user.id])?.[dayIndex] || [];
           return daySlots.length > 0;
@@ -275,7 +299,11 @@ export default function MiniApp({
     const rows = state.users.map((user) => [
       user.realName,
       user.username,
-      ...dayLabels.map((_, dayIndex) => formatHours(alignedSlots(state.availabilities[user.id])?.[dayIndex] || [])),
+      ...dayLabels.map((_, dayIndex) => (
+        alignedHardUnavailableDays(state.availabilities[user.id]).includes(dayIndex)
+          ? 'ЖЕЛЕЗНО НЕ МОГУ'
+          : formatHours(alignedSlots(state.availabilities[user.id])?.[dayIndex] || [])
+      )),
     ]);
     const csv = [header, ...rows]
       .map((row) => row.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(';'))
@@ -290,20 +318,25 @@ export default function MiniApp({
   };
 
   useEffect(() => {
-    const saved = alignedSlots(state.availabilities[currentUser.id]);
+    const availability = state.availabilities[currentUser.id];
+    const saved = alignedSlots(availability);
+    const savedHardUnavailableDays = alignedHardUnavailableDays(availability);
     const nextSlots: Record<number, number[]> = {};
     Array.from({ length: maxSlotWeeks * 7 }, (_, index) => {
       nextSlots[index] = [...(saved?.[index] || [])];
     });
+    setHardUnavailableDays(savedHardUnavailableDays);
     const lastFilledDay = Object.entries(nextSlots)
       .filter(([, value]) => value.length > 0)
       .map(([key]) => Number(key))
+      .concat(savedHardUnavailableDays)
       .sort((a, b) => b - a)[0];
     setVisibleWeeks(Math.min(maxSlotWeeks, Math.max(1, lastFilledDay === undefined ? 1 : Math.floor(lastFilledDay / 7) + 1)));
     setSlots(nextSlots);
   }, [currentUser.id, state.availabilities]);
 
   const toggleSlot = (day: number, hour: number) => {
+    if (hardUnavailableDays.includes(day)) return;
     setWeekSaved(false);
     setSlotError('');
     setHasUnsavedSlots(true);
@@ -317,6 +350,7 @@ export default function MiniApp({
   };
 
   const selectWholeDay = (day: number) => {
+    if (hardUnavailableDays.includes(day)) return;
     setWeekSaved(false);
     setSlotError('');
     setHasUnsavedSlots(true);
@@ -324,6 +358,16 @@ export default function MiniApp({
       const full = (prev[day] || []).length === hours.length;
       return { ...prev, [day]: full ? [] : [...hours] };
     });
+  };
+
+  const toggleHardUnavailableDay = (day: number) => {
+    setWeekSaved(false);
+    setSlotError('');
+    setHasUnsavedSlots(true);
+    setHardUnavailableDays((prev) => (
+      prev.includes(day) ? prev.filter((item) => item !== day) : [...prev, day].sort((a, b) => a - b)
+    ));
+    setSlots((prev) => ({ ...prev, [day]: [] }));
   };
 
   const nextDateForDay = (dayIndex: number) => {
@@ -370,7 +414,7 @@ export default function MiniApp({
     }
     setSlotError('');
     setSavingWeek(true);
-    const ok = await onSaveAvailability(slots, currentWeekStart());
+    const ok = await onSaveAvailability(slots, currentWeekStart(), hardUnavailableDays);
     setSavingWeek(false);
     setWeekSaved(ok);
     if (ok) setHasUnsavedSlots(false);
@@ -698,7 +742,7 @@ export default function MiniApp({
               ? user.role === 'faculty_responsible'
               : user.competencies?.includes(prev.competency)
           )).map((user) => user.id)
-        : [];
+        : scopedUsers.map((user) => user.id);
       return { ...prev, facultyId, assignedTo: matched };
     });
   };
@@ -713,7 +757,7 @@ export default function MiniApp({
               ? user.role === 'faculty_responsible'
               : user.competencies?.includes(competency)
           )).map((user) => user.id)
-        : [];
+        : scopedUsers.map((user) => user.id);
       return { ...prev, competency, assignedTo: matched };
     });
   };
@@ -829,6 +873,7 @@ export default function MiniApp({
                             for (let day = weekIndex * 7; day < weekIndex * 7 + 7; day += 1) next[day] = [];
                             return next;
                           });
+                          setHardUnavailableDays((prev) => prev.filter((day) => day < weekIndex * 7 || day >= weekIndex * 7 + 7));
                           setVisibleWeeks((value) => Math.max(1, value - 1));
                           setHasUnsavedSlots(true);
                         }}
@@ -844,29 +889,38 @@ export default function MiniApp({
                     const absoluteDayIndex = weekIndex * 7 + dayIndex;
                     const selected = slots[absoluteDayIndex] || [];
                     const date = dateForSlotDay(absoluteDayIndex);
+                    const hardUnavailable = hardUnavailableDays.includes(absoluteDayIndex);
                     return (
-                      <div key={`${weekIndex}-${day.full}`} className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
+                      <div key={`${weekIndex}-${day.full}`} className={`rounded-3xl border p-4 shadow-sm ${hardUnavailable ? 'border-rose-200 bg-rose-50' : 'border-blue-100 bg-white'}`}>
                         <div className="mb-3 flex items-center justify-between gap-3">
                           <div>
                             <h2 className="text-base font-black">{day.full}, {formatDayMonth(date)}</h2>
-                            <p className="text-xs text-slate-500">{selected.length ? `${selected.length} ч. свободно` : 'Пока ничего не выбрано'}</p>
+                            <p className={`text-xs ${hardUnavailable ? 'font-bold text-rose-600' : 'text-slate-500'}`}>
+                              {hardUnavailable ? 'Железно не смогу прийти' : selected.length ? `${selected.length} ч. свободно` : 'Пока ничего не выбрано'}
+                            </p>
                           </div>
-                          <button onClick={() => selectWholeDay(absoluteDayIndex)} className={secondaryButtonClass}>
-                            {selected.length === hours.length ? 'Снять' : 'Весь день'}
-                          </button>
+                          <div className="flex flex-col gap-2 sm:flex-row">
+                            <button onClick={() => toggleHardUnavailableDay(absoluteDayIndex)} className={`${hardUnavailable ? 'rounded-full bg-rose-600 px-4 py-2 text-xs font-black text-white hover:bg-rose-500 active:bg-rose-700' : 'rounded-full bg-rose-50 px-4 py-2 text-xs font-black text-rose-600 hover:bg-rose-100 active:bg-rose-200'} ${pressClass}`}>
+                              ЖЕЛЕЗНО НЕ МОГУ
+                            </button>
+                            <button onClick={() => selectWholeDay(absoluteDayIndex)} disabled={hardUnavailable} className={`${secondaryButtonClass} disabled:opacity-50`}>
+                              {selected.length === hours.length ? 'Снять' : 'Весь день'}
+                            </button>
+                          </div>
                         </div>
-                        <div className="grid grid-cols-4 gap-2 sm:grid-cols-8">
+                        <div className={`grid grid-cols-4 gap-2 sm:grid-cols-8 ${hardUnavailable ? 'opacity-45' : ''}`}>
                           {hours.map((hour) => {
                             const active = selected.includes(hour);
                             return (
                               <button
                                 key={hour}
                                 onClick={() => toggleSlot(absoluteDayIndex, hour)}
+                                disabled={hardUnavailable}
                                 className={`h-11 rounded-2xl border text-sm font-black ${pressClass} ${
                                   active
                                     ? 'border-[#0050ff] bg-[#0050ff] text-white shadow-[0_8px_20px_rgba(0,80,255,0.2)] hover:bg-[#0a5cff] active:bg-[#0045d8]'
                                     : 'border-slate-200 bg-slate-50 text-slate-600 hover:bg-blue-50 active:bg-blue-100'
-                                }`}
+                                } disabled:cursor-not-allowed`}
                               >
                                 {hour}:00
                               </button>
@@ -911,18 +965,52 @@ export default function MiniApp({
               <div className="mt-3 grid grid-cols-7 gap-1.5">
                 {availabilityByDay.map((day) => {
                   const ratio = state.users.length ? day.count / state.users.length : 0;
+                  const expanded = expandedAvailabilityDay === dayLabels.findIndex((item) => item.short === day.short);
+                  const dayIndex = dayLabels.findIndex((item) => item.short === day.short);
                   return (
-                    <div key={day.short} className="rounded-2xl border border-blue-100 bg-slate-50 p-2 text-center">
+                    <button
+                      key={day.short}
+                      type="button"
+                      onClick={() => setExpandedAvailabilityDay((value) => (value === dayIndex ? null : dayIndex))}
+                      className={`rounded-2xl border p-2 text-center ${pressClass} ${expanded ? 'border-[#0050ff] bg-blue-50 shadow-[0_8px_22px_rgba(0,80,255,0.12)]' : 'border-blue-100 bg-slate-50 hover:bg-blue-50 active:bg-blue-100'}`}
+                    >
                       <div className="text-xs font-black text-slate-500">{day.short}</div>
                       <div className="mt-2 text-lg font-black text-[#0050ff]">{day.count}</div>
                       <div className="text-[10px] font-bold text-slate-400">из {state.users.length}</div>
                       <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-blue-100">
                         <div className="h-full rounded-full bg-[#0050ff]" style={{ width: `${Math.round(ratio * 100)}%` }} />
                       </div>
-                    </div>
+                    </button>
                   );
                 })}
               </div>
+              {expandedAvailabilityDay !== null && availabilityByDay[expandedAvailabilityDay] && (
+                <div className="mt-4 rounded-2xl border border-blue-100 bg-blue-50/50 p-3">
+                  <div className="font-black">
+                    {dayLabels[expandedAvailabilityDay].full}, {formatDayMonth(dateForSlotDay(expandedAvailabilityDay))}
+                  </div>
+                  <div className="mt-3 space-y-2">
+                    {availabilityByDay[expandedAvailabilityDay].users.length === 0 ? (
+                      <div className="rounded-xl bg-white px-3 py-2 text-sm font-semibold text-slate-500">Никто не отметил свободное время.</div>
+                    ) : (
+                      availabilityByDay[expandedAvailabilityDay].users.map((user) => (
+                        <div key={user.id} className="flex items-center justify-between gap-3 rounded-xl bg-white px-3 py-2 text-sm">
+                          <div>
+                            <div className="font-black">{user.realName}</div>
+                            <a href={telegramLink(user.username)} target="_blank" rel="noreferrer" className="text-xs font-bold text-[#0050ff]">{user.username}</a>
+                          </div>
+                          <div className="text-right font-black text-[#0050ff]">{formatHours(user.daySlots)}</div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                  {availabilityByDay[expandedAvailabilityDay].hardUnavailableUsers.length > 0 && (
+                    <div className="mt-3 rounded-xl bg-rose-50 px-3 py-2 text-xs font-bold text-rose-700">
+                      Железно не могут: {availabilityByDay[expandedAvailabilityDay].hardUnavailableUsers.map((user) => user.realName).join(', ')}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
             {isAdmin && (
@@ -955,11 +1043,12 @@ export default function MiniApp({
                             <div className="font-bold text-[#0050ff]">{user.username}</div>
                           </td>
                           {dayLabels.map((_, dayIndex) => {
-                            const text = formatHours(alignedSlots(state.availabilities[user.id])?.[dayIndex] || []);
-                            const filled = text !== '—';
+                            const hardUnavailable = alignedHardUnavailableDays(state.availabilities[user.id]).includes(dayIndex);
+                            const text = hardUnavailable ? 'Не могу' : formatHours(alignedSlots(state.availabilities[user.id])?.[dayIndex] || []);
+                            const filled = text !== '—' && !hardUnavailable;
                             return (
                               <td key={dayIndex} className="px-2 py-2 align-top">
-                                <div className={`min-h-10 rounded-xl px-2 py-1.5 text-center font-bold ${filled ? 'bg-blue-50 text-[#0050ff]' : 'bg-slate-50 text-slate-300'}`}>
+                                <div className={`min-h-10 rounded-xl px-2 py-1.5 text-center font-bold ${hardUnavailable ? 'bg-rose-50 text-rose-600' : filled ? 'bg-blue-50 text-[#0050ff]' : 'bg-slate-50 text-slate-300'}`}>
                                   {text}
                                 </div>
                               </td>
@@ -1020,6 +1109,11 @@ export default function MiniApp({
                           ))
                         )}
                       </div>
+                      {!!suggestion.hardUnavailableUsers?.length && (
+                        <div className="mt-2 rounded-xl bg-rose-50 px-3 py-2 text-xs font-bold text-rose-700">
+                          Железно не могут: {suggestion.hardUnavailableUsers.map((user) => user.realName).join(', ')}
+                        </div>
+                      )}
                     </button>
                   ))
                 )}
