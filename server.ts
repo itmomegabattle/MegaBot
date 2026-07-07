@@ -90,6 +90,38 @@ function findUserByTelegramIdentity(state: SimulationState, telegramId: string |
       : undefined);
 }
 
+function ensureEnvAdminUser(state: SimulationState, telegramId: string | number, username?: string, realName?: string) {
+  if (!isEnvAdmin(telegramId, username)) return undefined;
+  const id = String(telegramId);
+  const normalizedUsername = username ? `@${username.replace(/^@/, '')}` : `@tg${id}`;
+  let user = findUserByTelegramIdentity(state, id, username);
+
+  if (!user) {
+    user = {
+      id: 'u_' + Date.now(),
+      username: normalizedUsername,
+      realName: realName || username || `Telegram ${id}`,
+      role: 'admin',
+      avatarSeed: username || id,
+      birthday: '01.01',
+      telegramId: id,
+      registered: true,
+      competencies: [],
+      primaryCompetency: '',
+      facultyId: '',
+    };
+    state.users.push(user);
+    return user;
+  }
+
+  user.telegramId = id;
+  user.username = normalizedUsername;
+  user.role = 'admin';
+  user.registered = true;
+  if (!user.realName && realName) user.realName = realName;
+  return user;
+}
+
 function verifyTelegramInitData(initData: string, botToken?: string) {
   if (!botToken || !initData) return false;
   const params = new URLSearchParams(initData);
@@ -663,7 +695,8 @@ async function startServer() {
     }
 
     const state = loadDatabase();
-    const user = findUserByTelegramIdentity(state, telegramId, username);
+    const user = findUserByTelegramIdentity(state, telegramId, username)
+      || ensureEnvAdminUser(state, telegramId, username, username ? `@${username}` : undefined);
 
     if (!user) {
       return res.status(403).json({ success: false, error: 'Вас нет в списке участников. Попросите админа добавить ваш Telegram в раздел «Команда».' });
@@ -835,7 +868,9 @@ async function startServer() {
 
       const state = loadDatabase();
 
-      const user = findUserByTelegramIdentity(state, fromUser.id, fromUser.username);
+      const displayName = [fromUser.first_name, fromUser.last_name].filter(Boolean).join(' ').trim();
+      let user = findUserByTelegramIdentity(state, fromUser.id, fromUser.username)
+        || ensureEnvAdminUser(state, fromUser.id, fromUser.username, displayName);
 
       if (!user) {
         await configureChatMenuButton(chatId, undefined);
