@@ -7,11 +7,19 @@ import fs from 'fs';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
+import { ProxyAgent } from 'undici';
 import { SimulationState, User, Availability, Meeting, Task, BotMessage, Faculty, TaskReminder } from './src/types.js';
 
 // Setup __dirname for ES modules
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
+const telegramProxyAgent = proxyUrl ? new ProxyAgent(proxyUrl) : null;
+
+function telegramFetch(input: string, init: RequestInit = {}) {
+  return fetch(input, telegramProxyAgent ? ({ ...init, dispatcher: telegramProxyAgent } as RequestInit) : init);
+}
 
 const PORT = 3000;
 const DB_FILE = path.join(process.cwd(), 'database.json');
@@ -338,7 +346,7 @@ async function startServer() {
   }
 
   // Helper to send message to Telegram
-  function buildChatKeyboard(includeWebApp = true, user?: User) {
+  function buildChatKeyboard(_includeWebApp = false, user?: User) {
     if (isFacultyUser(user)) {
       return {
         keyboard: [[{ text: 'Мои задачи' }, { text: 'Помощь' }]],
@@ -346,12 +354,7 @@ async function startServer() {
         is_persistent: true,
       };
     }
-    const webAppUrl = process.env.WEBAPP_URL;
     const keyboard: any[] = [];
-
-    if (includeWebApp && webAppUrl) {
-      keyboard.push([{ text: 'Открыть приложение', web_app: { url: webAppUrl } }]);
-    }
 
     keyboard.push(
       [{ text: 'Профиль' }, { text: 'Встречи' }],
@@ -365,13 +368,8 @@ async function startServer() {
     };
   }
 
-  function buildKeyboard(rows: string[][], includeWebApp = false, user?: User) {
-    if (isFacultyUser(user)) includeWebApp = false;
-    const webAppUrl = process.env.WEBAPP_URL;
+  function buildKeyboard(rows: string[][], _includeWebApp = false, user?: User) {
     const keyboard: any[] = [];
-    if (includeWebApp && webAppUrl) {
-      keyboard.push([{ text: 'Открыть приложение', web_app: { url: webAppUrl } }]);
-    }
     rows.forEach((row) => keyboard.push(row.map((text) => ({ text }))));
     return { keyboard, resize_keyboard: true, is_persistent: true };
   }
@@ -380,7 +378,7 @@ async function startServer() {
     const botToken = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
     if (!botToken) return;
     const tgApiBase = process.env.TELEGRAM_API_BASE || 'https://api.telegram.org';
-    await fetch(`${tgApiBase}/bot${botToken}/sendMessage`, {
+    await telegramFetch(`${tgApiBase}/bot${botToken}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -406,7 +404,7 @@ async function startServer() {
       : { type: 'commands' };
 
     try {
-      const response = await fetch(`${tgApiBase}/bot${botToken}/setChatMenuButton`, {
+      const response = await telegramFetch(`${tgApiBase}/bot${botToken}/setChatMenuButton`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -426,7 +424,7 @@ async function startServer() {
     const botToken = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
     if (!botToken) return;
     const tgApiBase = process.env.TELEGRAM_API_BASE || 'https://api.telegram.org';
-    await fetch(`${tgApiBase}/bot${botToken}/answerCallbackQuery`, {
+    await telegramFetch(`${tgApiBase}/bot${botToken}/answerCallbackQuery`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ callback_query_id: callbackQueryId, text }),
@@ -497,7 +495,7 @@ async function startServer() {
     }
     const webAppUrl = process.env.WEBAPP_URL;
 
-    let replyMarkup: any = buildChatKeyboard(true, recipient);
+    let replyMarkup: any = buildChatKeyboard(false, recipient);
     if (keyboardOnly) {
       replyMarkup = buildChatKeyboard(false, recipient);
     } else if (buttons && buttons.length > 0) {
@@ -518,7 +516,7 @@ async function startServer() {
 
     try {
       const tgApiBase = process.env.TELEGRAM_API_BASE || 'https://api.telegram.org';
-      const response = await fetch(`${tgApiBase}/bot${botToken}/sendMessage`, {
+      const response = await telegramFetch(`${tgApiBase}/bot${botToken}/sendMessage`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -704,7 +702,7 @@ async function startServer() {
     const webhookUrl = `${webAppUrl}/api/telegram-webhook`;
     try {
       const tgApiBase = process.env.TELEGRAM_API_BASE || 'https://api.telegram.org';
-      const response = await fetch(`${tgApiBase}/bot${botToken}/setWebhook?url=${encodeURIComponent(webhookUrl)}`);
+      const response = await telegramFetch(`${tgApiBase}/bot${botToken}/setWebhook?url=${encodeURIComponent(webhookUrl)}`);
       const data = await response.json();
       return res.json({
         success: true,
@@ -1155,7 +1153,7 @@ async function startServer() {
         }
         }
       } else if (cmd.startsWith('/help') || cmd === 'помощь') {
-        replyText = '*Кнопки бота:*\n\n*Открыть приложение* — Mini App со слотами, встречами, задачами и командой.\n*Профиль* — регистрация или обновление имени и даты рождения.\n*Встречи* — список ближайших встреч.\n*Задачи* — твои активные задачи.\n\nДля регистрации напиши: `Имя Фамилия ДД.ММ`.';
+        replyText = '*Кнопки бота:*\n\n*Профиль* — регистрация или обновление имени и даты рождения.\n*Встречи* — список ближайших встреч.\n*Задачи* — твои активные задачи.\n\nMini App открывается системной кнопкой рядом с полем сообщения.\n\nДля регистрации напиши: `Имя Фамилия ДД.ММ`.';
       } else {
         replyText = user.registered
           ? 'Пользуйся кнопками снизу: приложение, профиль, встречи, задачи и помощь.'
@@ -1982,7 +1980,7 @@ async function startServer() {
     // Reset the old webhook before long polling so Telegram sends updates here.
     try {
       console.log('Deleting old Telegram webhook...');
-      const response = await fetch(`${tgApiBase}/bot${botToken}/deleteWebhook`);
+      const response = await telegramFetch(`${tgApiBase}/bot${botToken}/deleteWebhook`);
       const data = await response.json();
       console.log('Telegram webhook deletion result:', data);
     } catch (err: any) {
@@ -1990,7 +1988,7 @@ async function startServer() {
     }
 
     try {
-      await fetch(`${tgApiBase}/bot${botToken}/setMyCommands`, {
+      await telegramFetch(`${tgApiBase}/bot${botToken}/setMyCommands`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -2004,7 +2002,7 @@ async function startServer() {
         })
       });
 
-      await fetch(`${tgApiBase}/bot${botToken}/setChatMenuButton`, {
+      await telegramFetch(`${tgApiBase}/bot${botToken}/setChatMenuButton`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -2040,7 +2038,7 @@ async function startServer() {
 
     const poll = async () => {
       try {
-        const response = await fetch(`${tgApiBase}/bot${botToken}/getUpdates?offset=${offset}&timeout=30`);
+        const response = await telegramFetch(`${tgApiBase}/bot${botToken}/getUpdates?offset=${offset}&timeout=30`);
         if (!response.ok) {
           throw new Error(`HTTP status ${response.status}`);
         }

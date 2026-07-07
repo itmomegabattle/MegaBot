@@ -664,15 +664,6 @@ export default function MiniApp({
     }
   };
 
-  const toggleFacultyDraftCompetency = (name: string) => {
-    setFacultyUserDraft((prev) => ({
-      ...prev,
-      competencies: prev.competencies.includes(name)
-        ? prev.competencies.filter((item) => item !== name)
-        : [...prev.competencies, name],
-    }));
-  };
-
   const startFacultyUserEdit = (user: User) => {
     setEditingFacultyUserId(user.id);
     setFacultyEditDraft({
@@ -682,15 +673,6 @@ export default function MiniApp({
       facultyId: user.facultyId || '',
       competencies: user.competencies || [],
     });
-  };
-
-  const toggleFacultyEditCompetency = (name: string) => {
-    setFacultyEditDraft((prev) => ({
-      ...prev,
-      competencies: prev.competencies.includes(name)
-        ? prev.competencies.filter((item) => item !== name)
-        : [...prev.competencies, name],
-    }));
   };
 
   const updateFacultyUser = async (userId: string) => {
@@ -1503,9 +1485,17 @@ export default function MiniApp({
                       </select>
                     </Field>
                     <Field label="Роль">
-                      <select value={facultyUserDraft.role} onChange={(e) => setFacultyUserDraft((prev) => ({ ...prev, role: e.target.value as User['role'] }))} className={selectClass}>
+                      <select
+                        value={facultyUserDraft.role === 'faculty_responsible' ? 'faculty_responsible' : facultyUserDraft.competencies[0] || ''}
+                        onChange={(e) => setFacultyUserDraft((prev) => (
+                          e.target.value === 'faculty_responsible'
+                            ? { ...prev, role: 'faculty_responsible', competencies: [] }
+                            : { ...prev, role: 'faculty_helper', competencies: e.target.value ? [e.target.value] : [] }
+                        ))}
+                        className={selectClass}
+                      >
                         <option value="faculty_responsible">Ответственный</option>
-                        <option value="faculty_helper">Хэлпер</option>
+                        {facultyCompetencies.map((name) => <option key={name} value={name}>{name}</option>)}
                       </select>
                     </Field>
                     <Field label="Имя">
@@ -1514,20 +1504,6 @@ export default function MiniApp({
                     <Field label="Telegram">
                       <input value={facultyUserDraft.username} onChange={(e) => setFacultyUserDraft((prev) => ({ ...prev, username: e.target.value }))} className={inputClass} placeholder="@username" />
                     </Field>
-                    {facultyUserDraft.role === 'faculty_helper' && (
-                      <Field label="Компетенции">
-                        <div className="grid grid-cols-1 gap-2 rounded-2xl border border-slate-200 bg-slate-50 p-2 sm:grid-cols-2">
-                          {facultyCompetencies.length === 0 ? (
-                            <div className="text-sm font-bold text-slate-400">Сначала добавь компетенции выше</div>
-                          ) : facultyCompetencies.map((name) => (
-                            <label key={name} className="flex items-center gap-2 rounded-xl bg-white px-3 py-2 text-sm font-semibold">
-                              <input type="checkbox" checked={facultyUserDraft.competencies.includes(name)} onChange={() => toggleFacultyDraftCompetency(name)} />
-                              <span>{name}</span>
-                            </label>
-                          ))}
-                        </div>
-                      </Field>
-                    )}
                     <button className={`${primaryButtonClass} sm:col-span-2`}>Добавить</button>
                   </form>
                 </div>
@@ -1565,7 +1541,7 @@ export default function MiniApp({
                                           </div>
                                         </div>
                                         <div className="flex flex-wrap justify-end gap-2">
-                                          <span className="rounded-full bg-blue-50 px-2.5 py-1 text-xs font-black text-[#0050ff]">{user.role === 'faculty_helper' ? 'Хэлпер' : 'Ответственный'}</span>
+                                          <span className="rounded-full bg-blue-50 px-2.5 py-1 text-xs font-black text-[#0050ff]">{user.role === 'faculty_helper' ? user.competencies?.[0] || 'Роль не выбрана' : 'Ответственный'}</span>
                                           <button onClick={() => startFacultyUserEdit(user)} className={miniButtonClass}>
                                             <Pencil className="h-4 w-4" />
                                             Редактировать
@@ -1598,26 +1574,20 @@ export default function MiniApp({
                                           </select>
                                         </Field>
                                         <Field label="Роль">
-                                          <select value={facultyEditDraft.role} onChange={(e) => setFacultyEditDraft((prev) => ({ ...prev, role: e.target.value as User['role'], competencies: e.target.value === 'faculty_helper' ? prev.competencies : [] }))} className={selectClass}>
+                                          <select
+                                            value={facultyEditDraft.role === 'faculty_responsible' ? 'faculty_responsible' : facultyEditDraft.competencies[0] || ''}
+                                            onChange={(e) => setFacultyEditDraft((prev) => (
+                                              e.target.value === 'faculty_responsible'
+                                                ? { ...prev, role: 'faculty_responsible', competencies: [] }
+                                                : { ...prev, role: 'faculty_helper', competencies: e.target.value ? [e.target.value] : [] }
+                                            ))}
+                                            className={selectClass}
+                                          >
                                             <option value="faculty_responsible">Ответственный</option>
-                                            <option value="faculty_helper">Хэлпер</option>
+                                            {facultyCompetencies.map((name) => <option key={name} value={name}>{name}</option>)}
                                           </select>
                                         </Field>
                                       </div>
-                                      {facultyEditDraft.role === 'faculty_helper' && (
-                                        <Field label="Компетенции">
-                                          <div className="grid grid-cols-1 gap-2 rounded-2xl border border-slate-200 bg-slate-50 p-2 sm:grid-cols-2">
-                                            {facultyCompetencies.length === 0 ? (
-                                              <div className="text-sm font-bold text-slate-400">Сначала добавь компетенции выше</div>
-                                            ) : facultyCompetencies.map((name) => (
-                                              <label key={name} className="flex items-center gap-2 rounded-xl bg-white px-3 py-2 text-sm font-semibold">
-                                                <input type="checkbox" checked={facultyEditDraft.competencies.includes(name)} onChange={() => toggleFacultyEditCompetency(name)} />
-                                                <span>{name}</span>
-                                              </label>
-                                            ))}
-                                          </div>
-                                        </Field>
-                                      )}
                                       <div className="flex gap-2">
                                         <button onClick={() => updateFacultyUser(user.id)} className={miniButtonClass}>OK</button>
                                         <button onClick={() => setEditingFacultyUserId(null)} className={miniButtonClass}>Отмена</button>
