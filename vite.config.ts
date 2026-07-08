@@ -12,7 +12,7 @@ export default defineConfig(() => {
       },
     },
     server: {
-      allowedHosts: ['.trycloudflare.com', '.loca.lt', '.lhr.life'],
+      allowedHosts: ['megaorgiabot.ru', 'www.megaorgiabot.ru', '.trycloudflare.com', '.loca.lt', '.lhr.life'],
       // HMR can be disabled with DISABLE_HMR for quieter local debugging.
       hmr: process.env.DISABLE_HMR !== 'true',
       // Disable file watching when DISABLE_HMR is true to save CPU during agent edits.
