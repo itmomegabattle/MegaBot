@@ -18,7 +18,35 @@ const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
 const telegramProxyAgent = proxyUrl ? new ProxyAgent(proxyUrl) : null;
 
 function telegramFetch(input: string, init: RequestInit = {}) {
-  return fetch(input, telegramProxyAgent ? ({ ...init, dispatcher: telegramProxyAgent } as RequestInit) : init);
+  const url = String(input);
+  const isLongPoll = url.includes('/getUpdates');
+  const timeoutMs = isLongPoll ? 40000 : 10000;
+  const attempts = isLongPoll ? 1 : 2;
+
+  const run = async (attempt = 1): Promise<Response> => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await fetch(input, telegramProxyAgent ? ({
+        ...init,
+        signal: init.signal || controller.signal,
+        dispatcher: telegramProxyAgent,
+      } as RequestInit) : {
+        ...init,
+        signal: init.signal || controller.signal,
+      });
+    } catch (err) {
+      if (attempt < attempts) {
+        await new Promise((resolve) => setTimeout(resolve, 600 * attempt));
+        return run(attempt + 1);
+      }
+      throw err;
+    } finally {
+      clearTimeout(timeout);
+    }
+  };
+
+  return run();
 }
 
 const PORT = 3000;
@@ -420,16 +448,23 @@ async function startServer() {
     const botToken = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
     if (!botToken) return;
     const tgApiBase = process.env.TELEGRAM_API_BASE || 'https://api.telegram.org';
-    await telegramFetch(`${tgApiBase}/bot${botToken}/sendMessage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text: renderTelegramHtml(text),
-        parse_mode: 'HTML',
-        reply_markup: buildKeyboard(rows, includeWebApp, user),
-      }),
-    });
+    try {
+      const response = await telegramFetch(`${tgApiBase}/bot${botToken}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: chatId,
+          text: renderTelegramHtml(text),
+          parse_mode: 'HTML',
+          reply_markup: buildKeyboard(rows, includeWebApp, user),
+        }),
+      });
+      if (!response.ok) {
+        console.error('Telegram keyboard send failed:', response.status, await response.text());
+      }
+    } catch (err) {
+      console.error('Telegram keyboard send failed:', err);
+    }
   }
 
   async function configureChatMenuButton(chatId: string | number, user?: User) {
@@ -466,11 +501,18 @@ async function startServer() {
     const botToken = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
     if (!botToken) return;
     const tgApiBase = process.env.TELEGRAM_API_BASE || 'https://api.telegram.org';
-    await telegramFetch(`${tgApiBase}/bot${botToken}/answerCallbackQuery`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ callback_query_id: callbackQueryId, text }),
-    });
+    try {
+      const response = await telegramFetch(`${tgApiBase}/bot${botToken}/answerCallbackQuery`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ callback_query_id: callbackQueryId, text }),
+      });
+      if (!response.ok) {
+        console.error('Telegram answerCallback failed:', response.status, await response.text());
+      }
+    } catch (err) {
+      console.error('Telegram answerCallback failed:', err);
+    }
   }
 
   async function createMeetingAndNotify(state: SimulationState, data: {
@@ -510,6 +552,7 @@ async function startServer() {
     }
 
     const text = `Новая встреча запланирована!\n\n${meetingDetailsText(meeting, state)}\n\nПожалуйста, освободите это время.`;
+    const sendJobs: Promise<void>[] = [];
     for (const targetUserId of targetUserIds) {
       const target = state.users.find(u => u.id === targetUserId);
       if (!target) continue;
@@ -522,9 +565,10 @@ async function startServer() {
         timestamp: new Date().toISOString(),
       });
       if (target.telegramId) {
-        await sendTelegramMessage(target.telegramId, text, [{ text: 'Открыть встречи', action: 'open_tma' }]);
+        sendJobs.push(sendTelegramMessage(target.telegramId, text, [{ text: 'Открыть встречи', action: 'open_tma' }]));
       }
     }
+    await Promise.allSettled(sendJobs);
 
     return meeting;
   }
@@ -1552,7 +1596,7 @@ async function startServer() {
 
   // Save/Update User Availability
   app.post('/api/availability', (req, res) => {
-    const { userId, slots, weekStart, hardUnavailableDays } = req.body;
+    const { userId, slots, weekStart } = req.body;
     const state = loadDatabase();
 
     if (!isRegisteredUser(state, userId)) {
@@ -1562,9 +1606,7 @@ async function startServer() {
     state.availabilities[userId] = {
       userId,
       slots,
-      hardUnavailableDays: Array.isArray(hardUnavailableDays)
-        ? [...new Set(hardUnavailableDays.map((day: unknown) => Number(day)).filter((day: number) => Number.isFinite(day) && day >= 0 && day < 35))]
-        : [],
+      hardUnavailableDays: [],
       weekStart: String(weekStart || ''),
       updatedAt: new Date().toISOString()
     };
@@ -1646,21 +1688,18 @@ async function startServer() {
     if (!isRegisteredUser(state, creatorId)) {
       return res.status(403).json({ error: 'Сначала нужно зарегистрироваться в чате с ботом' });
     }
-    if (!String(competency || '').trim()) {
-      return res.status(400).json({ error: 'Укажи блок задачи' });
-    }
 
     const weightMap = { low: 1, medium: 2, high: 3 };
     const assigneeIds = Array.isArray(assignedTo) ? assignedTo.filter(Boolean) : assignedTo ? [assignedTo] : [];
     const now = new Date().toISOString();
     const newTask: Task = {
       id: 't_' + Date.now(),
-      title,
-      description,
-      deadline,
+      title: String(title || '').trim() || 'Без названия',
+      description: String(description || '').trim(),
+      deadline: String(deadline || '').trim(),
       assignedTo: assigneeIds.length === 0 ? null : assigneeIds,
       creatorId,
-      competency: String(competency).trim(),
+      competency: String(competency || '').trim(),
       sow: sow || '',
       tips: tips || [],
       status: assigneeIds.length ? 'assigned' : 'open',
@@ -1671,6 +1710,7 @@ async function startServer() {
     };
 
     state.tasks.push(newTask);
+    const sendJobs: Promise<void>[] = [];
 
     // If assigned to someone, notify them
     if (assigneeIds.length) {
@@ -1687,11 +1727,11 @@ async function startServer() {
           buttons: [{ text: 'Открыть задачи', action: 'open_tasks' }]
         });
         if (assignedUser.telegramId) {
-          await sendTelegramMessage(
+          sendJobs.push(sendTelegramMessage(
             assignedUser.telegramId,
             `Тебе назначена новая задача!\n\n${taskDetailsText(newTask, state)}`,
             [{ text: 'Открыть задачи', action: 'open_tasks' }],
-          );
+          ));
         }
       }
       }
@@ -1708,15 +1748,16 @@ async function startServer() {
           buttons: [{ text: 'Посмотреть задачу', action: `task_view:${newTask.id}` }]
         });
         if (u.telegramId) {
-          await sendTelegramMessage(
+          sendJobs.push(sendTelegramMessage(
             u.telegramId,
             `Клич о помощи: на доске появилась свободная задача.\n\n${taskDetailsText(newTask, state)}`,
             [{ text: 'Посмотреть задачу', action: `task_view:${newTask.id}` }],
-          );
+          ));
         }
       }
     }
 
+    await Promise.allSettled(sendJobs);
     saveDatabase(state);
     res.json({ success: true, task: newTask });
   });
@@ -1798,14 +1839,16 @@ async function startServer() {
     task.completedAt = '';
     saveDatabase(state);
 
+    const sendJobs: Promise<void>[] = [];
     const creator = state.users.find(u => u.id === task.creatorId);
     if (creator?.telegramId && creator.id !== user.id) {
-      await sendTelegramMessage(creator.telegramId, `${userMention(user)} отказался от задачи *"${task.title}"*. Она снова на бирже.`);
+      sendJobs.push(sendTelegramMessage(creator.telegramId, `${userMention(user)} отказался от задачи *"${task.title}"*. Она снова на бирже.`));
     }
 
     for (const target of state.users.filter(u => u.telegramId && u.id !== user.id)) {
-      await sendTelegramMessage(target.telegramId!, `Задача снова свободна:\n\n${taskDetailsText(task, state)}`, [{ text: 'Посмотреть задачу', action: `task_view:${task.id}` }]);
+      sendJobs.push(sendTelegramMessage(target.telegramId!, `Задача снова свободна:\n\n${taskDetailsText(task, state)}`, [{ text: 'Посмотреть задачу', action: `task_view:${task.id}` }]));
     }
+    await Promise.allSettled(sendJobs);
 
     res.json({ success: true, task });
   });
@@ -1925,19 +1968,17 @@ async function startServer() {
       endHour: number;
       duration: number;
       count: number;
-      hardUnavailableCount: number;
+      score: number;
       users: string[];
     }[] = [];
 
-    const durations = [3, 4, 5, 6, 7, 8, 2, 1];
+    const durations = [3, 4, 5, 2, 1];
     for (let d = 0; d < 7; d++) {
-      const hardUnavailableUsers = state.users.filter((u) => alignedHardUnavailableDays(state.availabilities[u.id]).includes(d));
       for (const duration of durations) {
         for (let h = 16; h <= 24 - duration; h++) {
           const hoursWindow = Array.from({ length: duration }, (_, index) => h + index);
           const availableUsers = state.users
             .filter(u => {
-              if (alignedHardUnavailableDays(state.availabilities[u.id]).includes(d)) return false;
               const daySlots = alignedAvailabilitySlots(state.availabilities[u.id])?.[d] || [];
               return hoursWindow.every(hour => daySlots.includes(hour));
             })
@@ -1950,7 +1991,7 @@ async function startServer() {
               endHour: h + duration,
               duration,
               count: availableUsers.length,
-              hardUnavailableCount: hardUnavailableUsers.length,
+              score: availableUsers.length * duration,
               users: availableUsers
             });
           }
@@ -1959,8 +2000,8 @@ async function startServer() {
     }
 
     windowScores.sort((a, b) => {
-      return b.count - a.count
-        || a.hardUnavailableCount - b.hardUnavailableCount
+      return b.score - a.score
+        || b.count - a.count
         || b.duration - a.duration
         || a.day - b.day
         || a.hour - b.hour;
@@ -1976,9 +2017,7 @@ async function startServer() {
 
     const suggestions = picked.map(s => {
       const hoursWindow = Array.from({ length: s.duration }, (_, index) => s.hour + index);
-      const hardUnavailableUsers = state.users.filter(u => alignedHardUnavailableDays(state.availabilities[u.id]).includes(s.day));
       const missingUsers = state.users.filter(u => {
-        if (alignedHardUnavailableDays(state.availabilities[u.id]).includes(s.day)) return true;
         const daySlots = alignedAvailabilitySlots(state.availabilities[u.id])?.[s.day] || [];
         return !hoursWindow.every(hour => daySlots.includes(hour));
       }).map(u => ({
@@ -1997,11 +2036,6 @@ async function startServer() {
         total: state.users.length,
         users: s.users,
         missingUsers: missingUsers,
-        hardUnavailableUsers: hardUnavailableUsers.map(u => ({
-          id: u.id,
-          realName: u.realName,
-          username: u.username
-        }))
       };
     });
 

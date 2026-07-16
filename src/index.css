@@ -1,1 +1,55 @@
 @import "tailwindcss";
+
+html.dark-theme body {
+  background: #07111f;
+}
+
+html.dark-theme .bg-white,
+html.dark-theme .bg-white\/95 {
+  background-color: rgba(13, 24, 41, 0.96) !important;
+}
+
+html.dark-theme .bg-slate-50,
+html.dark-theme .bg-\[\#f4f7ff\] {
+  background-color: #07111f !important;
+}
+
+html.dark-theme .bg-blue-50,
+html.dark-theme .bg-blue-50\/50,
+html.dark-theme .bg-blue-50\/60,
+html.dark-theme .bg-slate-100 {
+  background-color: rgba(28, 53, 88, 0.82) !important;
+}
+
+html.dark-theme .text-slate-950,
+html.dark-theme .text-slate-900,
+html.dark-theme .text-slate-700 {
+  color: #f8fafc !important;
+}
+
+html.dark-theme .text-slate-600,
+html.dark-theme .text-slate-500 {
+  color: #b6c3d6 !important;
+}
+
+html.dark-theme .text-slate-400,
+html.dark-theme .text-slate-300 {
+  color: #7d8ca3 !important;
+}
+
+html.dark-theme .border-blue-100,
+html.dark-theme .border-slate-100,
+html.dark-theme .border-slate-200 {
+  border-color: rgba(86, 119, 172, 0.42) !important;
+}
+
+html.dark-theme input,
+html.dark-theme textarea,
+html.dark-theme select {
+  color: #f8fafc;
+}
+
+html.dark-theme input::placeholder,
+html.dark-theme textarea::placeholder {
+  color: #7d8ca3;
+}

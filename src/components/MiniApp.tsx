@@ -12,11 +12,12 @@ import {
   Trash2,
   Clock,
   UserPlus,
-  Sparkle,
   CircleAlert,
   Pencil,
   X,
   Download,
+  Moon,
+  Sun,
 } from 'lucide-react';
 import { Meeting, SimulationState, Task, User } from '../types';
 
@@ -43,7 +44,6 @@ type MeetingSuggestion = {
   total: number;
   users: string[];
   missingUsers: Pick<User, 'id' | 'realName' | 'username'>[];
-  hardUnavailableUsers?: Pick<User, 'id' | 'realName' | 'username'>[];
 };
 
 const dayLabels = [
@@ -70,6 +70,20 @@ const formatDateShort = (value?: string) => {
   const match = value.match(/^(\d{4})-(\d{2})-(\d{2})/);
   if (match) return `${match[3]}.${match[2]}.${match[1].slice(2)}`;
   return value;
+};
+
+const shortDateToInputDate = (value?: string) => {
+  const normalized = formatDateShort(value);
+  const match = normalized.match(/^(\d{2})\.(\d{2})(?:\.(\d{2}))?$/);
+  if (!match) return '';
+  const year = match[3] ? `20${match[3]}` : String(new Date().getFullYear());
+  return `${year}-${match[2]}-${match[1]}`;
+};
+
+const inputDateToShortDate = (value: string, withYear = true) => {
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return '';
+  return withYear ? `${match[3]}.${match[2]}.${match[1].slice(2)}` : `${match[3]}.${match[2]}`;
 };
 
 const formatDateTimeShort = (value?: string) => {
@@ -126,15 +140,6 @@ const alignedSlots = (availability?: { slots?: Record<number, number[]>; weekSta
   return result;
 };
 
-const alignedHardUnavailableDays = (availability?: { hardUnavailableDays?: number[]; weekStart?: string }) => {
-  if (!availability?.hardUnavailableDays) return [];
-  const savedWeekStart = availability.weekStart || currentWeekStart();
-  const weekOffset = Math.floor((new Date(currentWeekStart()).getTime() - new Date(savedWeekStart).getTime()) / (7 * 24 * 60 * 60 * 1000));
-  return availability.hardUnavailableDays
-    .map((day) => Number(day) - weekOffset * 7)
-    .filter((day) => Number.isFinite(day) && day >= 0 && day < maxSlotWeeks * 7);
-};
-
 export default function MiniApp({
   state,
   currentUser,
@@ -149,7 +154,6 @@ export default function MiniApp({
   onRefreshState,
 }: MiniAppProps) {
   const [slots, setSlots] = useState<Record<number, number[]>>({});
-  const [hardUnavailableDays, setHardUnavailableDays] = useState<number[]>([]);
   const [visibleWeeks, setVisibleWeeks] = useState(1);
   const [suggestions, setSuggestions] = useState<MeetingSuggestion[]>([]);
   const [suggesting, setSuggesting] = useState(false);
@@ -180,13 +184,14 @@ export default function MiniApp({
   const [taskDeadline, setTaskDeadline] = useState('');
   const [taskAssignedTo, setTaskAssignedTo] = useState<string[]>([]);
   const [taskSow, setTaskSow] = useState('');
-  const [taskTips, setTaskTips] = useState('');
   const [taskWorkload, setTaskWorkload] = useState<'low' | 'medium' | 'high'>('medium');
   const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
   const [showCompletedTasks, setShowCompletedTasks] = useState(false);
   const [showTaskLog, setShowTaskLog] = useState(false);
   const [showFullCalendar, setShowFullCalendar] = useState(false);
   const [expandedAvailabilityDay, setExpandedAvailabilityDay] = useState<number | null>(null);
+  const [expandedUnavailableDay, setExpandedUnavailableDay] = useState<number | null>(null);
+  const [darkTheme, setDarkTheme] = useState(false);
 
   const [newUserRealName, setNewUserRealName] = useState('');
   const [newUserUsername, setNewUserUsername] = useState('');
@@ -211,13 +216,12 @@ export default function MiniApp({
   const votedUsers = useMemo(
     () => state.users.filter((user) => {
       const availability = state.availabilities[user.id];
-      return Object.values(alignedSlots(availability)).some((day) => day.length > 0)
-        || alignedHardUnavailableDays(availability).length > 0;
+      return Object.values(alignedSlots(availability)).some((day) => day.length > 0);
     }),
     [state.availabilities, state.users],
   );
   const majority = Math.floor(state.users.length / 2) + 1;
-  const firstWeekFilled = Array.from({ length: 7 }, (_, dayIndex) => (slots[dayIndex] || []).length > 0 || hardUnavailableDays.includes(dayIndex)).some(Boolean);
+  const firstWeekFilled = Array.from({ length: 7 }, (_, dayIndex) => (slots[dayIndex] || []).length > 0).some(Boolean);
   const myTasks = state.tasks.filter((task) => taskAssigneeIds(task).includes(currentUser.id) && task.status !== 'completed');
   const openTasks = state.tasks.filter((task) => task.status === 'open');
   const completedTasks = state.tasks
@@ -263,10 +267,9 @@ export default function MiniApp({
           .map((user) => ({
             ...user,
             daySlots: alignedSlots(state.availabilities[user.id])?.[dayIndex] || [],
-            hardUnavailable: alignedHardUnavailableDays(state.availabilities[user.id]).includes(dayIndex),
           }))
           .filter((user) => user.daySlots.length > 0),
-        hardUnavailableUsers: state.users.filter((user) => alignedHardUnavailableDays(state.availabilities[user.id]).includes(dayIndex)),
+        unavailableUsers: state.users.filter((user) => (alignedSlots(state.availabilities[user.id])?.[dayIndex] || []).length === 0),
         count: state.users.filter((user) => {
           const daySlots = alignedSlots(state.availabilities[user.id])?.[dayIndex] || [];
           return daySlots.length > 0;
@@ -299,11 +302,7 @@ export default function MiniApp({
     const rows = state.users.map((user) => [
       user.realName,
       user.username,
-      ...dayLabels.map((_, dayIndex) => (
-        alignedHardUnavailableDays(state.availabilities[user.id]).includes(dayIndex)
-          ? 'ЖЕЛЕЗНО НЕ МОГУ'
-          : formatHours(alignedSlots(state.availabilities[user.id])?.[dayIndex] || [])
-      )),
+      ...dayLabels.map((_, dayIndex) => formatHours(alignedSlots(state.availabilities[user.id])?.[dayIndex] || [])),
     ]);
     const csv = [header, ...rows]
       .map((row) => row.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(';'))
@@ -320,23 +319,19 @@ export default function MiniApp({
   useEffect(() => {
     const availability = state.availabilities[currentUser.id];
     const saved = alignedSlots(availability);
-    const savedHardUnavailableDays = alignedHardUnavailableDays(availability);
     const nextSlots: Record<number, number[]> = {};
     Array.from({ length: maxSlotWeeks * 7 }, (_, index) => {
       nextSlots[index] = [...(saved?.[index] || [])];
     });
-    setHardUnavailableDays(savedHardUnavailableDays);
     const lastFilledDay = Object.entries(nextSlots)
       .filter(([, value]) => value.length > 0)
       .map(([key]) => Number(key))
-      .concat(savedHardUnavailableDays)
       .sort((a, b) => b - a)[0];
     setVisibleWeeks(Math.min(maxSlotWeeks, Math.max(1, lastFilledDay === undefined ? 1 : Math.floor(lastFilledDay / 7) + 1)));
     setSlots(nextSlots);
   }, [currentUser.id, state.availabilities]);
 
   const toggleSlot = (day: number, hour: number) => {
-    if (hardUnavailableDays.includes(day)) return;
     setWeekSaved(false);
     setSlotError('');
     setHasUnsavedSlots(true);
@@ -350,7 +345,6 @@ export default function MiniApp({
   };
 
   const selectWholeDay = (day: number) => {
-    if (hardUnavailableDays.includes(day)) return;
     setWeekSaved(false);
     setSlotError('');
     setHasUnsavedSlots(true);
@@ -358,16 +352,6 @@ export default function MiniApp({
       const full = (prev[day] || []).length === hours.length;
       return { ...prev, [day]: full ? [] : [...hours] };
     });
-  };
-
-  const toggleHardUnavailableDay = (day: number) => {
-    setWeekSaved(false);
-    setSlotError('');
-    setHasUnsavedSlots(true);
-    setHardUnavailableDays((prev) => (
-      prev.includes(day) ? prev.filter((item) => item !== day) : [...prev, day].sort((a, b) => a - b)
-    ));
-    setSlots((prev) => ({ ...prev, [day]: [] }));
   };
 
   const nextDateForDay = (dayIndex: number) => {
@@ -414,7 +398,7 @@ export default function MiniApp({
     }
     setSlotError('');
     setSavingWeek(true);
-    const ok = await onSaveAvailability(slots, currentWeekStart(), hardUnavailableDays);
+    const ok = await onSaveAvailability(slots, currentWeekStart(), []);
     setSavingWeek(false);
     setWeekSaved(ok);
     if (ok) setHasUnsavedSlots(false);
@@ -499,34 +483,26 @@ export default function MiniApp({
     setTaskDeadline('');
     setTaskAssignedTo([]);
     setTaskSow('');
-    setTaskTips('');
     setTaskWorkload('medium');
   };
 
   const openTaskForm = () => {
-    if (!showTaskForm) {
-      resetTaskForm();
-      setTaskError('');
-    }
+    if (!showTaskForm) setTaskError('');
     setShowTaskForm((value) => !value);
   };
 
   const submitTask = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (!taskTitle.trim() || !taskDesc.trim() || !taskCompetency.trim()) {
-      setTaskError('Заполни название, описание и блок задачи. Эти поля обязательные.');
-      return;
-    }
     setTaskError('');
     setSavingTask(true);
     const ok = await onCreateTask({
-      title: taskTitle.trim(),
+      title: taskTitle.trim() || 'Без названия',
       description: taskDesc.trim(),
       competency: taskCompetency.trim(),
-      deadline: taskDeadline || nextDateForDay(4),
+      deadline: taskDeadline,
       assignedTo: taskAssignedTo,
       sow: taskSow,
-      tips: taskTips.split('\n').map((tip) => tip.trim()).filter(Boolean),
+      tips: [],
       workload: taskWorkload,
       creatorId: currentUser.id,
     });
@@ -792,36 +768,35 @@ export default function MiniApp({
     faculties: 'Факультеты',
   }[activeTab] || 'Моя неделя';
 
+  useEffect(() => {
+    document.documentElement.classList.toggle('dark-theme', darkTheme);
+    return () => document.documentElement.classList.remove('dark-theme');
+  }, [darkTheme]);
+
   return (
-    <div className="min-h-screen bg-[#f4f7ff] text-slate-950">
-      <header className="sticky top-0 z-30 overflow-hidden bg-[#0050ff] text-white">
-        <div className="absolute inset-0 opacity-35">
-          <div className="absolute inset-x-0 -top-5 text-white/55">
-            <WaveMark />
-          </div>
-          <Sparkle className="absolute bottom-4 left-6 h-3 w-3 text-white" />
-          <Sparkle className="absolute right-1/3 bottom-7 h-3 w-3 text-white" />
-          <Sparkle className="absolute right-20 top-9 h-3.5 w-3.5 text-white" />
+    <div className={`min-h-screen text-slate-950 ${darkTheme ? 'bg-[#07111f]' : 'bg-[#f4f7ff]'}`}>
+      <header className="sticky top-0 z-30 overflow-hidden border-b border-white/10 bg-[#0050ff] text-white shadow-[0_12px_30px_rgba(0,80,255,0.16)]">
+        <div className="absolute inset-x-0 -top-10 opacity-25">
+          <WaveMark />
         </div>
-        <div className="relative px-5 pb-4 pt-3">
-          <div className="flex items-start justify-between gap-4">
+        <div className="relative px-4 pb-3 pt-2.5">
+          <div className="flex items-center justify-between gap-3">
             <div className="font-black italic leading-[0.86] tracking-tight">
-              <div className="text-xl">ITMO</div>
-              <div className="text-xl">MEGA</div>
-              <div className="text-xl">BATTLE</div>
+              <div className="text-base">ITMO</div>
+              <div className="text-base">MEGA</div>
+              <div className="text-base">BATTLE</div>
             </div>
-            <button onClick={onRefreshState} className={`${iconButtonClass} h-10 w-10`} title="Обновить">
-              <RefreshCw className="h-4 w-4" />
-            </button>
-          </div>
-          <div className="mt-3 flex items-end justify-between gap-3">
-            <div>
+            <div className="min-w-0 flex-1">
               <p className="text-[11px] font-semibold uppercase text-white/70">MegaOrgia</p>
-              <h1 className="text-2xl font-black tracking-tight">{pageTitle}</h1>
+              <h1 className="truncate text-xl font-black tracking-tight">{pageTitle}</h1>
             </div>
-            <div className="rounded-2xl border border-white/20 bg-white/15 px-3 py-2 text-right text-xs backdrop-blur">
-              <div className="font-bold">{currentUser.realName}</div>
-              <div className="text-white/70">{isAdmin ? 'Админ' : 'Организатор'}</div>
+            <div className="flex items-center gap-2">
+              <button onClick={() => setDarkTheme((value) => !value)} className={`${iconButtonClass} h-9 w-9`} title="Тема">
+                {darkTheme ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+              </button>
+              <button onClick={onRefreshState} className={`${iconButtonClass} h-9 w-9`} title="Обновить">
+                <RefreshCw className="h-4 w-4" />
+              </button>
             </div>
           </div>
         </div>
@@ -830,13 +805,6 @@ export default function MiniApp({
       <main className="mx-auto flex w-full max-w-3xl flex-col gap-4 px-4 pb-28 pt-4">
         {activeTab === 'slots' && (
           <section className="space-y-4">
-            <HeroCard
-              title="Отметь свободные часы"
-              text=""
-              right={`${votedUsers.length}/${state.users.length}`}
-              caption="заполнили"
-            />
-
             <div className={`rounded-3xl border p-4 shadow-sm ${hasUnsavedSlots ? 'border-amber-200 bg-amber-50' : weekSaved ? 'border-emerald-200 bg-emerald-50' : 'border-blue-100 bg-white'}`}>
               <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <div>
@@ -873,7 +841,6 @@ export default function MiniApp({
                             for (let day = weekIndex * 7; day < weekIndex * 7 + 7; day += 1) next[day] = [];
                             return next;
                           });
-                          setHardUnavailableDays((prev) => prev.filter((day) => day < weekIndex * 7 || day >= weekIndex * 7 + 7));
                           setVisibleWeeks((value) => Math.max(1, value - 1));
                           setHasUnsavedSlots(true);
                         }}
@@ -889,38 +856,33 @@ export default function MiniApp({
                     const absoluteDayIndex = weekIndex * 7 + dayIndex;
                     const selected = slots[absoluteDayIndex] || [];
                     const date = dateForSlotDay(absoluteDayIndex);
-                    const hardUnavailable = hardUnavailableDays.includes(absoluteDayIndex);
                     return (
-                      <div key={`${weekIndex}-${day.full}`} className={`rounded-3xl border p-4 shadow-sm ${hardUnavailable ? 'border-rose-200 bg-rose-50' : 'border-blue-100 bg-white'}`}>
+                      <div key={`${weekIndex}-${day.full}`} className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
                         <div className="mb-3 flex items-center justify-between gap-3">
                           <div>
                             <h2 className="text-base font-black">{day.full}, {formatDayMonth(date)}</h2>
-                            <p className={`text-xs ${hardUnavailable ? 'font-bold text-rose-600' : 'text-slate-500'}`}>
-                              {hardUnavailable ? 'Железно не смогу прийти' : selected.length ? `${selected.length} ч. свободно` : 'Пока ничего не выбрано'}
+                            <p className="text-xs text-slate-500">
+                              {selected.length ? `${selected.length} ч. свободно` : 'Пока ничего не выбрано'}
                             </p>
                           </div>
                           <div className="flex flex-col gap-2 sm:flex-row">
-                            <button onClick={() => toggleHardUnavailableDay(absoluteDayIndex)} className={`${hardUnavailable ? 'rounded-full bg-rose-600 px-4 py-2 text-xs font-black text-white hover:bg-rose-500 active:bg-rose-700' : 'rounded-full bg-rose-50 px-4 py-2 text-xs font-black text-rose-600 hover:bg-rose-100 active:bg-rose-200'} ${pressClass}`}>
-                              ЖЕЛЕЗНО НЕ МОГУ
-                            </button>
-                            <button onClick={() => selectWholeDay(absoluteDayIndex)} disabled={hardUnavailable} className={`${secondaryButtonClass} disabled:opacity-50`}>
+                            <button onClick={() => selectWholeDay(absoluteDayIndex)} className={secondaryButtonClass}>
                               {selected.length === hours.length ? 'Снять' : 'Весь день'}
                             </button>
                           </div>
                         </div>
-                        <div className={`grid grid-cols-4 gap-2 sm:grid-cols-8 ${hardUnavailable ? 'opacity-45' : ''}`}>
+                        <div className="grid grid-cols-4 gap-2 sm:grid-cols-8">
                           {hours.map((hour) => {
                             const active = selected.includes(hour);
                             return (
                               <button
                                 key={hour}
                                 onClick={() => toggleSlot(absoluteDayIndex, hour)}
-                                disabled={hardUnavailable}
                                 className={`h-11 rounded-2xl border text-sm font-black ${pressClass} ${
                                   active
                                     ? 'border-[#0050ff] bg-[#0050ff] text-white shadow-[0_8px_20px_rgba(0,80,255,0.2)] hover:bg-[#0a5cff] active:bg-[#0045d8]'
                                     : 'border-slate-200 bg-slate-50 text-slate-600 hover:bg-blue-50 active:bg-blue-100'
-                                } disabled:cursor-not-allowed`}
+                                }`}
                               >
                                 {hour}:00
                               </button>
@@ -953,13 +915,6 @@ export default function MiniApp({
 
         {activeTab === 'meetings' && (
           <section className="space-y-4">
-            <HeroCard
-              title="Назначить собрание"
-              text=""
-              right={votedUsers.length >= majority ? 'Удобное' : `${majority - votedUsers.length}`}
-              caption={votedUsers.length >= majority ? 'время' : 'до большинства'}
-            />
-
             <div className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
               <h2 className="font-black">Календарь свободных дней</h2>
               <div className="mt-3 grid grid-cols-7 gap-1.5">
@@ -1004,9 +959,24 @@ export default function MiniApp({
                       ))
                     )}
                   </div>
-                  {availabilityByDay[expandedAvailabilityDay].hardUnavailableUsers.length > 0 && (
-                    <div className="mt-3 rounded-xl bg-rose-50 px-3 py-2 text-xs font-bold text-rose-700">
-                      Железно не могут: {availabilityByDay[expandedAvailabilityDay].hardUnavailableUsers.map((user) => user.realName).join(', ')}
+                  <button
+                    type="button"
+                    onClick={() => setExpandedUnavailableDay((value) => (value === expandedAvailabilityDay ? null : expandedAvailabilityDay))}
+                    className={`${secondaryButtonClass} mt-3 w-full`}
+                  >
+                    {expandedUnavailableDay === expandedAvailabilityDay ? 'Скрыть тех, кто не сможет' : `Не смогут (${availabilityByDay[expandedAvailabilityDay].unavailableUsers.length})`}
+                  </button>
+                  {expandedUnavailableDay === expandedAvailabilityDay && (
+                    <div className="mt-3 grid grid-cols-1 gap-2">
+                      {availabilityByDay[expandedAvailabilityDay].unavailableUsers.length === 0 ? (
+                        <div className="rounded-xl bg-white px-3 py-2 text-sm font-semibold text-emerald-600">Все отметили свободное время.</div>
+                      ) : (
+                        availabilityByDay[expandedAvailabilityDay].unavailableUsers.map((user) => (
+                          <a key={user.id} href={telegramLink(user.username)} target="_blank" rel="noreferrer" className="rounded-xl bg-white px-3 py-2 text-sm font-bold text-slate-700">
+                            {user.realName} <span className="text-[#0050ff]">{user.username}</span>
+                          </a>
+                        ))
+                      )}
                     </div>
                   )}
                 </div>
@@ -1043,12 +1013,11 @@ export default function MiniApp({
                             <div className="font-bold text-[#0050ff]">{user.username}</div>
                           </td>
                           {dayLabels.map((_, dayIndex) => {
-                            const hardUnavailable = alignedHardUnavailableDays(state.availabilities[user.id]).includes(dayIndex);
-                            const text = hardUnavailable ? 'Не могу' : formatHours(alignedSlots(state.availabilities[user.id])?.[dayIndex] || []);
-                            const filled = text !== '—' && !hardUnavailable;
+                            const text = formatHours(alignedSlots(state.availabilities[user.id])?.[dayIndex] || []);
+                            const filled = text !== '—';
                             return (
                               <td key={dayIndex} className="px-2 py-2 align-top">
-                                <div className={`min-h-10 rounded-xl px-2 py-1.5 text-center font-bold ${hardUnavailable ? 'bg-rose-50 text-rose-600' : filled ? 'bg-blue-50 text-[#0050ff]' : 'bg-slate-50 text-slate-300'}`}>
+                                <div className={`min-h-10 rounded-xl px-2 py-1.5 text-center font-bold ${filled ? 'bg-blue-50 text-[#0050ff]' : 'bg-slate-50 text-slate-300'}`}>
                                   {text}
                                 </div>
                               </td>
@@ -1109,11 +1078,6 @@ export default function MiniApp({
                           ))
                         )}
                       </div>
-                      {!!suggestion.hardUnavailableUsers?.length && (
-                        <div className="mt-2 rounded-xl bg-rose-50 px-3 py-2 text-xs font-bold text-rose-700">
-                          Железно не могут: {suggestion.hardUnavailableUsers.map((user) => user.realName).join(', ')}
-                        </div>
-                      )}
                     </button>
                   ))
                 )}
@@ -1150,7 +1114,7 @@ export default function MiniApp({
               </Field>
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <Field label="Дата">
-                  <input value={meetingDate} onChange={(e) => setMeetingDate(e.target.value)} className={inputClass} inputMode="numeric" placeholder="06.07.26" />
+                  <DatePickerField value={meetingDate} onChange={setMeetingDate} placeholder="Выбери дату" />
                 </Field>
                 <Field label="Время">
                   <input type="time" value={meetingTime} onChange={(e) => setMeetingTime(e.target.value)} className={inputClass} />
@@ -1251,7 +1215,6 @@ export default function MiniApp({
 
         {activeTab === 'tasks' && (
           <section className="space-y-4">
-            <HeroCard title="Следим за выгоранием" text="" right={myTasks.length} caption="моих задач" />
             <button onClick={openTaskForm} className={primaryButtonClass}>
               {showTaskForm ? <Minus className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
               {showTaskForm ? 'Скрыть форму' : 'Создать задачу'}
@@ -1275,7 +1238,7 @@ export default function MiniApp({
                 </Field>
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                   <Field label="Дедлайн">
-                    <input value={taskDeadline} onChange={(e) => setTaskDeadline(e.target.value)} className={inputClass} inputMode="numeric" placeholder="10.07.26" />
+                    <DatePickerField value={taskDeadline} onChange={setTaskDeadline} placeholder="Без дедлайна" />
                   </Field>
                   <Field label="Нагрузка">
                     <select value={taskWorkload} onChange={(e) => setTaskWorkload(e.target.value as any)} className={selectClass}>
@@ -1302,9 +1265,6 @@ export default function MiniApp({
                 </Field>
                 <Field label="ТЗ">
                   <textarea value={taskSow} onChange={(e) => setTaskSow(e.target.value)} className={inputClass} rows={3} />
-                </Field>
-                <Field label="Подсказки, каждая с новой строки">
-                  <textarea value={taskTips} onChange={(e) => setTaskTips(e.target.value)} className={inputClass} rows={3} />
                 </Field>
                 <button disabled={savingTask} className={`${primaryButtonClass} disabled:opacity-70`}>
                   {savingTask ? 'Сохраняю...' : 'Сохранить задачу'}
@@ -1353,8 +1313,6 @@ export default function MiniApp({
 
         {activeTab === 'team' && (
           <section className="space-y-4">
-            <HeroCard title="Наша команда" text="" right={state.users.length} caption="человек" />
-
             {isAdmin && (
               <button onClick={() => setShowAddUserForm((value) => !value)} className={primaryButtonClass}>
                 {showAddUserForm ? <Minus className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
@@ -1382,7 +1340,7 @@ export default function MiniApp({
                     </select>
                   </Field>
                   <Field label="ДР">
-                    <input value={newUserBirthday} onChange={(e) => setNewUserBirthday(e.target.value)} className={inputClass} placeholder="12.10" />
+                    <DatePickerField value={newUserBirthday} onChange={setNewUserBirthday} placeholder="Выбери дату" withYear={false} />
                   </Field>
                 </div>
                 <button className={primaryButtonClass}>Добавить</button>
@@ -1474,7 +1432,7 @@ export default function MiniApp({
                               </Field>
                               <div className={`grid gap-3 ${isAdmin ? 'grid-cols-2' : 'grid-cols-1'}`}>
                                 <Field label="ДР">
-                                  <input value={userDraft.birthday} onChange={(e) => setUserDraft((prev) => ({ ...prev, birthday: e.target.value }))} className={inputClass} />
+                                  <DatePickerField value={userDraft.birthday} onChange={(value) => setUserDraft((prev) => ({ ...prev, birthday: value }))} placeholder="Выбери дату" withYear={false} />
                                 </Field>
                                 {isAdmin && (
                                   <Field label="Роль">
@@ -1540,7 +1498,6 @@ export default function MiniApp({
 
         {activeTab === 'faculties' && (
           <section className="space-y-4">
-            <HeroCard title="Мегафакеры" text="" right={faculties.length} caption="факультетов" />
             {!isAdmin ? (
               <EmptyState text="Раздел доступен админу" />
             ) : (
@@ -1737,7 +1694,7 @@ export default function MiniApp({
                     {facultyTaskErrors.description && <RequiredHint />}
                   </Field>
                   <Field label="Дедлайн">
-                    <input value={facultyTaskDraft.deadline} onChange={(e) => { setFacultyTaskErrors((prev) => ({ ...prev, deadline: false })); setFacultyTaskDraft((prev) => ({ ...prev, deadline: e.target.value })); }} className={`${inputClass} ${facultyTaskErrors.deadline ? 'border-rose-300 bg-rose-50 focus:border-rose-500' : ''}`} placeholder="20.10.26" />
+                    <DatePickerField value={facultyTaskDraft.deadline} onChange={(value) => { setFacultyTaskErrors((prev) => ({ ...prev, deadline: false })); setFacultyTaskDraft((prev) => ({ ...prev, deadline: value })); }} placeholder="Выбери дату" error={facultyTaskErrors.deadline} />
                     {facultyTaskErrors.deadline && <RequiredHint />}
                   </Field>
                   <Field label="Напоминания">
@@ -1894,13 +1851,13 @@ export default function MiniApp({
         )}
       </main>
 
-      <nav className="fixed inset-x-0 bottom-0 z-40 border-t border-blue-100 bg-white/95 px-2 pb-[calc(env(safe-area-inset-bottom)+8px)] pt-2 shadow-[0_-12px_30px_rgba(0,80,255,0.08)] backdrop-blur">
+      <nav className="fixed inset-x-0 bottom-0 z-40 border-t border-blue-100 bg-white/95 px-1.5 pb-[calc(env(safe-area-inset-bottom)+6px)] pt-1.5 shadow-[0_-12px_30px_rgba(0,80,255,0.08)] backdrop-blur">
         <div className="mx-auto grid max-w-3xl grid-cols-5 gap-1">
           <NavButton icon={<CalendarDays />} label="Слоты" active={activeTab === 'slots'} onClick={() => setActiveTab('slots')} />
           <NavButton icon={<Users />} label="Встречи" active={activeTab === 'meetings'} onClick={() => setActiveTab('meetings')} />
           <NavButton icon={<BriefcaseBusiness />} label="Задачи" active={activeTab === 'tasks'} onClick={() => setActiveTab('tasks')} />
           <NavButton icon={<Shield />} label="Команда" active={activeTab === 'team'} onClick={() => setActiveTab('team')} />
-          <NavButton icon={<GraduationCap />} label="Факультеты" active={activeTab === 'faculties'} onClick={() => setActiveTab('faculties')} />
+          <NavButton icon={<GraduationCap />} label="Фак-ти" active={activeTab === 'faculties'} onClick={() => setActiveTab('faculties')} />
         </div>
       </nav>
     </div>
@@ -1925,38 +1882,45 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   );
 }
 
-function RequiredHint({ text = 'Обязательное поле' }: { text?: string }) {
-  return <div className="mt-1 text-xs font-black text-rose-500">{text}</div>;
-}
-
-function HeroCard({ title, text, right, caption }: { title: string; text: string; right: string | number; caption: string }) {
+function DatePickerField({
+  value,
+  onChange,
+  placeholder = 'Выбери дату',
+  withYear = true,
+  error = false,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  placeholder?: string;
+  withYear?: boolean;
+  error?: boolean;
+}) {
+  const inputValue = shortDateToInputDate(value);
   return (
-    <div className="relative overflow-hidden rounded-[2rem] bg-[linear-gradient(115deg,#111827_0%,#123c8c_48%,#0050ff_100%)] p-5 text-white shadow-[0_18px_50px_rgba(0,80,255,0.18)]">
-      <div className="absolute inset-0 bg-[radial-gradient(circle_at_20%_0%,rgba(255,255,255,0.12),transparent_35%)]" />
-      <div className="absolute inset-x-0 top-0 opacity-45">
-        <WaveMark />
+    <div className="relative">
+      <input
+        type="date"
+        value={inputValue}
+        onChange={(event) => onChange(inputDateToShortDate(event.target.value, withYear))}
+        className={`${inputClass} cursor-pointer appearance-none pr-12 text-transparent caret-transparent ${error ? 'border-rose-300 bg-rose-50 focus:border-rose-500' : ''}`}
+      />
+      <div className={`pointer-events-none absolute inset-y-0 left-3 flex items-center text-sm font-semibold ${value ? 'text-slate-950' : 'text-slate-400'}`}>
+        {value || placeholder}
       </div>
-      <Sparkle className="absolute right-10 bottom-8 h-4 w-4 text-white" />
-      <Sparkle className="absolute left-8 top-8 h-3 w-3 text-white/80" />
-      <Sparkle className="absolute right-24 top-6 h-3 w-3 text-white/70" />
-      <div className="relative flex items-center justify-between gap-4">
-        <div>
-          <h2 className="text-xl font-black tracking-tight">{title}</h2>
-          {text && <p className="mt-2 max-w-[15rem] text-sm font-medium text-white/72">{text}</p>}
-        </div>
-        <div className="rounded-3xl border border-white/20 bg-white/15 px-4 py-3 text-center backdrop-blur">
-          <div className="text-2xl font-black">{right}</div>
-          <div className="text-[10px] font-bold uppercase text-white/70">{caption}</div>
-        </div>
-      </div>
+      <CalendarDays className="pointer-events-none absolute right-4 top-1/2 h-4 w-4 -translate-y-1/2 text-[#0050ff]" />
+      <style>{`.dark-theme input[type="date"]::-webkit-calendar-picker-indicator{opacity:0}`}</style>
     </div>
   );
 }
 
+function RequiredHint({ text = 'Обязательное поле' }: { text?: string }) {
+  return <div className="mt-1 text-xs font-black text-rose-500">{text}</div>;
+}
+
 function NavButton({ icon, label, active, onClick }: { icon: React.ReactElement; label: string; active: boolean; onClick: () => void }) {
   return (
-    <button onClick={onClick} className={`flex h-14 min-w-0 flex-col items-center justify-center gap-0.5 rounded-2xl px-1 text-[10px] font-black leading-tight ${pressClass} ${active ? 'bg-[#0050ff] text-white shadow-[0_10px_24px_rgba(0,80,255,0.24)] hover:bg-[#0a5cff] active:bg-[#0045d8]' : 'text-slate-500 hover:bg-blue-50 active:bg-blue-100'}`}>
-      {React.cloneElement(icon, { className: 'h-4 w-4' })}
+    <button onClick={onClick} className={`flex h-12 min-w-0 flex-col items-center justify-center gap-0.5 rounded-2xl px-0.5 text-[9px] font-black leading-tight sm:h-14 sm:text-[10px] ${pressClass} ${active ? 'bg-[#0050ff] text-white shadow-[0_10px_24px_rgba(0,80,255,0.20)] hover:bg-[#0a5cff] active:bg-[#0045d8]' : 'text-slate-500 hover:bg-blue-50 active:bg-blue-100'}`}>
+      {React.cloneElement(icon, { className: 'h-4 w-4 sm:h-4 sm:w-4' })}
       <span className="truncate">{label}</span>
     </button>
   );
