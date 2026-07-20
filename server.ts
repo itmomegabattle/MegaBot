@@ -2061,6 +2061,11 @@ async function startServer() {
   }
 
   async function startTelegramLongPolling() {
+    if (process.env.DISABLE_TELEGRAM_POLLING === 'true') {
+      console.log('Telegram long polling disabled by DISABLE_TELEGRAM_POLLING.');
+      return;
+    }
+
     const botToken = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
     if (!botToken) {
       console.warn('BOT_TOKEN / TELEGRAM_BOT_TOKEN is not set in .env. Telegram long polling was not started.');

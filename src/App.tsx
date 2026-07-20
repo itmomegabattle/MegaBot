@@ -18,6 +18,11 @@ export default function App() {
       const res = await fetch('/api/state');
       const data = await res.json();
       setState(data);
+      const isLocalPreview = ['localhost', '127.0.0.1'].includes(window.location.hostname);
+      if (isLocalPreview && !currentUserId) {
+        const previewUser = data.users?.find((user: any) => user.registered && (user.role === 'admin' || user.role === 'organizer'));
+        if (previewUser) setCurrentUserId(previewUser.id);
+      }
     } catch (err) {
       console.error('Error fetching app state:', err);
     } finally {

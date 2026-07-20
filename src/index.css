@@ -1,12 +1,107 @@
 @import "tailwindcss";
 
+.mega-shell {
+  background:
+    linear-gradient(180deg, rgba(0, 80, 255, 0.08), transparent 180px),
+    #eef3fb;
+}
+
+.mega-shell .rounded-3xl {
+  border-radius: 18px !important;
+}
+
+.mega-shell .rounded-2xl {
+  border-radius: 14px !important;
+}
+
+.mega-shell section > .bg-white,
+.mega-shell form.bg-white,
+.mega-shell .space-y-3 > .bg-white,
+.mega-shell .space-y-4 > .bg-white {
+  border-color: rgba(16, 42, 90, 0.10) !important;
+  box-shadow: 0 10px 26px rgba(5, 22, 53, 0.07) !important;
+}
+
+.mega-shell section > .bg-white,
+.mega-shell form.bg-white {
+  position: relative;
+  overflow: hidden;
+}
+
+.mega-shell section > .bg-white::before,
+.mega-shell form.bg-white::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 3px;
+  background: linear-gradient(90deg, #0050ff, #061123);
+}
+
+.mega-shell h2,
+.mega-shell h3 {
+  letter-spacing: -0.01em;
+}
+
+.mega-shell input,
+.mega-shell textarea,
+.mega-shell select {
+  border-radius: 14px !important;
+  border-color: rgba(16, 42, 90, 0.14) !important;
+  background-color: #f8fbff !important;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.85);
+}
+
+.mega-shell input:focus,
+.mega-shell textarea:focus,
+.mega-shell select:focus {
+  background-color: #ffffff !important;
+  border-color: #0050ff !important;
+  box-shadow: 0 0 0 4px rgba(0, 80, 255, 0.10) !important;
+}
+
+.mega-shell button {
+  letter-spacing: 0;
+}
+
+.mega-shell nav {
+  background: rgba(255, 255, 255, 0.92) !important;
+  box-shadow: 0 -18px 40px rgba(5, 22, 53, 0.10) !important;
+}
+
+.mega-shell nav button {
+  border: 1px solid transparent;
+}
+
+.mega-shell nav button:not(.bg-\[\#0050ff\]) {
+  background: rgba(241, 246, 255, 0.72);
+}
+
+.mega-shell table th {
+  background: #f1f6ff !important;
+}
+
+.mega-shell table td {
+  background: #ffffff;
+}
+
 html.dark-theme body {
   background: #07111f;
+}
+
+html.dark-theme .mega-shell {
+  background:
+    linear-gradient(180deg, rgba(0, 80, 255, 0.14), transparent 190px),
+    #07111f;
 }
 
 html.dark-theme .bg-white,
 html.dark-theme .bg-white\/95 {
   background-color: rgba(13, 24, 41, 0.96) !important;
+}
+
+html.dark-theme .mega-shell section > .bg-white::before,
+html.dark-theme .mega-shell form.bg-white::before {
+  background: linear-gradient(90deg, #2f7dff, #8fb6ff);
 }
 
 html.dark-theme .bg-slate-50,
@@ -47,6 +142,7 @@ html.dark-theme input,
 html.dark-theme textarea,
 html.dark-theme select {
   color: #f8fafc;
+  background-color: rgba(17, 31, 53, 0.96) !important;
 }
 
 html.dark-theme input::placeholder,

@@ -774,11 +774,12 @@ export default function MiniApp({
   }, [darkTheme]);
 
   return (
-    <div className={`min-h-screen text-slate-950 ${darkTheme ? 'bg-[#07111f]' : 'bg-[#f4f7ff]'}`}>
-      <header className="sticky top-0 z-30 overflow-hidden border-b border-white/10 bg-[#0050ff] text-white shadow-[0_12px_30px_rgba(0,80,255,0.16)]">
-        <div className="absolute inset-x-0 -top-10 opacity-25">
+    <div className={`mega-shell min-h-screen text-slate-950 ${darkTheme ? 'bg-[#07111f]' : 'bg-[#eef3fb]'}`}>
+      <header className="sticky top-0 z-30 overflow-hidden border-b border-white/10 bg-[#061123] text-white shadow-[0_12px_30px_rgba(3,12,28,0.18)]">
+        <div className="absolute inset-x-0 -top-12 opacity-20">
           <WaveMark />
         </div>
+        <div className="absolute bottom-0 left-0 h-1 w-full bg-[#0050ff]" />
         <div className="relative px-4 pb-3 pt-2.5">
           <div className="flex items-center justify-between gap-3">
             <div className="font-black italic leading-[0.86] tracking-tight">
@@ -802,7 +803,7 @@ export default function MiniApp({
         </div>
       </header>
 
-      <main className="mx-auto flex w-full max-w-3xl flex-col gap-4 px-4 pb-28 pt-4">
+      <main className="mx-auto flex w-full max-w-3xl flex-col gap-4 px-4 pb-24 pt-4">
         {activeTab === 'slots' && (
           <section className="space-y-4">
             <div className={`rounded-3xl border p-4 shadow-sm ${hasUnsavedSlots ? 'border-amber-200 bg-amber-50' : weekSaved ? 'border-emerald-200 bg-emerald-50' : 'border-blue-100 bg-white'}`}>
@@ -1238,7 +1239,7 @@ export default function MiniApp({
                 </Field>
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                   <Field label="Дедлайн">
-                    <DatePickerField value={taskDeadline} onChange={setTaskDeadline} placeholder="Без дедлайна" />
+                    <DatePickerField value={taskDeadline} onChange={setTaskDeadline} placeholder="Дата не выбрана" />
                   </Field>
                   <Field label="Нагрузка">
                     <select value={taskWorkload} onChange={(e) => setTaskWorkload(e.target.value as any)} className={selectClass}>
@@ -1885,7 +1886,7 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 function DatePickerField({
   value,
   onChange,
-  placeholder = 'Выбери дату',
+  placeholder = 'Дата не выбрана',
   withYear = true,
   error = false,
 }: {
@@ -1897,18 +1898,17 @@ function DatePickerField({
 }) {
   const inputValue = shortDateToInputDate(value);
   return (
-    <div className="relative">
+    <div>
       <input
         type="date"
         value={inputValue}
         onChange={(event) => onChange(inputDateToShortDate(event.target.value, withYear))}
-        className={`${inputClass} cursor-pointer appearance-none pr-12 text-transparent caret-transparent ${error ? 'border-rose-300 bg-rose-50 focus:border-rose-500' : ''}`}
+        className={`${inputClass} cursor-pointer pr-3 ${error ? 'border-rose-300 bg-rose-50 focus:border-rose-500' : ''}`}
       />
-      <div className={`pointer-events-none absolute inset-y-0 left-3 flex items-center text-sm font-semibold ${value ? 'text-slate-950' : 'text-slate-400'}`}>
+      <div className={`mt-1 flex items-center gap-1.5 text-[11px] font-bold ${value ? 'text-[#0050ff]' : 'text-slate-400'}`}>
+        <CalendarDays className="h-3.5 w-3.5" />
         {value || placeholder}
       </div>
-      <CalendarDays className="pointer-events-none absolute right-4 top-1/2 h-4 w-4 -translate-y-1/2 text-[#0050ff]" />
-      <style>{`.dark-theme input[type="date"]::-webkit-calendar-picker-indicator{opacity:0}`}</style>
     </div>
   );
 }
