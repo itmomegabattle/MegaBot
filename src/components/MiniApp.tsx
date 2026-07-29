@@ -6,7 +6,6 @@ import {
   Briefcase,
   Shield,
   Check,
-  ArrowsClockwise,
   Plus,
   Minus,
   Trash,
@@ -962,8 +961,15 @@ export default function MiniApp({
               <button onClick={() => setDarkTheme((value) => !value)} className={`${iconButtonClass} h-11 w-11`} title="Тема" aria-label={darkTheme ? 'Включить светлую тему' : 'Включить тёмную тему'}>
                 {darkTheme ? <Sun className="h-5 w-5" weight="regular" /> : <Moon className="h-5 w-5" weight="regular" />}
               </button>
-              <button onClick={onRefreshState} className={`${iconButtonClass} h-11 w-11`} title="Обновить" aria-label="Обновить данные">
-                <ArrowsClockwise className="h-5 w-5" weight="regular" />
+              <button
+                type="button"
+                onClick={() => setActiveTab('profile')}
+                aria-current={activeTab === 'profile' ? 'page' : undefined}
+                className={`${iconButtonClass} h-11 w-11`}
+                title="Профиль"
+                aria-label="Открыть профиль"
+              >
+                <UserCircle className="h-6 w-6" weight="fill" />
               </button>
             </div>
           </div>
@@ -2537,6 +2543,7 @@ function TaskLogView({ tasksByCompetency, users }: { tasksByCompetency: Record<s
                       <span>Назначена: <b>{formatDateTimeShort(task.createdAt)}</b></span>
                       <span>Дедлайн: <b>{formatDateShort(task.deadline)}</b></span>
                       {task.completedAt && <span>Выполнена: <b>{formatDateTimeShort(task.completedAt)}</b></span>}
+                      {task.timeSpentMinutes ? <span>Затрачено: <b>{taskDurationText(task.timeSpentMinutes)}</b></span> : null}
                     </div>
                     {task.sow && <div className="mt-2 rounded-xl bg-slate-50 p-2 text-xs text-slate-600">{task.sow}</div>}
                   </div>
