@@ -588,6 +588,17 @@ try {
     call.path.endsWith('/sendMessage')
     && String(call.body.text || '').includes('Чат привязан')
   )));
+  const boundChatCommandsCall = telegramCalls.find((call) => (
+    call.path.endsWith('/setMyCommands')
+    && call.body.scope?.type === 'chat'
+    && call.body.scope?.chat_id === -100500
+  ));
+  assert.ok(boundChatCommandsCall);
+  assert.deepEqual(
+    boundChatCommandsCall.body.commands.map((command) => command.command),
+    ['all', 'meeting', 'deadlines', 'slots', 'birthdays', 'checkin', 'help'],
+  );
+  assert.ok(!boundChatCommandsCall.body.commands.some((command) => command.command === 'start'));
 
   telegramCalls.length = 0;
   await request('/api/telegram-webhook', {
