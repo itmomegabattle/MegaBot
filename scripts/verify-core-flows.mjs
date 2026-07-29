@@ -219,6 +219,23 @@ try {
 
   telegramCalls.length = 0;
   await request('/api/telegram-webhook', {
+    update_id: 100,
+    message: {
+      message_id: 100,
+      chat: { id: 100, type: 'private' },
+      from: { id: 100, username: 'admin', first_name: 'Админ' },
+      text: '/start',
+    },
+  });
+  const adminMenuCall = telegramCalls.find((call) => call.path.endsWith('/sendMessage') && call.body.reply_markup?.keyboard);
+  assert.deepEqual(adminMenuCall.body.reply_markup.keyboard.map((row) => row.length), [2, 2, 2]);
+  assert.deepEqual(
+    adminMenuCall.body.reply_markup.keyboard.flat().map((button) => button.text),
+    ['Профиль', 'Слоты', 'Встречи', 'Задачи', 'МФ', 'Помощь'],
+  );
+
+  telegramCalls.length = 0;
+  await request('/api/telegram-webhook', {
     update_id: 101,
     message: {
       message_id: 101,
@@ -325,7 +342,7 @@ try {
     callback_query: {
       id: 'slots-day',
       from: aliceTelegram,
-      data: 'slots_day:1',
+      data: 'slots_day:2',
       message: { message_id: slotsPanelId, chat: { id: 200, type: 'private' } },
     },
   });
@@ -337,7 +354,7 @@ try {
     callback_query: {
       id: 'slots-hour',
       from: aliceTelegram,
-      data: 'slot_toggle:1:18',
+      data: 'slot_toggle:2:18',
       message: { message_id: slotsPanelId, chat: { id: 200, type: 'private' } },
     },
   });
@@ -357,7 +374,8 @@ try {
     call.path.endsWith('/sendMessage') && call.body.reply_markup?.inline_keyboard
   ));
   assert.ok(slotsDaysCall);
-  assert.ok(slotsDaysCall.body.reply_markup.inline_keyboard.flat().some((button) => button.callback_data === 'slots_day:1' && button.text.includes('✓')));
+  assert.ok(slotsDaysCall.body.reply_markup.inline_keyboard.flat().some((button) => button.callback_data === 'slots_day:2' && button.text.includes('✓')));
+  assert.ok(String(slotsDaysCall.body.text || '').includes('Ср: 18:00'));
 
   telegramCalls.length = 0;
   await request('/api/telegram-webhook', {
@@ -375,7 +393,7 @@ try {
   assert.ok(slotsSavedButtons.includes('Профиль'));
   assert.ok(!slotsSavedButtons.includes('Команда'));
   const slotsSavedDatabase = JSON.parse(await readFile(testDatabasePath, 'utf8'));
-  assert.ok(slotsSavedDatabase.availabilities.u_alice.slots['1'].includes(18));
+  assert.ok(slotsSavedDatabase.availabilities.u_alice.slots['2'].includes(18));
 
   telegramCalls.length = 0;
   await request('/api/telegram-webhook', {
@@ -507,6 +525,11 @@ try {
   assert.equal(completed.data.task.timeSpentMinutes, 95);
   assert.equal(telegramCalls.filter((call) => call.path.endsWith('/sendMessage')).length, 1);
   assert.equal(telegramCalls.find((call) => call.path.endsWith('/sendMessage')).body.chat_id, '100');
+  const taskExportResponse = await fetch(`http://127.0.0.1:${appPort}/api/task/export`, {
+    headers: { Cookie: sessionCookie },
+  });
+  assert.equal(taskExportResponse.status, 200);
+  assert.ok((await taskExportResponse.text()).includes('1 ч 35 мин'));
 
   const aliceSessionCookie = sessionCookie;
   const facultyAuth = await request('/api/user/get-or-create', {

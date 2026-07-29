@@ -689,8 +689,9 @@ async function startServer() {
       [{ text: 'Профиль' }, { text: 'Слоты' }],
       [{ text: 'Встречи' }, { text: 'Задачи' }],
     );
-    if (user?.role === 'admin') keyboard.push([{ text: 'МФ' }]);
-    keyboard.push([{ text: 'Помощь' }]);
+    keyboard.push(user?.role === 'admin'
+      ? [{ text: 'МФ' }, { text: 'Помощь' }]
+      : [{ text: 'Помощь' }]);
 
     return {
       keyboard,
@@ -1011,8 +1012,7 @@ async function startServer() {
       : [
           ['Профиль', 'Слоты'],
           ['Встречи', 'Задачи'],
-          ...(user.role === 'admin' ? [['МФ']] : []),
-          ['Помощь'],
+          ...(user.role === 'admin' ? [['МФ', 'Помощь']] : [['Помощь']]),
         ];
     await sendTelegramKeyboard(chatId, profileSummaryText(user, state), rows, false, user);
   }
@@ -1064,7 +1064,7 @@ async function startServer() {
       })),
       [{ text: 'Сохранить как есть', callback_data: 'slot_save' }],
     ];
-    await sendInlinePanel(chatId, slotsSummaryText(user, state), keyboard);
+    await sendInlinePanel(chatId, slotsSummaryText(user, state, availability), keyboard);
   }
 
   async function showMeetingsPanel(chatId: string | number, user: User, state: SimulationState) {
