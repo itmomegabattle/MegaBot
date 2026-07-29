@@ -246,7 +246,7 @@ Potentially long collections show the first three items by default. The expand/c
 
 ### Participant Profile
 
-The participant identity and the dedicated circular profile icon in the sticky header are profile entry points; the icon sits beside the theme control and replaces the former refresh action with the same header-control styling. The profile does not add a sixth bottom-navigation item. It is a personal operations summary: identity, role, full birthday, competencies, current-week availability, active and completed task counts, upcoming meetings, quick section shortcuts, the next meeting, and up to three focus tasks. Administrative team cards retain registration, joined-at, and last-activity metadata.
+The participant identity and the dedicated circular profile icon in the sticky header are profile entry points; the icon sits beside the theme control and uses the same header-control styling. The profile does not add a sixth bottom-navigation item. It presents identity, role, full birthday, primary and secondary competencies, and current-week slot completion first. Its statistics are explicitly scoped to tasks assigned to or created by the participant: assigned and completed counts, active and important work, completion against deadlines, created-task outcomes, and recorded working time. A separate weekly-rhythm card summarizes days and hours available, the strongest availability day, and average recorded task time. The profile contains no shortcuts to Slots, Meetings, or Tasks, no next-meeting card, and no “In Focus” task list. Administrative team cards retain registration, joined-at, and last-activity metadata.
 
 ### Availability Slot
 

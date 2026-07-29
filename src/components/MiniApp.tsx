@@ -92,6 +92,13 @@ const shortDateToInputDate = (value?: string) => {
   return `${year}-${match[2]}-${match[1]}`;
 };
 
+const deadlineTimestamp = (value?: string) => {
+  const normalized = shortDateToInputDate(value);
+  if (!normalized) return null;
+  const timestamp = new Date(`${normalized}T23:59:59`).getTime();
+  return Number.isNaN(timestamp) ? null : timestamp;
+};
+
 const inputDateToShortDate = (value: string, withYear = true, fullYear = false) => {
   const match = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (!match) return '';
@@ -323,19 +330,38 @@ export default function MiniApp({
   const latestCompletedTasks = completedTasks.slice(0, 10);
   const scheduledMeetings = state.meetings.filter((meeting) => meeting.status === 'scheduled');
   const visibleScheduledMeetings = showAllMeetings ? scheduledMeetings : scheduledMeetings.slice(0, 3);
-  const profileMeetings = scheduledMeetings
-    .filter((meeting) => (
-      (meeting.participants === 'all'
-        || meeting.participants.includes(currentUser.id)
-        || meeting.hostId === currentUser.id)
-      && meetingDateTime(meeting) >= Date.now()
-    ))
-    .slice()
-    .sort((a, b) => meetingDateTime(a) - meetingDateTime(b));
+  const profileAssignedTasks = state.tasks.filter((task) => taskAssigneeIds(task).includes(currentUser.id));
   const profileCompletedTasks = completedTasks.filter((task) => taskAssigneeIds(task).includes(currentUser.id));
+  const profileDatedCompletedTasks = profileCompletedTasks.filter((task) => (
+    Boolean(task.completedAt) && deadlineTimestamp(task.deadline) !== null
+  ));
+  const profileOnTimeTasks = profileDatedCompletedTasks.filter((task) => (
+    new Date(task.completedAt as string).getTime() <= (deadlineTimestamp(task.deadline) as number)
+  ));
+  const profileTimedTasks = profileCompletedTasks.filter((task) => Number(task.timeSpentMinutes) > 0);
+  const profileTrackedMinutes = profileTimedTasks.reduce((sum, task) => sum + Number(task.timeSpentMinutes), 0);
+  const profileAverageMinutes = profileTimedTasks.length
+    ? Math.round(profileTrackedMinutes / profileTimedTasks.length)
+    : null;
+  const profileCreatedTasks = state.tasks.filter((task) => task.creatorId === currentUser.id);
+  const profileCreatedCompletedTasks = profileCreatedTasks.filter((task) => task.status === 'completed');
+  const profileImportantTasks = myTasks.filter((task) => task.priority === 'important' || task.priority === 'critical');
+  const profileCompletedByCompetency = profileCompletedTasks.reduce<Record<string, number>>((acc, task) => {
+    const competency = task.competency || 'Без блока';
+    acc[competency] = (acc[competency] || 0) + 1;
+    return acc;
+  }, {});
+  const profileTopCompetency = Object.entries(profileCompletedByCompetency)
+    .sort((a, b) => b[1] - a[1])[0]?.[0] || 'пока нет данных';
   const profileAvailability = alignedSlots(state.availabilities[currentUser.id]);
   const profileAvailableHours = Array.from({ length: 7 }, (_, dayIndex) => profileAvailability[dayIndex] || [])
     .reduce((sum, dayHours) => sum + dayHours.length, 0);
+  const profileAvailableDays = Array.from({ length: 7 }, (_, dayIndex) => profileAvailability[dayIndex] || [])
+    .filter((dayHours) => dayHours.length > 0).length;
+  const profileBestAvailability = Array.from({ length: 7 }, (_, dayIndex) => ({
+    day: dayLabels[dayIndex].full,
+    hours: (profileAvailability[dayIndex] || []).length,
+  })).sort((a, b) => b.hours - a.hours)[0];
   const profileUnavailableDays = new Set(alignedUnavailableDays(state.availabilities[currentUser.id]).filter((day) => day < 7));
   const profileSlotsCompleted = Array.from({ length: 7 }, (_, dayIndex) => (
     (profileAvailability[dayIndex] || []).length > 0 || profileUnavailableDays.has(dayIndex)
@@ -999,10 +1025,10 @@ export default function MiniApp({
 
               <div className="mt-5 grid grid-cols-2 overflow-hidden rounded-2xl border border-blue-100 bg-slate-50 sm:grid-cols-4">
                 {[
-                  ['Активные задачи', myTasks.length],
-                  ['Выполнено', profileCompletedTasks.length],
-                  ['Встречи', profileMeetings.length],
-                  ['Свободные часы', profileAvailableHours],
+                  ['Завершено из назначенных', `${profileCompletedTasks.length} из ${profileAssignedTasks.length}`],
+                  ['Сейчас в работе', myTasks.length],
+                  ['В срок среди задач с дедлайном', profileDatedCompletedTasks.length ? `${profileOnTimeTasks.length} из ${profileDatedCompletedTasks.length}` : '—'],
+                  ['Учтено времени', taskDurationText(profileTrackedMinutes) || '—'],
                 ].map(([label, value], index) => (
                   <div key={String(label)} className={`p-3 ${index % 2 ? 'border-l border-blue-100' : ''} ${index > 1 ? 'border-t border-blue-100 sm:border-t-0 sm:border-l' : ''}`}>
                     <div className="text-xl font-black text-[#0069E0]">{value}</div>
@@ -1018,44 +1044,43 @@ export default function MiniApp({
               </div>
             </div>
 
-            <div className="grid grid-cols-3 gap-2">
-              <button type="button" onClick={() => setActiveTab('slots')} className={secondaryButtonClass}>
-                <CalendarDots className="h-4 w-4" />
-                Слоты
-              </button>
-              <button type="button" onClick={() => setActiveTab('meetings')} className={secondaryButtonClass}>
-                <UsersThree className="h-4 w-4" />
-                Встречи
-              </button>
-              <button type="button" onClick={() => setActiveTab('tasks')} className={secondaryButtonClass}>
-                <Briefcase className="h-4 w-4" />
-                Задачи
-              </button>
+            <div className="rounded-3xl border border-blue-100 bg-white p-5 shadow-sm">
+              <h3 className="text-lg font-black">Статистика задач</h3>
+              <p className="mt-1 text-sm font-semibold text-slate-500">Только задачи, которые были назначены тебе или созданы тобой</p>
+              <div className="mt-4 space-y-3 text-sm text-slate-600">
+                <InfoRow label="Создано задач" value={String(profileCreatedTasks.length)} />
+                <InfoRow label="Завершено из созданных" value={String(profileCreatedCompletedTasks.length)} />
+                <InfoRow label="Важных сейчас в работе" value={String(profileImportantTasks.length)} />
+                <InfoRow label="Блок завершённых задач" value={profileTopCompetency} />
+                <InfoRow
+                  label="Время указано"
+                  value={`${profileTimedTasks.length} из ${profileCompletedTasks.length} выполненных`}
+                />
+              </div>
             </div>
 
-            {profileMeetings[0] && (
-              <div className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
-                <div className="text-xs font-black uppercase text-slate-400">Следующая встреча</div>
-                <h3 className="mt-2 font-black">{profileMeetings[0].title}</h3>
-                <p className="mt-1 text-sm font-semibold text-slate-500">
-                  {formatDateShort(profileMeetings[0].date)} · {profileMeetings[0].time}
+            <div className="rounded-3xl border border-blue-100 bg-white p-5 shadow-sm">
+              <h3 className="text-lg font-black">Ритм недели</h3>
+              <p className="mt-1 text-sm font-semibold text-slate-500">Как распределены доступность и нагрузка</p>
+              <div className="mt-4 grid grid-cols-2 gap-px overflow-hidden rounded-2xl border border-blue-100 bg-blue-100">
+                {[
+                  ['Дней со слотами', `${profileAvailableDays} из 7`],
+                  ['Свободных часов', profileAvailableHours],
+                  ['Самый свободный день', profileBestAvailability?.hours ? profileBestAvailability.day : '—'],
+                  ['Среднее время задачи', profileAverageMinutes ? taskDurationText(profileAverageMinutes) : '—'],
+                ].map(([label, value]) => (
+                  <div key={String(label)} className="min-w-0 bg-slate-50 p-3">
+                    <div className="break-words text-base font-black text-[#0069E0]">{value}</div>
+                    <div className="mt-1 text-xs font-bold text-slate-500">{label}</div>
+                  </div>
+                ))}
+              </div>
+              {!profileSlotsCompleted && (
+                <p className="mt-4 rounded-2xl bg-blue-50 px-3 py-2 text-sm font-bold text-[#005BC4]">
+                  Заполни всю неделю, чтобы статистика доступности была точнее.
                 </p>
-              </div>
-            )}
-
-            {myTasks.length > 0 && (
-              <div className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
-                <div className="text-xs font-black uppercase text-slate-400">В фокусе</div>
-                <div className="mt-3 space-y-2">
-                  {myTasks.slice(0, 3).map((task) => (
-                    <div key={task.id} className="flex items-center justify-between gap-3 rounded-2xl bg-slate-50 px-3 py-2">
-                      <span className="min-w-0 truncate text-sm font-black">{task.title}</span>
-                      <span className="shrink-0 text-xs font-bold text-[#0069E0]">{formatDateShort(task.deadline) || 'без даты'}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
+              )}
+            </div>
           </section>
         )}
 
@@ -2616,12 +2641,12 @@ function CompactUserLinks({ users }: { users: Pick<User, 'id' | 'realName' | 'us
 
 function InfoRow({ label, value, href }: { label: string; value: string; href?: string }) {
   return (
-    <div className="flex items-center justify-between gap-4">
-      <span className="text-slate-400">{label}</span>
+    <div className="flex items-start justify-between gap-4">
+      <span className="min-w-0 text-slate-400">{label}</span>
       {href ? (
-        <a href={href} target="_blank" rel="noreferrer" className="font-bold text-[#0069E0]">{value}</a>
+        <a href={href} target="_blank" rel="noreferrer" className="min-w-0 max-w-[60%] break-words text-right font-bold text-[#0069E0] [overflow-wrap:anywhere]">{value}</a>
       ) : (
-        <span className="font-bold text-slate-700">{value}</span>
+        <span className="min-w-0 max-w-[60%] break-words text-right font-bold text-slate-700 [overflow-wrap:anywhere]">{value}</span>
       )}
     </div>
   );
