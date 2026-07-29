@@ -12,6 +12,8 @@ export interface User {
   competencies?: string[];
   primaryCompetency?: string;
   facultyId?: string;
+  joinedAt?: string;
+  lastSeenAt?: string;
 }
 
 export interface Availability {
@@ -92,4 +94,7 @@ export interface SimulationState {
   meetings: Meeting[];
   tasks: Task[];
   messages: Record<string, BotMessage[]>;
+  settings?: {
+    teamChatId?: string;
+  };
 }

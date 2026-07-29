@@ -24,6 +24,7 @@ const fixture = {
       avatarSeed: 'admin',
       telegramId: '100',
       registered: true,
+      birthday: '15.04.1998',
       competencies: ['Дизайн'],
       primaryCompetency: 'Дизайн',
       facultyId: '',
@@ -35,6 +36,7 @@ const fixture = {
       role: 'organizer',
       avatarSeed: 'alice',
       registered: false,
+      birthday: '09.11.2000',
       competencies: ['Дизайн'],
       primaryCompetency: 'Дизайн',
       facultyId: '',
@@ -47,6 +49,7 @@ const fixture = {
       avatarSeed: 'bob',
       telegramId: '300',
       registered: true,
+      birthday: '21.02.1999',
       competencies: [],
       primaryCompetency: '',
       facultyId: '',
@@ -59,6 +62,7 @@ const fixture = {
       avatarSeed: 'faculty',
       telegramId: '400',
       registered: true,
+      birthday: '03.06.2001',
       competencies: ['Дизайн'],
       primaryCompetency: 'Дизайн',
       facultyId: 'fac_test',
@@ -125,7 +129,12 @@ const fakeTelegram = http.createServer((req, res) => {
       body: rawBody ? JSON.parse(rawBody) : {},
     });
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ ok: true, result: true }));
+    res.end(JSON.stringify({
+      ok: true,
+      result: req.url.endsWith('/sendMessage')
+        ? { message_id: telegramCalls.length, chat: { id: 1 }, text: '' }
+        : true,
+    }));
   });
 });
 
@@ -173,6 +182,7 @@ try {
   assert.equal(aliceAuth.data.user.id, 'u_alice');
   assert.equal(aliceAuth.data.user.realName, 'Алиса Командная');
   assert.equal(aliceAuth.data.user.registered, true);
+  assert.equal(aliceAuth.data.user.birthday, '09.11.2000');
   sessionCookie = aliceAuth.response.headers.get('set-cookie').split(';')[0];
 
   const duplicateClaim = await request('/api/user/get-or-create', {
@@ -197,6 +207,65 @@ try {
       chat: { id: 200 },
       from: aliceTelegram,
       text: '/start',
+    },
+  });
+  assert.ok(telegramCalls.some((call) => call.path.endsWith('/deleteMessage')));
+  assert.ok(telegramCalls.some((call) => call.path.endsWith('/sendMessage')));
+  assert.ok(!telegramCalls.some((call) => String(call.body.text || '').includes('меняет администратор')));
+
+  telegramCalls.length = 0;
+  await request('/api/telegram-webhook', {
+    update_id: 11,
+    message: {
+      message_id: 11,
+      chat: { id: 200, type: 'private' },
+      from: aliceTelegram,
+      text: 'Слоты',
+    },
+  });
+  assert.ok(telegramCalls.some((call) => call.path.endsWith('/deleteMessage')));
+  assert.ok(telegramCalls.some((call) => (
+    call.path.endsWith('/sendMessage')
+    && String(call.body.text || '').includes('Мои слоты')
+    && call.body.reply_markup?.inline_keyboard
+  )));
+  const slotsSendCall = telegramCalls.find((call) => (
+    call.path.endsWith('/sendMessage') && call.body.reply_markup?.inline_keyboard
+  ));
+  const slotsPanelId = telegramCalls.indexOf(slotsSendCall) + 1;
+
+  telegramCalls.length = 0;
+  await request('/api/telegram-webhook', {
+    update_id: 12,
+    callback_query: {
+      id: 'slots-day',
+      from: aliceTelegram,
+      data: 'slots_day:0',
+      message: { message_id: slotsPanelId, chat: { id: 200, type: 'private' } },
+    },
+  });
+  assert.ok(telegramCalls.some((call) => call.path.endsWith('/editMessageText')));
+
+  telegramCalls.length = 0;
+  await request('/api/telegram-webhook', {
+    update_id: 13,
+    callback_query: {
+      id: 'slots-hour',
+      from: aliceTelegram,
+      data: 'slot_toggle:0:18',
+      message: { message_id: slotsPanelId, chat: { id: 200, type: 'private' } },
+    },
+  });
+  assert.ok(telegramCalls.some((call) => call.path.endsWith('/editMessageText')));
+
+  telegramCalls.length = 0;
+  await request('/api/telegram-webhook', {
+    update_id: 14,
+    callback_query: {
+      id: 'slots-save',
+      from: aliceTelegram,
+      data: 'slot_save',
+      message: { message_id: slotsPanelId, chat: { id: 200, type: 'private' } },
     },
   });
   assert.ok(telegramCalls.some((call) => call.path.endsWith('/sendMessage')));
@@ -327,10 +396,74 @@ try {
   assert.equal(telegramCalls.filter((call) => call.path.endsWith('/sendMessage')).length, 1);
   assert.ok(telegramCalls.some((call) => call.body.text.includes('больше не исполнитель')));
 
+  telegramCalls.length = 0;
+  await request('/api/telegram-webhook', {
+    update_id: 20,
+    message: {
+      message_id: 20,
+      chat: { id: -100500, type: 'supergroup' },
+      from: { id: 100, username: 'admin', first_name: 'Админ' },
+      text: '/bindteamchat',
+    },
+  });
+  assert.ok(telegramCalls.some((call) => (
+    call.path.endsWith('/sendMessage')
+    && String(call.body.text || '').includes('Чат привязан')
+  )));
+
+  telegramCalls.length = 0;
+  await request('/api/telegram-webhook', {
+    update_id: 21,
+    message: {
+      message_id: 21,
+      chat: { id: -100500, type: 'supergroup' },
+      from: { id: 200, username: 'alice', first_name: 'Алиса' },
+      text: '/all Сбор команды',
+    },
+  });
+  assert.ok(telegramCalls.some((call) => (
+    call.path.endsWith('/sendMessage')
+    && String(call.body.text || '').includes('@admin')
+    && String(call.body.text || '').includes('@alice')
+  )));
+
+  telegramCalls.length = 0;
+  await request('/api/telegram-webhook', {
+    update_id: 22,
+    message: {
+      message_id: 22,
+      chat: { id: -100500, type: 'supergroup' },
+      from: { id: 200, username: 'alice', first_name: 'Алиса' },
+      text: '/checkin Репетиция',
+    },
+  });
+  const checkinMessage = telegramCalls.find((call) => (
+    call.path.endsWith('/sendMessage')
+    && call.body.reply_markup?.inline_keyboard?.[0]?.[0]?.callback_data === 'group_checkin'
+  ));
+  assert.ok(checkinMessage);
+  const checkinPanelId = telegramCalls.indexOf(checkinMessage) + 1;
+
+  telegramCalls.length = 0;
+  await request('/api/telegram-webhook', {
+    update_id: 23,
+    callback_query: {
+      id: 'checkin-callback',
+      from: { id: 200, username: 'alice' },
+      data: 'group_checkin',
+      message: {
+        message_id: checkinPanelId,
+        chat: { id: -100500, type: 'supergroup' },
+      },
+    },
+  });
+  assert.ok(telegramCalls.some((call) => call.path.endsWith('/editMessageText')));
+
   const database = JSON.parse(await readFile(testDatabasePath, 'utf8'));
   assert.equal(database.users.length, fixture.users.length);
   assert.equal(database.users.find((user) => user.id === 'u_alice').telegramId, '200');
   assert.equal(database.users.some((user) => user.telegramId === '999'), false);
+  assert.equal(database.settings.teamChatId, '-100500');
   assert.ok(database.messages.u_alice.length > 0);
   assert.ok(database.messages.u_admin.some((message) => message.text.includes('Задача выполнена')));
   assert.equal(serverErrors, '');
