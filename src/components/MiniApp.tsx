@@ -813,23 +813,7 @@ export default function MiniApp({
       <main className="mega-main mx-auto flex w-full max-w-3xl flex-col gap-4 px-4 pb-24 pt-4">
         {activeTab === 'slots' && (
           <section className="space-y-4">
-            <div className={`rounded-3xl border p-4 shadow-sm ${hasUnsavedSlots ? 'border-amber-200 bg-amber-50' : weekSaved ? 'border-emerald-200 bg-emerald-50' : 'border-blue-100 bg-white'}`}>
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                <div>
-                  <div className={`font-black ${hasUnsavedSlots ? 'text-amber-900' : weekSaved ? 'text-emerald-800' : 'text-slate-900'}`}>
-                    {hasUnsavedSlots ? 'Осталось сохранить неделю' : weekSaved ? 'Неделя сохранена' : 'Выбери свободные часы'}
-                  </div>
-                  <p className="mt-1 text-xs font-semibold text-slate-500">
-                    Отметки попадут в общий календарь только после сохранения.
-                  </p>
-                </div>
-                <button onClick={saveWeek} disabled={savingWeek || (!hasUnsavedSlots && weekSaved)} className={`${hasUnsavedSlots ? primaryCompactButtonClass : secondaryButtonClass} shrink-0 disabled:opacity-60`}>
-                  <Check className="h-4 w-4" />
-                  {savingWeek ? 'Сохраняю...' : weekSaved && !hasUnsavedSlots ? 'Сохранено' : 'Сохранить'}
-                </button>
-              </div>
-            </div>
-            {slotError && <div className="rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm font-bold text-amber-800">{slotError}</div>}
+            {slotError && <div role="alert" className="rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm font-bold text-amber-800">{slotError}</div>}
 
             <div className="space-y-4">
               {Array.from({ length: visibleWeeks }, (_, weekIndex) => (
@@ -914,9 +898,16 @@ export default function MiniApp({
               </button>
             )}
 
-            <button onClick={saveWeek} disabled={savingWeek || (!hasUnsavedSlots && weekSaved)} className={`${primaryButtonClass} sticky bottom-24 z-20 py-4 text-base disabled:opacity-70`}>
+            <button
+              onClick={saveWeek}
+              disabled={savingWeek || (!hasUnsavedSlots && weekSaved)}
+              aria-busy={savingWeek}
+              className={`${primaryButtonClass} mega-save-week z-20 py-4 text-base disabled:opacity-70`}
+            >
               <Check className="h-5 w-5" />
-              {savingWeek ? 'Сохраняю...' : weekSaved ? 'Неделя сохранена' : 'Сохранить неделю'}
+              <span aria-live="polite">
+                {savingWeek ? 'Сохраняю...' : weekSaved ? 'Неделя сохранена' : 'Сохранить неделю'}
+              </span>
             </button>
           </section>
         )}
@@ -939,7 +930,7 @@ export default function MiniApp({
                     >
                       <div className="text-xs font-black text-slate-500">{day.short}</div>
                       <div className="mt-2 text-lg font-black text-[#0069E0]">{day.count}</div>
-                      <div className="text-[10px] font-bold text-slate-400">из {state.users.length}</div>
+                      <div className="text-xs font-bold text-slate-400">из {state.users.length}</div>
                       <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-blue-100">
                         <div className="h-full rounded-full bg-[#0069E0]" style={{ width: `${Math.round(ratio * 100)}%` }} />
                       </div>
@@ -1279,7 +1270,7 @@ export default function MiniApp({
                 </button>
               </form>
             )}
-            {taskError && <div className="rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm font-bold text-amber-800">{taskError}</div>}
+            {taskError && <div role="alert" className="rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm font-bold text-amber-800">{taskError}</div>}
             <TaskList title="Мои задачи" tasks={myTasks} users={state.users} currentUser={currentUser} actionLabel="Готово" onAction={(id) => onCompleteTask(id)} onRelease={onReleaseTask} />
             <TaskList title="Открытые задачи" tasks={openTasks} users={state.users} currentUser={currentUser} actionLabel="Взять" onAction={claimTask} />
             <button onClick={() => setShowCompletedTasks((value) => !value)} className={secondaryButtonClass}>
@@ -1398,7 +1389,7 @@ export default function MiniApp({
                         </div>
                         <div className="text-right">
                           <div className="rounded-full bg-blue-50 px-3 py-1 text-xs font-black text-[#0069E0]">{user.primaryCompetency || 'Блок не выбран'}</div>
-                          <div className={`mt-1 rounded-full px-2.5 py-1 text-[10px] font-black ${user.registered ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-700'}`}>
+                          <div className={`mt-1 rounded-full px-2.5 py-1 text-xs font-black ${user.registered ? 'bg-emerald-50 text-emerald-800' : 'bg-slate-100 text-slate-700'}`}>
                             {user.registered ? 'В боте' : 'Не в боте'}
                           </div>
                           <div className="mt-1 text-xs text-slate-500">{formatDateShort(user.birthday || '01.01')}</div>
@@ -1595,7 +1586,7 @@ export default function MiniApp({
                                         <div>
                                           <div className="font-black">{user.realName}</div>
                                           <a href={telegramLink(user.username)} target="_blank" rel="noreferrer" className="font-bold text-[#0069E0]">{user.username}</a>
-                                          <div className={`mt-1 inline-flex rounded-full px-2.5 py-1 text-[10px] font-black ${user.registered ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-700'}`}>
+                                          <div className={`mt-1 inline-flex rounded-full px-2.5 py-1 text-xs font-black ${user.registered ? 'bg-emerald-50 text-emerald-800' : 'bg-slate-100 text-slate-700'}`}>
                                             {user.registered ? 'Зарегистрирован' : 'Не зарегистрирован'}
                                           </div>
                                         </div>
@@ -1873,8 +1864,8 @@ export default function MiniApp({
 }
 
 const pressClass = 'transition duration-150 hover:brightness-105 active:scale-[0.98] active:brightness-90';
-const inputClass = 'w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-3 text-sm font-semibold outline-none transition focus:border-[#0069E0] focus:bg-white';
-const selectClass = 'w-full appearance-none rounded-2xl border border-blue-100 bg-white px-3 py-3 pr-10 text-sm font-black text-slate-950 shadow-sm outline-none transition hover:border-[#0069E0]/40 hover:bg-slate-50 focus:border-[#0069E0] focus:bg-white focus:shadow-[0_0_0_4px_rgba(0,105,224,0.10)] [background-image:linear-gradient(45deg,transparent_50%,#0069E0_50%),linear-gradient(135deg,#0069E0_50%,transparent_50%)] [background-position:calc(100%-18px)_50%,calc(100%-13px)_50%] [background-repeat:no-repeat] [background-size:6px_6px,6px_6px]';
+const inputClass = 'w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-3 text-base font-semibold outline-none transition focus:border-[#0069E0] focus:bg-white';
+const selectClass = 'w-full appearance-none rounded-2xl border border-blue-100 bg-white px-3 py-3 pr-10 text-base font-black text-slate-950 shadow-sm outline-none transition hover:border-[#0069E0]/40 hover:bg-slate-50 focus:border-[#0069E0] focus:bg-white focus:shadow-[0_0_0_4px_rgba(0,105,224,0.10)] [background-image:linear-gradient(45deg,transparent_50%,#0069E0_50%),linear-gradient(135deg,#0069E0_50%,transparent_50%)] [background-position:calc(100%-18px)_50%,calc(100%-13px)_50%] [background-repeat:no-repeat] [background-size:6px_6px,6px_6px]';
 const primaryButtonClass = `flex w-full items-center justify-center gap-2 rounded-3xl bg-[#0069E0] px-5 py-3 text-sm font-black text-white shadow-[0_12px_28px_rgba(0,105,224,0.24)] hover:bg-[#1677E8] active:bg-[#0058BD] ${pressClass}`;
 const primaryCompactButtonClass = `flex items-center justify-center gap-2 rounded-full bg-[#0069E0] px-4 py-2 text-xs font-black text-white shadow-[0_10px_24px_rgba(0,105,224,0.22)] hover:bg-[#1677E8] active:bg-[#0058BD] ${pressClass}`;
 const secondaryButtonClass = `flex items-center justify-center gap-2 rounded-full border border-blue-100 bg-blue-50 px-3 py-2 text-xs font-black text-[#0069E0] hover:bg-blue-100 active:bg-blue-200 ${pressClass}`;
@@ -1912,7 +1903,7 @@ function DatePickerField({
         onChange={(event) => onChange(inputDateToShortDate(event.target.value, withYear))}
         className={`${inputClass} cursor-pointer pr-3 ${error ? 'border-rose-300 bg-rose-50 focus:border-rose-500' : ''}`}
       />
-      <div className={`mt-1 flex items-center gap-1.5 text-[11px] font-bold ${value ? 'text-[#0069E0]' : 'text-slate-400'}`}>
+      <div className={`mt-1 flex items-center gap-1.5 text-xs font-bold ${value ? 'text-[#0069E0]' : 'text-slate-400'}`}>
         <CalendarDots className="h-3.5 w-3.5" />
         {value || placeholder}
       </div>
@@ -1921,7 +1912,7 @@ function DatePickerField({
 }
 
 function RequiredHint({ text = 'Обязательное поле' }: { text?: string }) {
-  return <div className="mt-1 text-xs font-black text-rose-500">{text}</div>;
+  return <div role="alert" className="mt-1 text-xs font-black text-rose-500">{text}</div>;
 }
 
 function NavButton({ icon, label, active, onClick }: { icon: React.ReactElement; label: string; active: boolean; onClick: () => void }) {

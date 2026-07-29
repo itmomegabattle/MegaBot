@@ -340,6 +340,7 @@ textarea:focus-visible {
 .mega-shell button {
   min-height: 44px;
   cursor: pointer;
+  touch-action: manipulation;
   transition:
     color var(--mega-motion),
     border-color var(--mega-motion),
@@ -348,6 +349,16 @@ textarea:focus-visible {
     opacity var(--mega-motion),
     filter var(--mega-motion),
     transform 120ms ease-out;
+}
+
+.mega-shell .mega-save-week {
+  position: fixed;
+  left: max(16px, env(safe-area-inset-left));
+  right: max(16px, env(safe-area-inset-right));
+  bottom: calc(env(safe-area-inset-bottom) + 76px);
+  width: auto;
+  max-width: 736px;
+  margin-inline: auto;
 }
 
 .mega-shell button:disabled {
@@ -416,6 +427,23 @@ html.dark-theme {
   --mega-surface-soft: #10243a;
   --mega-control: #181f29;
   --mega-shadow: 0 18px 42px rgba(0, 0, 0, 0.34);
+}
+
+@media (min-width: 640px) {
+  .mega-shell .mega-save-week {
+    bottom: calc(env(safe-area-inset-bottom) + 84px);
+  }
+}
+
+@media (orientation: landscape) and (max-height: 500px) {
+  .mega-shell .mega-save-week {
+    left: auto;
+    right: max(22px, env(safe-area-inset-right));
+    bottom: calc(env(safe-area-inset-bottom) + 76px);
+    width: min(320px, calc(100vw - 44px));
+    min-height: 44px;
+    padding-block: 10px;
+  }
 }
 
 html.dark-theme body,
