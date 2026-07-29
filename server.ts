@@ -70,6 +70,7 @@ function createEmptyState(): SimulationState {
     meetings: [...INITIAL_MEETINGS],
     tasks: [...INITIAL_TASKS],
     messages: { ...INITIAL_MESSAGES },
+    settings: {},
   };
 }
 
@@ -131,12 +132,14 @@ function ensureEnvAdminUser(state: SimulationState, telegramId: string | number,
       realName: realName || username || `Telegram ${id}`,
       role: 'admin',
       avatarSeed: username || id,
-      birthday: '01.01',
+      birthday: '',
       telegramId: id,
       registered: true,
       competencies: [],
       primaryCompetency: '',
       facultyId: '',
+      joinedAt: new Date().toISOString(),
+      lastSeenAt: new Date().toISOString(),
     };
     state.users.push(user);
     return user;
@@ -206,10 +209,46 @@ function cookieValue(cookieHeader: string | undefined, name: string) {
 
 function formatShortDate(value?: string) {
   if (!value) return '';
-  if (/^\d{2}\.\d{2}\.\d{2}$/.test(value) || /^\d{2}\.\d{2}$/.test(value)) return value;
+  if (/^\d{2}\.\d{2}(?:\.\d{2}|\.\d{4})?$/.test(value)) return value;
   const match = value.match(/^(\d{4})-(\d{2})-(\d{2})/);
   if (match) return `${match[3]}.${match[2]}.${match[1].slice(2)}`;
   return value;
+}
+
+function birthdayParts(value?: string) {
+  const match = String(value || '').match(/^(\d{2})\.(\d{2})(?:\.(\d{2}|\d{4}))?$/);
+  if (!match) return null;
+  const rawYear = match[3];
+  const year = rawYear
+    ? Number(rawYear.length === 2 ? `20${rawYear}` : rawYear)
+    : undefined;
+  const day = Number(match[1]);
+  const month = Number(match[2]);
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+  const validationYear = year || 2000;
+  const candidate = new Date(validationYear, month - 1, day);
+  if (candidate.getFullYear() !== validationYear || candidate.getMonth() !== month - 1 || candidate.getDate() !== day) return null;
+  return { day, month, year };
+}
+
+function ageOnBirthday(value: string | undefined, year = new Date().getFullYear()) {
+  const parts = birthdayParts(value);
+  return parts?.year ? year - parts.year : null;
+}
+
+function formatBirthday(value?: string) {
+  const parts = birthdayParts(value);
+  if (!parts) return 'не указана';
+  return `${String(parts.day).padStart(2, '0')}.${String(parts.month).padStart(2, '0')}${parts.year ? `.${parts.year}` : ''}`;
+}
+
+function daysUntilBirthday(value?: string, from = new Date()) {
+  const parts = birthdayParts(value);
+  if (!parts) return null;
+  const today = new Date(from.getFullYear(), from.getMonth(), from.getDate());
+  let target = new Date(from.getFullYear(), parts.month - 1, parts.day);
+  if (target < today) target = new Date(from.getFullYear() + 1, parts.month - 1, parts.day);
+  return Math.round((target.getTime() - today.getTime()) / (24 * 60 * 60 * 1000));
 }
 
 function parseShortDate(value?: string) {
@@ -219,6 +258,23 @@ function parseShortDate(value?: string) {
   if (!match) return null;
   const year = match[3] ? Number(`20${match[3]}`) : new Date().getFullYear();
   return new Date(year, Number(match[2]) - 1, Number(match[1]), 18, 0, 0, 0);
+}
+
+function meetingDateTime(meeting: Pick<Meeting, 'date' | 'time'>) {
+  const normalized = formatShortDate(meeting.date);
+  const dateMatch = normalized.match(/^(\d{2})\.(\d{2})(?:\.(\d{2}|\d{4}))?$/);
+  const timeMatch = String(meeting.time || '').match(/^(\d{1,2}):(\d{2})$/);
+  if (!dateMatch) return Number.POSITIVE_INFINITY;
+  const year = dateMatch[3]
+    ? Number(dateMatch[3].length === 4 ? dateMatch[3] : `20${dateMatch[3]}`)
+    : new Date().getFullYear();
+  return new Date(
+    year,
+    Number(dateMatch[2]) - 1,
+    Number(dateMatch[1]),
+    Number(timeMatch?.[1] || 0),
+    Number(timeMatch?.[2] || 0),
+  ).getTime();
 }
 
 function isRegistrationPrompt(text: string) {
@@ -258,6 +314,98 @@ function taskDetailsText(task: Task, state: SimulationState) {
 function meetingDetailsText(meeting: Meeting, state: SimulationState) {
   const host = state.users.find((user) => user.id === meeting.hostId);
   return `*${meeting.title}*\n\n*Дата:* ${formatShortDate(meeting.date)}\n*Время:* ${meeting.time}\n*Организатор:* ${userMention(host)}${meeting.competency ? `\n*Блок:* ${meeting.competency}` : ''}${meeting.topic ? `\n*Тема:* ${meeting.topic}` : ''}${meeting.description ? `\n*Описание:* ${meeting.description}` : ''}`;
+}
+
+function roleLabel(role: User['role']) {
+  if (role === 'admin') return 'администратор';
+  if (role === 'organizer') return 'организатор';
+  if (role === 'faculty_responsible') return 'ответственный факультета';
+  return 'помощник факультета';
+}
+
+function profileSummaryText(user: User, state: SimulationState) {
+  const activeTasks = state.tasks.filter((task) => assignedIds(task).includes(user.id) && task.status !== 'completed');
+  const completedTasks = state.tasks.filter((task) => assignedIds(task).includes(user.id) && task.status === 'completed');
+  const upcomingMeetings = state.meetings
+    .filter((meeting) => (
+      meeting.status === 'scheduled'
+      && (meeting.participants === 'all' || meeting.participants.includes(user.id) || meeting.hostId === user.id)
+      && meetingDateTime(meeting) >= Date.now()
+    ))
+    .slice()
+    .sort((a, b) => meetingDateTime(a) - meetingDateTime(b));
+  const availability = alignedAvailabilitySlots(state.availabilities[user.id]);
+  const availableHours = Array.from({ length: 7 }, (_, dayIndex) => availability[dayIndex] || [])
+    .reduce((sum, hours) => sum + hours.length, 0);
+  const nextMeeting = upcomingMeetings[0];
+  const birthdayCountdown = daysUntilBirthday(user.birthday);
+  const birthdayAge = ageOnBirthday(user.birthday);
+
+  return `*${user.realName}*\n${user.username} · ${roleLabel(user.role)}`
+    + `\n\n*Главный блок:* ${user.primaryCompetency || 'не выбран'}`
+    + `\n*Дата рождения:* ${formatBirthday(user.birthday)}${birthdayAge !== null ? ` · ${birthdayAge} лет` : ''}`
+    + `${birthdayCountdown !== null ? `\n*До дня рождения:* ${birthdayCountdown === 0 ? 'сегодня' : `${birthdayCountdown} дн.`}` : ''}`
+    + `\n\n*Сейчас:*`
+    + `\n• активных задач — ${activeTasks.length}`
+    + `\n• выполнено задач — ${completedTasks.length}`
+    + `\n• ближайших встреч — ${upcomingMeetings.length}`
+    + `\n• свободных часов отмечено — ${availableHours}`
+    + `${nextMeeting ? `\n\n*Следующая встреча:* ${formatShortDate(nextMeeting.date)}, ${nextMeeting.time} — ${nextMeeting.title}` : ''}`;
+}
+
+function slotsSummaryText(user: User, state: SimulationState, overrideSlots?: Record<number, number[]>) {
+  const availability = overrideSlots || alignedAvailabilitySlots(state.availabilities[user.id]);
+  const dayNames = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
+  const rows = dayNames.map((day, index) => {
+    const hours = availability[index] || [];
+    return `${day}: ${hours.length ? hours.map((hour) => `${hour}:00`).join(', ') : '—'}`;
+  });
+  return `*Мои слоты на эту неделю*\n\n${rows.join('\n')}`;
+}
+
+function meetingsSummaryText(user: User, state: SimulationState) {
+  const meetings = state.meetings
+    .filter((meeting) => (
+      meeting.status === 'scheduled'
+      && (meeting.participants === 'all' || meeting.participants.includes(user.id) || meeting.hostId === user.id)
+      && meetingDateTime(meeting) >= Date.now()
+    ))
+    .slice()
+    .sort((a, b) => meetingDateTime(a) - meetingDateTime(b))
+    .slice(0, 8);
+  if (!meetings.length) return '*Встречи*\n\nБлижайших встреч нет.';
+  return `*Ближайшие встречи*\n\n${meetings.map((meeting, index) => (
+    `${index + 1}. *${meeting.title}*\n${formatShortDate(meeting.date)}, ${meeting.time}`
+      + `${meeting.topic ? `\n${meeting.topic}` : ''}`
+  )).join('\n\n')}`;
+}
+
+function tasksSummaryText(user: User, state: SimulationState) {
+  const myTasks = state.tasks.filter((task) => assignedIds(task).includes(user.id) && task.status !== 'completed');
+  const openTasks = state.tasks.filter((task) => task.status === 'open');
+  const personal = myTasks.length
+    ? myTasks.slice(0, 8).map((task, index) => (
+        `${index + 1}. *${task.title}* · ${taskStatusLabel(task.status)}\nДедлайн: ${formatShortDate(task.deadline) || 'не указан'}`
+      )).join('\n\n')
+    : 'Активных задач нет.';
+  return `*Мои задачи*\n\n${personal}\n\n*Свободных задач на доске:* ${openTasks.length}`;
+}
+
+function teamSummaryText(state: SimulationState) {
+  const users = state.users.filter((user) => !isFacultyUser(user));
+  const registered = users.filter((user) => user.registered).length;
+  return `*Команда · ${users.length}*\nВ боте: ${registered}/${users.length}\n\n`
+    + users.slice(0, 12).map((user) => `• ${user.realName} · ${user.primaryCompetency || 'без блока'} · ${user.username}`).join('\n');
+}
+
+function facultiesSummaryText(state: SimulationState) {
+  const faculties = state.faculties || [];
+  const activeTasks = state.tasks.filter((task) => task.facultyId && task.status !== 'completed');
+  return `*МФ · факультеты*\n\n${faculties.map((faculty) => {
+    const people = state.users.filter((user) => user.facultyId === faculty.id).length;
+    const tasks = activeTasks.filter((task) => task.facultyId === faculty.id).length;
+    return `• ${faculty.name}: ${people} чел., ${tasks} активных задач`;
+  }).join('\n') || 'Факультеты ещё не добавлены.'}`;
 }
 
 function nextShortDate(daysAhead = 1) {
@@ -360,6 +508,7 @@ function loadDatabase(): SimulationState {
   if (!Array.isArray(state.meetings)) state.meetings = [];
   if (!Array.isArray(state.tasks)) state.tasks = [];
   if (!state.messages) state.messages = {};
+  if (!state.settings) state.settings = {};
 
   state.users.forEach((user) => {
     if ((user.role as string) === 'faculty_lead') user.role = 'faculty_responsible';
@@ -369,6 +518,8 @@ function loadDatabase(): SimulationState {
       user.competencies = [user.primaryCompetency, ...user.competencies];
     }
     if (user.facultyId === undefined) user.facultyId = '';
+    if (user.joinedAt === undefined) user.joinedAt = '';
+    if (user.lastSeenAt === undefined) user.lastSeenAt = '';
   });
   state.meetings.forEach((meeting: any) => {
     if (meeting.competency === undefined) meeting.competency = '';
@@ -471,7 +622,19 @@ async function startServer() {
     taskIds?: string[];
     selectedTaskId?: string;
     selectedStatus?: Task['status'];
+    slotDay?: number;
+    pendingSlots?: Record<number, number[]>;
+    draftName?: string;
+    draftUsername?: string;
+    draftBirthday?: string;
+    draftRole?: User['role'];
+    taskTitle?: string;
+    taskDescription?: string;
+    taskDeadline?: string;
+    taskCompetency?: string;
   }>();
+  const chatPanelMessageIds = new Map<string, number>();
+  const groupCheckins = new Map<string, { title: string; userIds: Set<string> }>();
 
   // API Routes
 
@@ -493,7 +656,7 @@ async function startServer() {
   function buildChatKeyboard(_includeWebApp = false, user?: User) {
     if (isFacultyUser(user)) {
       return {
-        keyboard: [[{ text: 'Мои задачи' }, { text: 'Помощь' }]],
+        keyboard: [[{ text: 'Профиль' }, { text: 'Мои задачи' }], [{ text: 'Помощь' }]],
         resize_keyboard: true,
         is_persistent: true,
       };
@@ -501,9 +664,11 @@ async function startServer() {
     const keyboard: any[] = [];
 
     keyboard.push(
-      [{ text: 'Профиль' }, { text: 'Встречи' }],
-      [{ text: 'Задачи' }, { text: 'Помощь' }],
+      [{ text: 'Профиль' }, { text: 'Слоты' }],
+      [{ text: 'Встречи' }, { text: 'Задачи' }],
     );
+    if (user?.role === 'admin') keyboard.push([{ text: 'Команда' }, { text: 'МФ' }]);
+    keyboard.push([{ text: 'Помощь' }]);
 
     return {
       keyboard,
@@ -518,11 +683,57 @@ async function startServer() {
     return { keyboard, resize_keyboard: true, is_persistent: true };
   }
 
+  async function deleteTelegramMessage(chatId: string | number, messageId?: number) {
+    const botToken = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
+    if (!botToken || !messageId) return false;
+    const tgApiBase = process.env.TELEGRAM_API_BASE || 'https://api.telegram.org';
+    try {
+      const response = await telegramFetch(`${tgApiBase}/bot${botToken}/deleteMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: chatId, message_id: messageId }),
+      });
+      return response.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  async function editTelegramPanel(
+    chatId: string | number,
+    messageId: number,
+    text: string,
+    inlineKeyboard?: { text: string; callback_data: string }[][],
+  ) {
+    const botToken = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
+    if (!botToken) return false;
+    const tgApiBase = process.env.TELEGRAM_API_BASE || 'https://api.telegram.org';
+    try {
+      const response = await telegramFetch(`${tgApiBase}/bot${botToken}/editMessageText`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: chatId,
+          message_id: messageId,
+          text: renderTelegramHtml(text),
+          parse_mode: 'HTML',
+          reply_markup: inlineKeyboard ? { inline_keyboard: inlineKeyboard } : undefined,
+        }),
+      });
+      return response.ok;
+    } catch {
+      return false;
+    }
+  }
+
   async function sendTelegramKeyboard(chatId: string | number, text: string, rows: string[][], includeWebApp = false, user?: User) {
     const botToken = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
     if (!botToken) return;
     const tgApiBase = process.env.TELEGRAM_API_BASE || 'https://api.telegram.org';
     try {
+      const chatKey = String(chatId);
+      const previousPanelId = chatPanelMessageIds.get(chatKey);
+      if (previousPanelId) await deleteTelegramMessage(chatId, previousPanelId);
       const response = await telegramFetch(`${tgApiBase}/bot${botToken}/sendMessage`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -535,9 +746,62 @@ async function startServer() {
       });
       if (!response.ok) {
         console.error('Telegram keyboard send failed:', response.status, await response.text());
+        return;
       }
+      const data = await response.json() as { result?: { message_id?: number } };
+      if (data.result?.message_id) chatPanelMessageIds.set(chatKey, data.result.message_id);
     } catch (err) {
       console.error('Telegram keyboard send failed:', err);
+    }
+  }
+
+  async function sendInlinePanel(
+    chatId: string | number,
+    text: string,
+    inlineKeyboard: { text: string; callback_data: string }[][],
+  ) {
+    const botToken = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
+    if (!botToken) return;
+    const tgApiBase = process.env.TELEGRAM_API_BASE || 'https://api.telegram.org';
+    const chatKey = String(chatId);
+    const previousPanelId = chatPanelMessageIds.get(chatKey);
+    if (previousPanelId) await deleteTelegramMessage(chatId, previousPanelId);
+    try {
+      const response = await telegramFetch(`${tgApiBase}/bot${botToken}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: chatId,
+          text: renderTelegramHtml(text),
+          parse_mode: 'HTML',
+          reply_markup: inlineKeyboard.length ? { inline_keyboard: inlineKeyboard } : undefined,
+        }),
+      });
+      if (!response.ok) return;
+      const data = await response.json() as { result?: { message_id?: number } };
+      if (data.result?.message_id) chatPanelMessageIds.set(chatKey, data.result.message_id);
+    } catch (err) {
+      console.error('Telegram panel send failed:', err);
+    }
+  }
+
+  async function sendGroupMessage(chatId: string | number, text: string) {
+    const botToken = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
+    if (!botToken) return;
+    const tgApiBase = process.env.TELEGRAM_API_BASE || 'https://api.telegram.org';
+    try {
+      await telegramFetch(`${tgApiBase}/bot${botToken}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: chatId,
+          text: renderTelegramHtml(text),
+          parse_mode: 'HTML',
+          disable_web_page_preview: true,
+        }),
+      });
+    } catch (err) {
+      console.error('Telegram group message failed:', err);
     }
   }
 
@@ -718,10 +982,96 @@ async function startServer() {
     }
   }
 
+  async function showProfilePanel(chatId: string | number, user: User, state: SimulationState) {
+    const rows = isFacultyUser(user)
+      ? [['Мои задачи', 'Помощь']]
+      : [
+          ['Слоты', 'Встречи'],
+          ['Задачи', 'Помощь'],
+          ...(user.role === 'admin' ? [['Команда', 'МФ']] : []),
+        ];
+    await sendTelegramKeyboard(chatId, profileSummaryText(user, state), rows, false, user);
+  }
+
+  function slotDayPanel(user: User, state: SimulationState, dayIndex: number, pendingSlots: Record<number, number[]>) {
+    const dayNames = ['Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота', 'Воскресенье'];
+    const selected = pendingSlots[dayIndex] || [];
+    const keyboard = [16, 17, 18, 19, 20, 21, 22, 23].reduce<{ text: string; callback_data: string }[][]>((rows, hour, index) => {
+      if (index % 2 === 0) rows.push([]);
+      rows[rows.length - 1].push({
+        text: `${selected.includes(hour) ? '✓ ' : ''}${hour}:00`,
+        callback_data: `slot_toggle:${dayIndex}:${hour}`,
+      });
+      return rows;
+    }, []);
+    keyboard.push([
+      { text: 'Сохранить неделю', callback_data: 'slot_save' },
+      { text: 'К дням', callback_data: 'nav_slots' },
+    ]);
+    return {
+      text: `${slotsSummaryText(user, state, pendingSlots)}\n\n*${dayNames[dayIndex]}:* выбери свободные часы.`,
+      keyboard,
+    };
+  }
+
+  async function showSlotsPanel(chatId: string | number, user: User, state: SimulationState) {
+    const dayNames = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
+    const availability = alignedAvailabilitySlots(state.availabilities[user.id]);
+    const keyboard = [
+      dayNames.slice(0, 4).map((day, index) => ({
+        text: `${(availability[index] || []).length ? '✓ ' : ''}${day}`,
+        callback_data: `slots_day:${index}`,
+      })),
+      dayNames.slice(4).map((day, offset) => ({
+        text: `${(availability[offset + 4] || []).length ? '✓ ' : ''}${day}`,
+        callback_data: `slots_day:${offset + 4}`,
+      })),
+      [{ text: 'Сохранить как есть', callback_data: 'slot_save' }],
+    ];
+    await sendInlinePanel(chatId, slotsSummaryText(user, state), keyboard);
+  }
+
+  async function showMeetingsPanel(chatId: string | number, user: User, state: SimulationState) {
+    await sendTelegramKeyboard(chatId, meetingsSummaryText(user, state), [
+      ['Назначить собрание'],
+      ['Профиль', 'Назад'],
+    ], false, user);
+  }
+
+  async function showTasksPanel(chatId: string | number, user: User, state: SimulationState) {
+    await sendTelegramKeyboard(chatId, tasksSummaryText(user, state), [
+      ['Управлять задачами', 'Создать задачу'],
+      ['Свободные задачи', 'Выполненные задачи'],
+      ['Профиль', 'Назад'],
+    ], false, user);
+  }
+
+  async function showTeamPanel(chatId: string | number, user: User, state: SimulationState) {
+    if (user.role !== 'admin') {
+      await sendTelegramKeyboard(chatId, 'Раздел команды доступен администратору.', [['Профиль', 'Назад']], false, user);
+      return;
+    }
+    await sendTelegramKeyboard(chatId, teamSummaryText(state), [
+      ['Найти участника', 'Добавить участника'],
+      ['Профиль', 'Назад'],
+    ], false, user);
+  }
+
+  async function showFacultiesPanel(chatId: string | number, user: User, state: SimulationState) {
+    if (user.role !== 'admin') {
+      await sendTelegramKeyboard(chatId, 'Раздел факультетов доступен администратору.', [['Профиль', 'Назад']], false, user);
+      return;
+    }
+    await sendTelegramKeyboard(chatId, facultiesSummaryText(state), [
+      ['Задачи факультетов'],
+      ['Профиль', 'Назад'],
+    ], false, user);
+  }
+
   async function sendDueBirthdayReminders() {
     const state = loadDatabase();
     const targetDate = new Date();
-    targetDate.setDate(targetDate.getDate() + 2);
+    targetDate.setDate(targetDate.getDate() + 1);
     const targetBday = `${String(targetDate.getDate()).padStart(2, '0')}.${String(targetDate.getMonth() + 1).padStart(2, '0')}`;
     const markerYear = targetDate.getFullYear();
     const paymentPhone = process.env.BIRTHDAY_PAYMENT_PHONE || '+7 (921) 123-45-67';
@@ -729,7 +1079,9 @@ async function startServer() {
     let changed = false;
 
     for (const birthdayUser of state.users) {
-      if (birthdayUser.birthday !== targetBday) continue;
+      const parts = birthdayParts(birthdayUser.birthday);
+      if (!parts || `${String(parts.day).padStart(2, '0')}.${String(parts.month).padStart(2, '0')}` !== targetBday) continue;
+      const nextAge = ageOnBirthday(birthdayUser.birthday, targetDate.getFullYear());
 
       for (const recipient of state.users) {
         if (recipient.id === birthdayUser.id) continue;
@@ -737,7 +1089,12 @@ async function startServer() {
         if (!state.messages[recipient.id]) state.messages[recipient.id] = [];
         if (state.messages[recipient.id].some((message) => message.id === notificationId)) continue;
 
-        const text = `🎁 Через 2 дня день рождения у ${birthdayUser.realName} (${birthdayUser.birthday}).\n\nСкидываемся на подарок по 400 рублей.\nПеревод: ${paymentPhone}, ${paymentBank}.\n\nИменинник это сообщение не получает.`;
+        const paymentText = process.env.BIRTHDAY_PAYMENT_PHONE && process.env.BIRTHDAY_PAYMENT_BANK
+          ? `\n\nСбор на подарок: ${paymentPhone}, ${paymentBank}.`
+          : '';
+        const text = `🎂 Завтра день рождения у ${birthdayUser.realName}!`
+          + `${nextAge !== null ? ` Исполняется ${nextAge} лет.` : ''}`
+          + `\n\nНе забудьте поздравить 🎉${paymentText}`;
         state.messages[recipient.id].push({
           id: notificationId,
           userId: recipient.id,
@@ -871,6 +1228,12 @@ async function startServer() {
       user.registered = true;
       changed = true;
     }
+    if (!user.joinedAt) {
+      user.joinedAt = new Date().toISOString();
+      changed = true;
+    }
+    user.lastSeenAt = new Date().toISOString();
+    changed = true;
     if (changed) saveDatabase(state);
     const sessionToken = createSessionToken(user.id);
     if (sessionToken) {
@@ -931,6 +1294,93 @@ async function startServer() {
 
       if (!user) {
         await answerCallback(callback.id, 'Сначала напиши /start');
+        return res.json({ ok: true });
+      }
+
+      if (action === 'nav_profile') {
+        await answerCallback(callback.id);
+        await showProfilePanel(chatId, user, state);
+        return res.json({ ok: true });
+      }
+
+      if (action === 'nav_slots') {
+        await answerCallback(callback.id);
+        chatSessions.delete(String(chatId));
+        await showSlotsPanel(chatId, user, state);
+        return res.json({ ok: true });
+      }
+
+      if (action.startsWith('slots_day:')) {
+        const dayIndex = Number(action.split(':')[1]);
+        if (!Number.isInteger(dayIndex) || dayIndex < 0 || dayIndex > 6) {
+          await answerCallback(callback.id, 'Неизвестный день');
+          return res.json({ ok: true });
+        }
+        const chatKey = String(chatId);
+        const pendingSlots = chatSessions.get(chatKey)?.pendingSlots
+          || { ...alignedAvailabilitySlots(state.availabilities[user.id]) };
+        chatSessions.set(chatKey, { flow: 'slots_edit', slotDay: dayIndex, pendingSlots });
+        const panel = slotDayPanel(user, state, dayIndex, pendingSlots);
+        await answerCallback(callback.id);
+        await editTelegramPanel(chatId, callback.message.message_id, panel.text, panel.keyboard);
+        return res.json({ ok: true });
+      }
+
+      if (action.startsWith('slot_toggle:')) {
+        const [, dayValue, hourValue] = action.split(':');
+        const dayIndex = Number(dayValue);
+        const hour = Number(hourValue);
+        const chatKey = String(chatId);
+        const session = chatSessions.get(chatKey);
+        const pendingSlots = session?.pendingSlots || { ...alignedAvailabilitySlots(state.availabilities[user.id]) };
+        const selected = new Set(pendingSlots[dayIndex] || []);
+        if (selected.has(hour)) selected.delete(hour);
+        else selected.add(hour);
+        pendingSlots[dayIndex] = [...selected].sort((a, b) => a - b);
+        chatSessions.set(chatKey, { flow: 'slots_edit', slotDay: dayIndex, pendingSlots });
+        const panel = slotDayPanel(user, state, dayIndex, pendingSlots);
+        await answerCallback(callback.id, selected.has(hour) ? `${hour}:00 добавлено` : `${hour}:00 снято`);
+        await editTelegramPanel(chatId, callback.message.message_id, panel.text, panel.keyboard);
+        return res.json({ ok: true });
+      }
+
+      if (action === 'slot_save') {
+        const chatKey = String(chatId);
+        const pendingSlots = chatSessions.get(chatKey)?.pendingSlots
+          || alignedAvailabilitySlots(state.availabilities[user.id]);
+        state.availabilities[user.id] = {
+          userId: user.id,
+          slots: pendingSlots,
+          hardUnavailableDays: state.availabilities[user.id]?.hardUnavailableDays || [],
+          weekStart: currentWeekStartIso(),
+          updatedAt: new Date().toISOString(),
+        };
+        chatSessions.delete(chatKey);
+        saveDatabase(state);
+        await answerCallback(callback.id, 'Слоты сохранены');
+        await showSlotsPanel(chatId, user, state);
+        return res.json({ ok: true });
+      }
+
+      if (action === 'group_checkin') {
+        const messageId = callback.message?.message_id;
+        const pollKey = `${chatId}:${messageId}`;
+        const poll = groupCheckins.get(pollKey);
+        if (!poll) {
+          await answerCallback(callback.id, 'Перекличка уже завершена');
+          return res.json({ ok: true });
+        }
+        poll.userIds.add(user.id);
+        const participants = [...poll.userIds]
+          .map((id) => state.users.find((member) => member.id === id)?.realName)
+          .filter(Boolean);
+        await answerCallback(callback.id, 'Отметил');
+        await editTelegramPanel(
+          chatId,
+          messageId,
+          `*${poll.title}*\n\nОтметились: ${participants.length}\n${participants.map((name) => `• ${name}`).join('\n') || 'Пока никто'}`,
+          [[{ text: `Я здесь · ${participants.length}`, callback_data: 'group_checkin' }]],
+        );
         return res.json({ ok: true });
       }
 
@@ -1010,9 +1460,29 @@ async function startServer() {
         return res.json({ ok: true });
       }
 
+      if (action.startsWith('task_complete:')) {
+        const taskId = action.split(':')[1];
+        const task = state.tasks.find((item) => item.id === taskId);
+        if (!task || !assignedIds(task).includes(user.id)) {
+          await answerCallback(callback.id, 'Задача не найдена');
+          return res.json({ ok: true });
+        }
+        task.status = 'completed';
+        task.completedAt = new Date().toISOString();
+        saveDatabase(state);
+        await answerCallback(callback.id, 'Задача выполнена');
+        await showTasksPanel(chatId, user, state);
+        for (const admin of state.users.filter((member) => member.role === 'admin' && member.telegramId)) {
+          if (admin.id !== user.id) {
+            await sendTelegramMessage(admin.telegramId!, `Задача выполнена!\n\n${task.title}\nИсполнитель: ${userMention(user)}`);
+          }
+        }
+        return res.json({ ok: true });
+      }
+
       if (action === 'task_skip') {
         await answerCallback(callback.id, 'Ок');
-        await sendTelegramKeyboard(chatId, 'Ок, возвращаю меню.', [['Профиль', 'Встречи'], ['Задачи', 'Помощь']], true);
+        await showProfilePanel(chatId, user, state);
         return res.json({ ok: true });
       }
 
@@ -1030,8 +1500,131 @@ async function startServer() {
       const displayName = [fromUser.first_name, fromUser.last_name].filter(Boolean).join(' ').trim();
       let user = findUserByTelegramIdentity(state, fromUser.id, fromUser.username)
         || ensureEnvAdminUser(state, fromUser.id, fromUser.username, displayName);
+      const chatType = String(update.message.chat.type || 'private');
+      const isGroupChat = chatType === 'group' || chatType === 'supergroup';
+
+      if (isGroupChat) {
+        const groupCommand = text.toLowerCase().split('@')[0];
+        const supportedGroupCommand = ['/all', '/meeting', '/deadlines', '/slots', '/birthdays', '/checkin', '/bindteamchat', '/help'].some(
+          (command) => groupCommand === command || groupCommand.startsWith(`${command} `),
+        );
+        if (!supportedGroupCommand) return res.json({ ok: true });
+        await deleteTelegramMessage(chatId, update.message.message_id);
+        if (!user?.registered) {
+          await sendGroupMessage(chatId, 'Эта команда доступна участникам, привязанным к MegaBot.');
+          return res.json({ ok: true });
+        }
+        user.lastSeenAt = new Date().toISOString();
+        saveDatabase(state);
+
+        if (groupCommand === '/bindteamchat') {
+          if (user.role !== 'admin') {
+            await sendGroupMessage(chatId, 'Привязать командный чат может только администратор.');
+          } else {
+            state.settings = { ...(state.settings || {}), teamChatId: String(chatId) };
+            saveDatabase(state);
+            await sendGroupMessage(chatId, 'Чат привязан к MegaBot. Командные функции активны.');
+          }
+          return res.json({ ok: true });
+        }
+
+        const configuredChatId = state.settings?.teamChatId;
+        if (configuredChatId && configuredChatId !== String(chatId)) {
+          await sendGroupMessage(chatId, 'Командные команды доступны только в привязанном чате.');
+          return res.json({ ok: true });
+        }
+
+        if (groupCommand.startsWith('/all')) {
+          const note = text.replace(/^\/all(?:@\w+)?/i, '').trim();
+          const mentions = state.users
+            .filter((member) => !isFacultyUser(member) && member.registered && member.username)
+            .map((member) => member.username)
+            .join(' ');
+          await sendGroupMessage(chatId, `${note ? `*${note}*\n\n` : ''}${mentions || 'Нет привязанных участников.'}`);
+          return res.json({ ok: true });
+        }
+
+        if (groupCommand === '/meeting') {
+          const nextMeeting = state.meetings
+            .filter((meeting) => meeting.status === 'scheduled' && meetingDateTime(meeting) >= Date.now())
+            .slice()
+            .sort((a, b) => meetingDateTime(a) - meetingDateTime(b))[0];
+          await sendGroupMessage(chatId, nextMeeting
+            ? `*Ближайшая встреча*\n\n${meetingDetailsText(nextMeeting, state)}`
+            : 'Ближайших встреч нет.');
+          return res.json({ ok: true });
+        }
+
+        if (groupCommand === '/deadlines') {
+          const tasks = state.tasks
+            .filter((task) => task.status !== 'completed')
+            .slice()
+            .sort((a, b) => (
+              (parseShortDate(a.deadline)?.getTime() ?? Number.POSITIVE_INFINITY)
+              - (parseShortDate(b.deadline)?.getTime() ?? Number.POSITIVE_INFINITY)
+            ))
+            .slice(0, 10);
+          await sendGroupMessage(chatId, tasks.length
+            ? `*Ближайшие дедлайны*\n\n${tasks.map((task) => `• ${formatShortDate(task.deadline) || 'без даты'} — ${task.title}`).join('\n')}`
+            : 'Активных задач нет.');
+          return res.json({ ok: true });
+        }
+
+        if (groupCommand === '/slots') {
+          const team = state.users.filter((member) => !isFacultyUser(member));
+          const missing = team.filter((member) => {
+            const availability = alignedAvailabilitySlots(state.availabilities[member.id]);
+            const unavailableDays = new Set(alignedHardUnavailableDays(state.availabilities[member.id]).filter((day) => day < 7));
+            return !Array.from({ length: 7 }, (_, dayIndex) => (
+              (availability[dayIndex] || []).length > 0 || unavailableDays.has(dayIndex)
+            )).every(Boolean);
+          });
+          await sendGroupMessage(chatId, missing.length
+            ? `*Ещё не отметили слоты (${missing.length}):*\n${missing.map((member) => member.username).join(' ')}`
+            : 'Все участники отметили слоты на неделю.');
+          return res.json({ ok: true });
+        }
+
+        if (groupCommand === '/birthdays') {
+          const upcoming = state.users
+            .map((member) => ({ member, days: daysUntilBirthday(member.birthday) }))
+            .filter((item): item is { member: User; days: number } => item.days !== null)
+            .sort((a, b) => a.days - b.days)
+            .slice(0, 5);
+          await sendGroupMessage(chatId, upcoming.length
+            ? `*Ближайшие дни рождения*\n\n${upcoming.map(({ member, days }) => (
+                `• ${formatBirthday(member.birthday)} — ${member.realName}${days === 0 ? ' · сегодня' : ` · через ${days} дн.`}`
+              )).join('\n')}`
+            : 'Даты рождения пока не заполнены.');
+          return res.json({ ok: true });
+        }
+
+        if (groupCommand.startsWith('/checkin')) {
+          const title = text.replace(/^\/checkin(?:@\w+)?/i, '').trim() || 'Перекличка команды';
+          await sendInlinePanel(chatId, `*${title}*\n\nОтметились: 0\nПока никто`, [[
+            { text: 'Я здесь · 0', callback_data: 'group_checkin' },
+          ]]);
+          const panelId = chatPanelMessageIds.get(String(chatId));
+          if (panelId) groupCheckins.set(`${chatId}:${panelId}`, { title, userIds: new Set() });
+          return res.json({ ok: true });
+        }
+
+        await sendGroupMessage(
+          chatId,
+          '*Команды MegaBot*\n\n'
+            + '/all текст — упомянуть всю команду\n'
+            + '/meeting — ближайшая встреча\n'
+            + '/deadlines — ближайшие дедлайны\n'
+            + '/slots — кто не отметил слоты\n'
+            + '/birthdays — ближайшие дни рождения\n'
+            + '/checkin название — живая перекличка\n'
+            + '/bindteamchat — привязать этот чат (админ)',
+        );
+        return res.json({ ok: true });
+      }
 
       if (!user) {
+        await deleteTelegramMessage(chatId, update.message.message_id);
         await configureChatMenuButton(chatId, undefined);
         await sendTelegramKeyboard(
           chatId,
@@ -1044,7 +1637,10 @@ async function startServer() {
         if (!user.telegramId) user.telegramId = String(fromUser.id);
         if (fromUser.username) user.username = `@${fromUser.username}`;
         user.registered = true;
+        if (!user.joinedAt) user.joinedAt = new Date().toISOString();
+        user.lastSeenAt = new Date().toISOString();
       }
+      await deleteTelegramMessage(chatId, update.message.message_id);
       if (isEnvAdmin(fromUser.id, fromUser.username) && user.role !== 'admin') {
         user.role = 'admin';
       }
@@ -1058,6 +1654,7 @@ async function startServer() {
         text,
         timestamp: new Date().toISOString()
       });
+      saveDatabase(state);
 
       let replyText = '';
       let buttons: { text: string; action: string }[] | undefined = undefined;
@@ -1068,6 +1665,11 @@ async function startServer() {
 
       if (isFacultyUser(user)) {
         user.registered = true;
+        if (isRegistrationPrompt(text)) {
+          await showProfilePanel(chatId, user, state);
+          saveDatabase(state);
+          return res.json({ ok: true });
+        }
         if (normalizedText === 'назад' || normalizedText === 'меню') {
           chatSessions.delete(chatKey);
           await sendTelegramKeyboard(chatId, 'Меню задач.', [['Мои задачи', 'Помощь']], false, user);
@@ -1199,7 +1801,7 @@ async function startServer() {
           return res.json({ ok: true });
         }
         chatSessions.delete(chatKey);
-        await sendTelegramKeyboard(chatId, 'Возвращаю меню.', [['Профиль', 'Встречи'], ['Задачи', 'Помощь']], true);
+        await showProfilePanel(chatId, user, state);
         return res.json({ ok: true });
       }
 
@@ -1294,10 +1896,182 @@ async function startServer() {
         return res.json({ ok: true });
       }
 
+      if (session?.flow === 'team_search') {
+        const query = normalizedText.replace(/^@/, '');
+        const matches = state.users.filter((member) => (
+          !isFacultyUser(member)
+          && `${member.realName} ${member.username}`.toLowerCase().includes(query)
+        )).slice(0, 10);
+        chatSessions.delete(chatKey);
+        await sendTelegramKeyboard(
+          chatId,
+          matches.length
+            ? `*Результаты поиска*\n\n${matches.map((member) => `• ${member.realName} · ${member.username} · ${member.primaryCompetency || 'без блока'}`).join('\n')}`
+            : 'Никого не нашёл.',
+          [['Найти участника', 'Назад']],
+          false,
+          user,
+        );
+        return res.json({ ok: true });
+      }
+
+      if (session?.flow === 'team_add_name') {
+        chatSessions.set(chatKey, { ...session, flow: 'team_add_username', draftName: text.trim() });
+        await sendTelegramKeyboard(chatId, 'Отправь Telegram username участника в формате @username.', [['Назад']], false, user);
+        return res.json({ ok: true });
+      }
+
+      if (session?.flow === 'team_add_username') {
+        const username = text.trim().startsWith('@') ? text.trim() : `@${text.trim()}`;
+        if (!/^@[a-zA-Z0-9_]{5,}$/.test(username)) {
+          await sendTelegramKeyboard(chatId, 'Проверь username. Нужен формат @username.', [['Назад']], false, user);
+          return res.json({ ok: true });
+        }
+        if (state.users.some((member) => member.username.toLowerCase() === username.toLowerCase())) {
+          await sendTelegramKeyboard(chatId, 'Такой Telegram username уже есть в команде.', [['Назад']], false, user);
+          return res.json({ ok: true });
+        }
+        chatSessions.set(chatKey, { ...session, flow: 'team_add_birthday', draftUsername: username });
+        await sendTelegramKeyboard(chatId, 'Введи дату рождения полностью: ДД.ММ.ГГГГ.', [['Назад']], false, user);
+        return res.json({ ok: true });
+      }
+
+      if (session?.flow === 'team_add_birthday') {
+        const parts = birthdayParts(text.trim());
+        if (!parts?.year || parts.year < 1940 || parts.year > new Date().getFullYear()) {
+          await sendTelegramKeyboard(chatId, 'Нужна полная дата в формате ДД.ММ.ГГГГ.', [['Назад']], false, user);
+          return res.json({ ok: true });
+        }
+        chatSessions.set(chatKey, { ...session, flow: 'team_add_role', draftBirthday: formatBirthday(text.trim()) });
+        await sendTelegramKeyboard(chatId, 'Выбери роль участника.', [['Организатор', 'Администратор'], ['Назад']], false, user);
+        return res.json({ ok: true });
+      }
+
+      if (session?.flow === 'team_add_role') {
+        const role = normalizedText === 'администратор' ? 'admin' : normalizedText === 'организатор' ? 'organizer' : null;
+        if (!role) {
+          await sendTelegramKeyboard(chatId, 'Выбери роль кнопкой.', [['Организатор', 'Администратор'], ['Назад']], false, user);
+          return res.json({ ok: true });
+        }
+        const newUser: User = {
+          id: `u_${Date.now()}`,
+          username: session.draftUsername || '',
+          realName: session.draftName || session.draftUsername || 'Участник',
+          role,
+          avatarSeed: session.draftUsername || String(Date.now()),
+          birthday: session.draftBirthday,
+          registered: false,
+          competencies: [],
+          primaryCompetency: '',
+          facultyId: '',
+          joinedAt: new Date().toISOString(),
+          lastSeenAt: '',
+        };
+        state.users.push(newUser);
+        state.messages[newUser.id] = [];
+        chatSessions.delete(chatKey);
+        saveDatabase(state);
+        await sendTelegramKeyboard(chatId, `Участник добавлен:\n\n*${newUser.realName}*\n${newUser.username}\n${formatBirthday(newUser.birthday)}\n${roleLabel(newUser.role)}`, [['Добавить участника', 'Назад']], false, user);
+        return res.json({ ok: true });
+      }
+
+      if (session?.flow === 'task_create_title') {
+        chatSessions.set(chatKey, { ...session, flow: 'task_create_description', taskTitle: text.trim() });
+        await sendTelegramKeyboard(chatId, 'Напиши короткое описание задачи.', [['Назад']], false, user);
+        return res.json({ ok: true });
+      }
+
+      if (session?.flow === 'task_create_description') {
+        chatSessions.set(chatKey, { ...session, flow: 'task_create_deadline', taskDescription: text.trim() });
+        await sendTelegramKeyboard(chatId, 'Введи дедлайн в формате ДД.ММ.ГГ.', [['Назад']], false, user);
+        return res.json({ ok: true });
+      }
+
+      if (session?.flow === 'task_create_deadline') {
+        if (!parseShortDate(text.trim())) {
+          await sendTelegramKeyboard(chatId, 'Не понял дату. Используй формат ДД.ММ.ГГ.', [['Назад']], false, user);
+          return res.json({ ok: true });
+        }
+        chatSessions.set(chatKey, { ...session, flow: 'task_create_competency', taskDeadline: formatShortDate(text.trim()) });
+        await sendTelegramKeyboard(chatId, 'Выбери блок задачи.', [
+          ...(state.competencies || []).map((competency) => [competency]),
+          ['Без блока'],
+          ['Назад'],
+        ], false, user);
+        return res.json({ ok: true });
+      }
+
+      if (session?.flow === 'task_create_competency') {
+        const competency = normalizedText === 'без блока'
+          ? ''
+          : (state.competencies || []).find((item) => item.toLowerCase() === normalizedText);
+        if (competency === undefined) {
+          await sendTelegramKeyboard(chatId, 'Выбери блок кнопкой.', [[...(state.competencies || [])], ['Без блока'], ['Назад']], false, user);
+          return res.json({ ok: true });
+        }
+        chatSessions.set(chatKey, { ...session, flow: 'task_create_scope', taskCompetency: competency });
+        await sendTelegramKeyboard(chatId, 'Кому назначить задачу?', [['Вся команда', 'Участники блока'], ['Открытая задача'], ['Назад']], false, user);
+        return res.json({ ok: true });
+      }
+
+      if (session?.flow === 'task_create_scope') {
+        const team = state.users.filter((member) => !isFacultyUser(member));
+        let assigneeIds: string[] = [];
+        if (normalizedText === 'вся команда') assigneeIds = team.map((member) => member.id);
+        else if (normalizedText === 'участники блока') {
+          assigneeIds = team
+            .filter((member) => session.taskCompetency && member.competencies?.includes(session.taskCompetency))
+            .map((member) => member.id);
+        } else if (normalizedText !== 'открытая задача') {
+          await sendTelegramKeyboard(chatId, 'Выбери вариант кнопкой.', [['Вся команда', 'Участники блока'], ['Открытая задача'], ['Назад']], false, user);
+          return res.json({ ok: true });
+        }
+        const task: Task = {
+          id: `t_${Date.now()}`,
+          title: session.taskTitle || 'Без названия',
+          description: session.taskDescription || '',
+          deadline: session.taskDeadline || '',
+          assignedTo: assigneeIds.length ? assigneeIds : null,
+          creatorId: user.id,
+          competency: session.taskCompetency || '',
+          sow: '',
+          tips: [],
+          status: assigneeIds.length ? 'assigned' : 'open',
+          workload: 'medium',
+          weightValue: 2,
+          createdAt: new Date().toISOString(),
+          completedAt: '',
+        };
+        state.tasks.push(task);
+        chatSessions.delete(chatKey);
+        for (const target of (assigneeIds.length ? team.filter((member) => assigneeIds.includes(member.id)) : team)) {
+          if (target.telegramId && target.id !== user.id) {
+            await sendTelegramMessage(
+              target.telegramId,
+              assigneeIds.length ? `Тебе назначена задача:\n\n${taskDetailsText(task, state)}` : `Новая свободная задача:\n\n${taskDetailsText(task, state)}`,
+              [{ text: 'Посмотреть задачу', action: `task_view:${task.id}` }],
+              false,
+              target,
+            );
+          }
+        }
+        saveDatabase(state);
+        await sendTelegramKeyboard(chatId, `Задача создана:\n\n${taskDetailsText(task, state)}`, [['Создать задачу', 'Задачи'], ['Назад']], false, user);
+        return res.json({ ok: true });
+      }
+
       if (cmd.startsWith('/start')) {
-        replyText = `Привет, ${user.realName}! Telegram успешно привязан к профилю. Кнопки уже внизу: открывай приложение, смотри встречи, задачи или профиль.`;
+        await showProfilePanel(chatId, user, state);
+        saveDatabase(state);
+        return res.json({ ok: true });
       } else if (isRegistrationPrompt(text)) {
-        replyText = `Твой профиль:\n\n*${user.realName}*\nTelegram: *${user.username}*\nДата рождения: *${user.birthday || 'не указана'}*\nРоль: *${user.role === 'admin' ? 'админ' : user.role === 'organizer' ? 'организатор' : 'участник факультета'}*\n\nФИО, роль и дату рождения меняет администратор в приложении.`;
+        await showProfilePanel(chatId, user, state);
+        saveDatabase(state);
+        return res.json({ ok: true });
+      } else if (cmd.startsWith('/slots') || cmd === 'слоты') {
+        await showSlotsPanel(chatId, user, state);
+        saveDatabase(state);
+        return res.json({ ok: true });
       } else if (isOpenAppText(text)) {
         replyText = 'Открывай приложение кнопкой снизу. Если Telegram не открыл его автоматически, нажми кнопку ещё раз.';
       } else if (cmd.startsWith('/meetings') || cmd === 'встречи') {
@@ -1305,36 +2079,98 @@ async function startServer() {
           await sendTelegramKeyboard(chatId, 'Доступ не активирован. Попроси администратора проверить Telegram username в твоём профиле.', [['Профиль'], ['Назад']]);
           return res.json({ ok: true });
         } else {
-        const activeMeetings = state.meetings.filter(m => m.status === 'scheduled');
-        if (activeMeetings.length === 0) {
-          replyText = 'На этой неделе активных встреч нет.';
-        } else {
-          replyText = '*Предстоящие встречи:*\n\n' + activeMeetings.map((m, idx) => {
-            const typeStr = m.type === 'general' ? 'общая встреча' : 'локальное обсуждение';
-            return `${idx + 1}. *${m.title}*\nДата: ${formatShortDate(m.date)}\nВремя: ${m.time}\nТип: ${typeStr}${m.topic ? `\nОписание: ${m.topic}` : ''}`;
-          }).join('\n\n');
-        }
-        await sendTelegramKeyboard(chatId, replyText, [['Назначить собрание'], ['Назад']]);
-        return res.json({ ok: true });
+          await showMeetingsPanel(chatId, user, state);
+          return res.json({ ok: true });
         }
       } else if (cmd.startsWith('/tasks') || cmd === 'задачи') {
         if (!user.registered) {
           replyText = 'Доступ не активирован. Попроси администратора проверить Telegram username в твоём профиле.';
         } else {
-        const myTasks = state.tasks.filter(t => assignedIds(t).includes(user.id) && t.status !== 'completed');
-        if (myTasks.length === 0) {
-          replyText = 'У тебя нет активных задач. Открой Mini App, чтобы посмотреть общую доску задач.';
-        } else {
-          replyText = '*Твои активные задачи:*\n\n' + myTasks.map((t, idx) => {
-            const workload = t.workload === 'high' ? 'высокая' : t.workload === 'medium' ? 'средняя' : 'низкая';
-            return `${idx + 1}. *${t.title}*\nДедлайн: ${formatShortDate(t.deadline)}\nНагрузка: ${workload}\n${t.description}`;
-          }).join('\n\n');
+          await showTasksPanel(chatId, user, state);
+          return res.json({ ok: true });
         }
+      } else if (normalizedText === 'свободные задачи') {
+        const openTasks = state.tasks.filter((task) => task.status === 'open').slice(0, 10);
+        await sendInlinePanel(
+          chatId,
+          openTasks.length
+            ? `*Свободные задачи*\n\n${openTasks.map((task, index) => `${index + 1}. ${task.title} · ${formatShortDate(task.deadline) || 'без даты'}`).join('\n')}`
+            : 'Свободных задач сейчас нет.',
+          openTasks.map((task) => [{ text: task.title.slice(0, 48), callback_data: `task_view:${task.id}` }]),
+        );
+        return res.json({ ok: true });
+      } else if (normalizedText === 'выполненные задачи') {
+        const completed = state.tasks
+          .filter((task) => assignedIds(task).includes(user.id) && task.status === 'completed')
+          .slice(-10)
+          .reverse();
+        await sendTelegramKeyboard(
+          chatId,
+          completed.length
+            ? `*Последние выполненные задачи*\n\n${completed.map((task) => `• ${task.title}`).join('\n')}`
+            : 'Выполненных задач пока нет.',
+          [['Задачи', 'Назад']],
+          false,
+          user,
+        );
+        return res.json({ ok: true });
+      } else if (normalizedText === 'управлять задачами') {
+        const myTasks = state.tasks.filter((task) => assignedIds(task).includes(user.id) && task.status !== 'completed').slice(0, 10);
+        await sendInlinePanel(
+          chatId,
+          myTasks.length
+            ? `*Управление задачами*\n\n${myTasks.map((task, index) => `${index + 1}. ${task.title} · ${taskStatusLabel(task.status)}`).join('\n')}`
+            : 'Активных задач нет.',
+          myTasks.map((task) => [
+            { text: `✓ ${task.title.slice(0, 30)}`, callback_data: `task_complete:${task.id}` },
+            { text: 'Отказаться', callback_data: `task_release:${task.id}` },
+          ]),
+        );
+        return res.json({ ok: true });
+      } else if (normalizedText === 'создать задачу') {
+        chatSessions.set(chatKey, { flow: 'task_create_title' });
+        await sendTelegramKeyboard(chatId, 'Напиши название задачи.', [['Назад']], false, user);
+        return res.json({ ok: true });
+      } else if (cmd === 'команда') {
+        await showTeamPanel(chatId, user, state);
+        return res.json({ ok: true });
+      } else if (normalizedText === 'найти участника') {
+        chatSessions.set(chatKey, { flow: 'team_search' });
+        await sendTelegramKeyboard(chatId, 'Введи имя, фамилию или Telegram username.', [['Назад']], false, user);
+        return res.json({ ok: true });
+      } else if (normalizedText === 'добавить участника') {
+        if (user.role !== 'admin') {
+          await sendTelegramKeyboard(chatId, 'Добавлять участников может только администратор.', [['Назад']], false, user);
+          return res.json({ ok: true });
         }
+        chatSessions.set(chatKey, { flow: 'team_add_name' });
+        await sendTelegramKeyboard(chatId, 'Введи имя и фамилию участника.', [['Назад']], false, user);
+        return res.json({ ok: true });
+      } else if (cmd === 'мф') {
+        await showFacultiesPanel(chatId, user, state);
+        return res.json({ ok: true });
+      } else if (normalizedText === 'задачи факультетов') {
+        const facultyTasks = state.tasks.filter((task) => task.facultyId && task.status !== 'completed').slice(0, 12);
+        await sendTelegramKeyboard(
+          chatId,
+          facultyTasks.length
+            ? `*Активные задачи факультетов*\n\n${facultyTasks.map((task) => `• ${task.title} · ${formatShortDate(task.deadline)}`).join('\n')}`
+            : 'Активных задач факультетов нет.',
+          [['МФ', 'Назад']],
+          false,
+          user,
+        );
+        return res.json({ ok: true });
       } else if (cmd.startsWith('/help') || cmd === 'помощь') {
-        replyText = '*Кнопки бота:*\n\n*Профиль* — показывает данные, которые внёс администратор.\n*Встречи* — список ближайших встреч.\n*Задачи* — твои активные задачи.\n\nMini App открывается системной кнопкой рядом с полем сообщения. Доступ появляется после привязки Telegram к заранее созданному профилю.';
+        replyText = '*Что умеет бот*\n\n'
+          + '*Профиль* — личная сводка и статистика.\n'
+          + '*Слоты* — отметить свободные часы кнопками.\n'
+          + '*Встречи* — посмотреть и назначить собрание.\n'
+          + '*Задачи* — личные, свободные и выполненные задачи.\n'
+          + `${user.role === 'admin' ? '*Команда* — поиск и добавление людей.\n*МФ* — факультеты и их задачи.\n' : ''}`
+          + '\nВ командном чате доступны /all, /meeting, /deadlines, /slots, /birthdays и /checkin.';
       } else {
-        replyText = 'Пользуйся кнопками снизу: приложение, профиль, встречи, задачи и помощь.';
+        replyText = 'Выбери раздел кнопкой внизу.';
       }
       state.messages[user.id].push({
         id: 'bot_' + Date.now(),
@@ -1347,7 +2183,7 @@ async function startServer() {
 
       saveDatabase(state);
 
-      await sendTelegramMessage(chatId, replyText, buttons);
+      await sendTelegramKeyboard(chatId, replyText, buildChatKeyboard(false, user).keyboard.map((row: any[]) => row.map((item) => item.text)), false, user);
     }
 
     res.json({ ok: true });
@@ -1365,6 +2201,9 @@ async function startServer() {
     if (!realName || !username) {
       return res.status(400).json({ error: 'Имя и Telegram username обязательны' });
     }
+    if (birthday && !birthdayParts(birthday)?.year) {
+      return res.status(400).json({ error: 'Укажи дату рождения полностью: ДД.ММ.ГГГГ' });
+    }
 
     const sanitizedUsername = username.startsWith('@') ? username : '@' + username;
 
@@ -1381,8 +2220,10 @@ async function startServer() {
       realName,
       role: role || 'organizer',
       avatarSeed: realName.toLowerCase().replace(/[^a-z]/g, '') || 'user',
-      birthday: birthday || '01.01',
-      registered: false
+      birthday: birthday || '',
+      registered: false,
+      joinedAt: new Date().toISOString(),
+      lastSeenAt: '',
     };
 
     state.users.push(newUser);
@@ -1393,7 +2234,7 @@ async function startServer() {
         id: 'msg_welcome_' + Date.now(),
         userId: newUserId,
         sender: 'bot',
-        text: `Привет, ${realName}! Тебя добавили в команду как ${role === 'admin' ? 'админа' : 'организатора'}.\n\nДата рождения: *${newUser.birthday}*. Открой Mini App, чтобы отметить свободные слоты.`,
+        text: `Привет, ${realName}! Тебя добавили в команду как ${role === 'admin' ? 'админа' : 'организатора'}. Открой Mini App, чтобы отметить свободные слоты.`,
         timestamp: new Date().toISOString()
       }
     ];
@@ -1439,7 +2280,12 @@ async function startServer() {
     if (realName) user.realName = realName;
     if (username) user.username = username.startsWith('@') ? username : '@' + username;
     if (role) user.role = role;
-    if (birthday) user.birthday = birthday;
+    if (birthday !== undefined) {
+      if (birthday && !birthdayParts(birthday)?.year) {
+        return res.status(400).json({ error: 'Укажи дату рождения полностью: ДД.ММ.ГГГГ' });
+      }
+      user.birthday = birthday;
+    }
     if (Array.isArray(competencies)) {
       user.competencies = competencies.filter((item: string) => state.competencies?.includes(item));
     }
@@ -1549,10 +2395,12 @@ async function startServer() {
         role,
         facultyId,
         avatarSeed: sanitizedUsername.toLowerCase(),
-        birthday: '01.01',
+        birthday: '',
         registered: false,
         competencies: role === 'faculty_helper' ? cleanCompetencies : [],
         primaryCompetency: role === 'faculty_helper' ? cleanCompetencies[0] || '' : '',
+        joinedAt: new Date().toISOString(),
+        lastSeenAt: '',
       };
       state.users.push(user);
       state.messages[user.id] = [];
@@ -2262,14 +3110,32 @@ async function startServer() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          scope: { type: 'all_private_chats' },
           commands: [
             { command: 'start', description: 'Открыть Mini App' },
             { command: 'register', description: 'Показать профиль' },
+            { command: 'slots', description: 'Отметить свободные слоты' },
             { command: 'meetings', description: 'Показать встречи' },
             { command: 'tasks', description: 'Показать мои задачи' },
             { command: 'help', description: 'Справка по боту' }
           ]
         })
+      });
+      await telegramFetch(`${tgApiBase}/bot${botToken}/setMyCommands`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          scope: { type: 'all_group_chats' },
+          commands: [
+            { command: 'all', description: 'Упомянуть всю команду' },
+            { command: 'meeting', description: 'Ближайшая встреча' },
+            { command: 'deadlines', description: 'Ближайшие дедлайны' },
+            { command: 'slots', description: 'Кто не отметил слоты' },
+            { command: 'birthdays', description: 'Ближайшие дни рождения' },
+            { command: 'checkin', description: 'Запустить перекличку' },
+            { command: 'help', description: 'Команды MegaBot' },
+          ],
+        }),
       });
 
       await telegramFetch(`${tgApiBase}/bot${botToken}/setChatMenuButton`, {

@@ -75,6 +75,7 @@ const taskAssigneeIds = (task: Task) => {
 };
 const formatDateShort = (value?: string) => {
   if (!value) return '';
+  if (/^\d{2}\.\d{2}\.\d{4}$/.test(value)) return value;
   if (/^\d{2}\.\d{2}\.\d{2}$/.test(value)) return value;
   if (/^\d{2}\.\d{2}$/.test(value)) return value;
   const match = value.match(/^(\d{4})-(\d{2})-(\d{2})/);
@@ -84,16 +85,32 @@ const formatDateShort = (value?: string) => {
 
 const shortDateToInputDate = (value?: string) => {
   const normalized = formatDateShort(value);
-  const match = normalized.match(/^(\d{2})\.(\d{2})(?:\.(\d{2}))?$/);
+  const match = normalized.match(/^(\d{2})\.(\d{2})(?:\.(\d{2}|\d{4}))?$/);
   if (!match) return '';
-  const year = match[3] ? `20${match[3]}` : String(new Date().getFullYear());
+  const year = match[3]
+    ? match[3].length === 4 ? match[3] : `20${match[3]}`
+    : String(new Date().getFullYear());
   return `${year}-${match[2]}-${match[1]}`;
 };
 
-const inputDateToShortDate = (value: string, withYear = true) => {
+const inputDateToShortDate = (value: string, withYear = true, fullYear = false) => {
   const match = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (!match) return '';
-  return withYear ? `${match[3]}.${match[2]}.${match[1].slice(2)}` : `${match[3]}.${match[2]}`;
+  return withYear
+    ? `${match[3]}.${match[2]}.${fullYear ? match[1] : match[1].slice(2)}`
+    : `${match[3]}.${match[2]}`;
+};
+
+const ageFromBirthday = (value?: string) => {
+  const match = String(value || '').match(/^(\d{2})\.(\d{2})\.(\d{4})$/);
+  if (!match) return null;
+  const today = new Date();
+  let age = today.getFullYear() - Number(match[3]);
+  if (
+    today.getMonth() + 1 < Number(match[2])
+    || (today.getMonth() + 1 === Number(match[2]) && today.getDate() < Number(match[1]))
+  ) age -= 1;
+  return age;
 };
 
 const formatDateTimeShort = (value?: string) => {
@@ -131,9 +148,11 @@ const dateForSlotDay = (absoluteDayIndex: number) => {
 const formatDayMonth = (date: Date) => `${String(date.getDate()).padStart(2, '0')}.${String(date.getMonth() + 1).padStart(2, '0')}`;
 const weekdayShortByDate = (value?: string) => {
   const normalized = formatDateShort(value);
-  const match = normalized.match(/^(\d{2})\.(\d{2})(?:\.(\d{2}))?$/);
+  const match = normalized.match(/^(\d{2})\.(\d{2})(?:\.(\d{2}|\d{4}))?$/);
   if (!match) return '';
-  const year = match[3] ? Number(`20${match[3]}`) : new Date().getFullYear();
+  const year = match[3]
+    ? Number(match[3].length === 4 ? match[3] : `20${match[3]}`)
+    : new Date().getFullYear();
   const date = new Date(year, Number(match[2]) - 1, Number(match[1]));
   return dayLabels[date.getDay() === 0 ? 6 : date.getDay() - 1]?.short || '';
 };
@@ -148,6 +167,32 @@ const alignedSlots = (availability?: { slots?: Record<number, number[]>; weekSta
     if (nextKey >= 0 && nextKey < maxSlotWeeks * 7) result[nextKey] = value;
   });
   return result;
+};
+
+const alignedUnavailableDays = (availability?: { hardUnavailableDays?: number[]; weekStart?: string }) => {
+  if (!availability?.hardUnavailableDays) return [];
+  const savedWeekStart = availability.weekStart || currentWeekStart();
+  const weekOffset = Math.floor((new Date(currentWeekStart()).getTime() - new Date(savedWeekStart).getTime()) / (7 * 24 * 60 * 60 * 1000));
+  return availability.hardUnavailableDays
+    .map((day) => Number(day) - weekOffset * 7)
+    .filter((day) => Number.isFinite(day) && day >= 0 && day < maxSlotWeeks * 7);
+};
+
+const meetingDateTime = (meeting: Pick<Meeting, 'date' | 'time'>) => {
+  const normalized = formatDateShort(meeting.date);
+  const dateMatch = normalized.match(/^(\d{2})\.(\d{2})(?:\.(\d{2}|\d{4}))?$/);
+  const timeMatch = String(meeting.time || '').match(/^(\d{1,2}):(\d{2})$/);
+  if (!dateMatch) return Number.POSITIVE_INFINITY;
+  const year = dateMatch[3]
+    ? Number(dateMatch[3].length === 4 ? dateMatch[3] : `20${dateMatch[3]}`)
+    : new Date().getFullYear();
+  return new Date(
+    year,
+    Number(dateMatch[2]) - 1,
+    Number(dateMatch[1]),
+    Number(timeMatch?.[1] || 0),
+    Number(timeMatch?.[2] || 0),
+  ).getTime();
 };
 
 export default function MiniApp({
@@ -217,7 +262,7 @@ export default function MiniApp({
   const [newUserRealName, setNewUserRealName] = useState('');
   const [newUserUsername, setNewUserUsername] = useState('');
   const [newUserRole, setNewUserRole] = useState<'admin' | 'organizer'>('organizer');
-  const [newUserBirthday, setNewUserBirthday] = useState('01.01');
+  const [newUserBirthday, setNewUserBirthday] = useState('');
   const [showAddUserForm, setShowAddUserForm] = useState(false);
   const [showAllTeamUsers, setShowAllTeamUsers] = useState(false);
   const [teamSearchOpen, setTeamSearchOpen] = useState(false);
@@ -262,6 +307,24 @@ export default function MiniApp({
   const latestCompletedTasks = completedTasks.slice(0, 10);
   const scheduledMeetings = state.meetings.filter((meeting) => meeting.status === 'scheduled');
   const visibleScheduledMeetings = showAllMeetings ? scheduledMeetings : scheduledMeetings.slice(0, 3);
+  const profileMeetings = scheduledMeetings
+    .filter((meeting) => (
+      (meeting.participants === 'all'
+        || meeting.participants.includes(currentUser.id)
+        || meeting.hostId === currentUser.id)
+      && meetingDateTime(meeting) >= Date.now()
+    ))
+    .slice()
+    .sort((a, b) => meetingDateTime(a) - meetingDateTime(b));
+  const profileCompletedTasks = completedTasks.filter((task) => taskAssigneeIds(task).includes(currentUser.id));
+  const profileAvailability = alignedSlots(state.availabilities[currentUser.id]);
+  const profileAvailableHours = Array.from({ length: 7 }, (_, dayIndex) => profileAvailability[dayIndex] || [])
+    .reduce((sum, dayHours) => sum + dayHours.length, 0);
+  const profileUnavailableDays = new Set(alignedUnavailableDays(state.availabilities[currentUser.id]).filter((day) => day < 7));
+  const profileSlotsCompleted = Array.from({ length: 7 }, (_, dayIndex) => (
+    (profileAvailability[dayIndex] || []).length > 0 || profileUnavailableDays.has(dayIndex)
+  )).every(Boolean);
+  const profileAge = ageFromBirthday(currentUser.birthday);
   const facultyTasks = state.tasks.filter((task) => task.facultyId);
   const visibleFacultyTasks = showAllFacultyTasks ? facultyTasks : facultyTasks.slice(0, 3);
   const tasksByCompetency = state.tasks.reduce<Record<string, Task[]>>((acc, task) => {
@@ -615,7 +678,7 @@ export default function MiniApp({
     if (res.ok) {
       setNewUserRealName('');
       setNewUserUsername('');
-      setNewUserBirthday('01.01');
+      setNewUserBirthday('');
       setShowAddUserForm(false);
       onRefreshState();
     }
@@ -626,7 +689,7 @@ export default function MiniApp({
     setUserDraft({
       realName: user.realName,
       username: user.username,
-      birthday: user.birthday || '01.01',
+      birthday: user.birthday || '',
       role: user.role,
       competencies: user.competencies || [],
       primaryCompetency: user.primaryCompetency || '',
@@ -869,11 +932,83 @@ export default function MiniApp({
       <main className="mega-main mx-auto flex w-full max-w-3xl flex-col gap-4 px-4 pb-24 pt-4">
         {activeTab === 'profile' && (
           <section className="space-y-4">
-            <div className="rounded-3xl border border-blue-100 bg-white p-6 text-center shadow-sm">
-              <UserCircle className="mx-auto h-12 w-12 text-[#0069E0]" weight="duotone" />
-              <h2 className="mt-3 font-black">Профиль участника</h2>
-              <p className="mt-2 text-sm font-semibold text-slate-500">Раздел подготовлен. Содержимое добавим позже.</p>
+            <div className="rounded-3xl border border-blue-100 bg-white p-5 shadow-sm">
+              <div className="flex items-center gap-4">
+                <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-[#0069E0] text-white">
+                  <UserCircle className="h-8 w-8" weight="fill" />
+                </div>
+                <div className="min-w-0">
+                  <h2 className="truncate text-lg font-black">{currentUser.realName}</h2>
+                  <a href={telegramLink(currentUser.username)} target="_blank" rel="noreferrer" className="text-sm font-bold text-[#0069E0]">
+                    {currentUser.username}
+                  </a>
+                  <p className="mt-1 text-xs font-semibold text-slate-500">
+                    {isAdmin ? 'Администратор' : 'Организатор'}
+                    {currentUser.birthday ? ` · ${formatDateShort(currentUser.birthday)}` : ''}
+                    {profileAge !== null ? ` · ${profileAge} лет` : ''}
+                  </p>
+                </div>
+              </div>
+
+              <div className="mt-5 grid grid-cols-2 overflow-hidden rounded-2xl border border-blue-100 bg-slate-50 sm:grid-cols-4">
+                {[
+                  ['Активные задачи', myTasks.length],
+                  ['Выполнено', profileCompletedTasks.length],
+                  ['Встречи', profileMeetings.length],
+                  ['Свободные часы', profileAvailableHours],
+                ].map(([label, value], index) => (
+                  <div key={String(label)} className={`p-3 ${index % 2 ? 'border-l border-blue-100' : ''} ${index > 1 ? 'border-t border-blue-100 sm:border-t-0 sm:border-l' : ''}`}>
+                    <div className="text-xl font-black text-[#0069E0]">{value}</div>
+                    <div className="mt-1 text-xs font-bold text-slate-500">{label}</div>
+                  </div>
+                ))}
+              </div>
+
+              <div className="mt-4 space-y-2 text-sm text-slate-600">
+                <InfoRow label="Главный блок" value={currentUser.primaryCompetency || 'не выбран'} />
+                <InfoRow label="Другие блоки" value={(currentUser.competencies || []).filter((item) => item !== currentUser.primaryCompetency).join(', ') || '—'} />
+                <InfoRow label="Статус слотов" value={profileSlotsCompleted ? 'неделя заполнена' : 'нужно заполнить'} />
+              </div>
             </div>
+
+            <div className="grid grid-cols-3 gap-2">
+              <button type="button" onClick={() => setActiveTab('slots')} className={secondaryButtonClass}>
+                <CalendarDots className="h-4 w-4" />
+                Слоты
+              </button>
+              <button type="button" onClick={() => setActiveTab('meetings')} className={secondaryButtonClass}>
+                <UsersThree className="h-4 w-4" />
+                Встречи
+              </button>
+              <button type="button" onClick={() => setActiveTab('tasks')} className={secondaryButtonClass}>
+                <Briefcase className="h-4 w-4" />
+                Задачи
+              </button>
+            </div>
+
+            {profileMeetings[0] && (
+              <div className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
+                <div className="text-xs font-black uppercase text-slate-400">Следующая встреча</div>
+                <h3 className="mt-2 font-black">{profileMeetings[0].title}</h3>
+                <p className="mt-1 text-sm font-semibold text-slate-500">
+                  {formatDateShort(profileMeetings[0].date)} · {profileMeetings[0].time}
+                </p>
+              </div>
+            )}
+
+            {myTasks.length > 0 && (
+              <div className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
+                <div className="text-xs font-black uppercase text-slate-400">В фокусе</div>
+                <div className="mt-3 space-y-2">
+                  {myTasks.slice(0, 3).map((task) => (
+                    <div key={task.id} className="flex items-center justify-between gap-3 rounded-2xl bg-slate-50 px-3 py-2">
+                      <span className="min-w-0 truncate text-sm font-black">{task.title}</span>
+                      <span className="shrink-0 text-xs font-bold text-[#0069E0]">{formatDateShort(task.deadline) || 'без даты'}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </section>
         )}
 
@@ -1469,7 +1604,7 @@ export default function MiniApp({
                     </select>
                   </Field>
                   <Field label="ДР">
-                    <DatePickerField value={newUserBirthday} onChange={setNewUserBirthday} placeholder="Выбери дату" withYear={false} />
+                    <DatePickerField value={newUserBirthday} onChange={setNewUserBirthday} placeholder="Выбери дату" fullYear />
                   </Field>
                 </div>
                 <button className={primaryButtonClass}>Добавить</button>
@@ -1565,7 +1700,7 @@ export default function MiniApp({
                           <div className={`mt-1 rounded-full px-2.5 py-1 text-xs font-black ${user.registered ? 'bg-emerald-50 text-emerald-800' : 'bg-slate-100 text-slate-700'}`}>
                             {user.registered ? 'В боте' : 'Не в боте'}
                           </div>
-                          <div className="mt-1 text-xs text-slate-500">{formatDateShort(user.birthday || '01.01')}</div>
+                          <div className="mt-1 text-xs text-slate-500">{formatDateShort(user.birthday) || 'Дата не указана'}</div>
                         </div>
                       </div>
 
@@ -1575,8 +1710,10 @@ export default function MiniApp({
                             <div className="space-y-2 text-sm text-slate-600">
                               <InfoRow label="Имя" value={user.realName} />
                               <InfoRow label="Telegram" value={user.username} href={telegramLink(user.username)} />
-                              <InfoRow label="Дата рождения" value={formatDateShort(user.birthday || '01.01')} />
+                              <InfoRow label="Дата рождения" value={formatDateShort(user.birthday) || 'не указана'} />
                               <InfoRow label="Регистрация" value={user.registered ? 'зарегистрирован в боте' : 'ещё не заходил в бот'} />
+                              <InfoRow label="В команде с" value={formatDateTimeShort(user.joinedAt) || 'дата не сохранена'} />
+                              <InfoRow label="Последняя активность" value={formatDateTimeShort(user.lastSeenAt) || 'ещё не заходил'} />
                               <InfoRow label="Главный блок" value={user.primaryCompetency || 'не выбран'} />
                               <InfoRow label="Блоки" value={(user.competencies || []).join(', ') || 'не выбраны'} />
                               {(isAdmin || user.id === currentUser.id) && (
@@ -1604,7 +1741,7 @@ export default function MiniApp({
                               </Field>
                               <div className={`grid gap-3 ${isAdmin ? 'grid-cols-2' : 'grid-cols-1'}`}>
                                 <Field label="ДР">
-                                  <DatePickerField value={userDraft.birthday} onChange={(value) => setUserDraft((prev) => ({ ...prev, birthday: value }))} placeholder="Выбери дату" withYear={false} />
+                                  <DatePickerField value={userDraft.birthday} onChange={(value) => setUserDraft((prev) => ({ ...prev, birthday: value }))} placeholder="Выбери дату" fullYear />
                                 </Field>
                                 {isAdmin && (
                                   <Field label="Роль">
@@ -2100,12 +2237,14 @@ function DatePickerField({
   onChange,
   placeholder = 'Дата не выбрана',
   withYear = true,
+  fullYear = false,
   error = false,
 }: {
   value: string;
   onChange: (value: string) => void;
   placeholder?: string;
   withYear?: boolean;
+  fullYear?: boolean;
   error?: boolean;
 }) {
   const inputValue = shortDateToInputDate(value);
@@ -2114,7 +2253,7 @@ function DatePickerField({
       <input
         type="date"
         value={inputValue}
-        onChange={(event) => onChange(inputDateToShortDate(event.target.value, withYear))}
+        onChange={(event) => onChange(inputDateToShortDate(event.target.value, withYear, fullYear))}
         className={`${inputClass} cursor-pointer pr-3 ${error ? 'border-rose-300 bg-rose-50 focus:border-rose-500' : ''}`}
       />
       <div className={`mt-1 flex items-center gap-1.5 text-xs font-bold ${value ? 'text-[#0069E0]' : 'text-slate-400'}`}>
