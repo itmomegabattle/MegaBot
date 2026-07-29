@@ -202,7 +202,7 @@ textarea:focus-visible {
 .mega-page-title {
   margin-top: 2px;
   font-family: "Druk Text Wide Cyr", "Arial Black", sans-serif;
-  font-size: clamp(18px, 5.2vw, 24px);
+  font-size: clamp(15px, 4.3vw, 21px);
   font-weight: 500;
   line-height: 1;
   letter-spacing: -0.025em;
@@ -210,7 +210,7 @@ textarea:focus-visible {
 }
 
 .mega-shell main {
-  padding-bottom: calc(env(safe-area-inset-bottom) + 112px);
+  padding-bottom: calc(env(safe-area-inset-bottom) + 148px);
 }
 
 .mega-shell section {
@@ -378,12 +378,50 @@ textarea:focus-visible {
   overflow: hidden;
 }
 
-.mega-shell .mega-bottom-nav::before {
-  position: absolute;
-  inset: 0 auto 0 0;
-  width: 3px;
-  content: "";
-  background: linear-gradient(180deg, var(--mega-cyan), var(--mega-blue), var(--mega-violet), var(--mega-magenta));
+.mega-shell .mega-profile-trigger {
+  min-height: 44px;
+  color: inherit;
+  background: transparent;
+}
+
+.mega-shell .mega-profile-trigger:hover,
+.mega-shell .mega-profile-trigger:active {
+  color: inherit;
+  background: transparent;
+}
+
+.mega-shell .mega-primary-button,
+.mega-shell .mega-primary-button:hover,
+.mega-shell .mega-primary-button:active {
+  color: #ffffff;
+}
+
+.mega-shell .mega-secondary-button,
+.mega-shell .mega-secondary-button:hover,
+.mega-shell .mega-secondary-button:active {
+  color: var(--mega-link);
+}
+
+.mega-shell .mega-segment-option-active {
+  color: var(--mega-link);
+  background: var(--mega-surface);
+}
+
+.mega-shell .mega-segment-option-active:hover,
+.mega-shell .mega-segment-option-active:active {
+  color: var(--mega-link);
+  background: color-mix(in srgb, var(--mega-blue) 9%, var(--mega-surface));
+}
+
+.mega-shell .mega-segment-option-idle {
+  color: var(--mega-muted);
+  background: transparent;
+}
+
+.mega-shell .mega-segment-option-idle:hover,
+.mega-shell .mega-segment-option-idle:active {
+  color: var(--mega-ink);
+  background: color-mix(in srgb, var(--mega-blue) 8%, var(--mega-surface));
 }
 
 .mega-shell .mega-bottom-nav button {

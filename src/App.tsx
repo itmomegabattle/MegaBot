@@ -16,6 +16,7 @@ export default function App() {
   const fetchState = async () => {
     try {
       const res = await fetch('/api/state');
+      if (!res.ok) throw new Error(`State request failed: ${res.status}`);
       const data = await res.json();
       setState(data);
       const isLocalPreview = ['localhost', '127.0.0.1'].includes(window.location.hostname);
@@ -53,17 +54,20 @@ export default function App() {
         .then((data) => {
           if (data.success && data.user) {
             setCurrentUserId(data.user.id);
+            fetchState();
           } else if (data.externalOnly) {
             setExternalOnlyMessage(data.error || 'Mini App закрыт для вашей роли. Пользуйтесь задачами в чате с ботом.');
             if (data.user) setCurrentUserId(data.user.id);
+            setLoading(false);
           } else {
             setExternalOnlyMessage(data.error || 'Вас нет в списке участников. Напишите админу, чтобы вас добавили в команду.');
+            setLoading(false);
           }
-          fetchState();
         })
         .catch((err) => {
           console.error('Error authenticating Telegram user:', err);
-          fetchState();
+          setExternalOnlyMessage('Не удалось подтвердить доступ через Telegram. Закройте Mini App и откройте его кнопкой в боте.');
+          setLoading(false);
         });
       return;
     }
@@ -186,7 +190,7 @@ export default function App() {
       const res = await fetch('/api/task/status', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ taskId, status: 'completed' }),
+        body: JSON.stringify({ taskId, status: 'completed', requesterId: currentUserId }),
       });
       const data = await res.json();
       if (data.success) {
@@ -241,13 +245,10 @@ export default function App() {
       <div className="mega-gate min-h-screen flex flex-col justify-center items-center gap-5 px-6 text-center">
         <div className="mega-gate-card max-w-sm">
           <img src="/brand/megabattle-logo.svg" alt="ITMO MegaBattle" className="mega-gate-logo mx-auto" />
-          <h1 className="mt-2 text-2xl font-black">Сначала регистрация</h1>
+          <h1 className="mt-2 text-2xl font-black">Доступ ещё не активирован</h1>
           <p className="mt-3 text-sm font-semibold text-slate-500">
-            Напиши боту в чате имя, фамилию и дату рождения одним сообщением:
+            Попроси администратора проверить Telegram username в твоём профиле, затем отправь боту команду /start.
           </p>
-          <div className="mt-4 rounded-2xl bg-blue-50 px-4 py-3 text-sm font-black text-[#0069E0]">
-            Иван Кузнецов 12.10
-          </div>
           <button
             onClick={() => (window as any).Telegram?.WebApp?.close?.()}
             className="mt-5 w-full rounded-3xl bg-[#0069E0] px-5 py-3 text-sm font-black text-white transition hover:bg-[#1677E8] active:scale-[0.97] active:bg-[#0058BD]"

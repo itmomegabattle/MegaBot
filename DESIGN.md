@@ -26,7 +26,7 @@ colors:
 typography:
   display:
     fontFamily: "Druk Text Wide Cyr, Arial Black, sans-serif"
-    fontSize: "clamp(17px, 4.8vw, 22px)"
+    fontSize: "clamp(15px, 4.3vw, 21px)"
     fontWeight: 500
     lineHeight: 1
     letterSpacing: "-0.025em"
@@ -171,7 +171,7 @@ The palette combines a saturated institutional blue with stage black, clear whit
 
 ### Hierarchy
 
-- **Display** (500, fluid 17–22px, 1 line-height): sticky page title; uppercase and tightly tracked.
+- **Display** (500, fluid 15–21px, 1 line-height): sticky page title; uppercase, tightly tracked, and always kept on one line.
 - **Headline** (500, 24px, 1 line-height): gate and exceptional state headings.
 - **Title** (500, 16px, 1.05 line-height): section headings inside the working surface.
 - **Body** (600, 14px, 1.5 line-height): descriptions, rows, and field values.
@@ -239,6 +239,14 @@ The ribbon-like canvas field and cyan logo disc are the only recurring organic g
 ### Navigation
 
 The five-item bottom navigation is fixed, safe-area aware, and translucent over the page. Each item is 48px high on phones and 56px from 640px upward, with a Phosphor icon over a compact label. Active state uses Battle Blue, white copy, and a filled icon; inactive state is transparent with muted copy and a regular-weight icon.
+
+### Progressive Disclosure
+
+Potentially long collections show the first three items by default. The expand/collapse control appears before the collection, so a user never has to scroll to the bottom to close it. Search temporarily reveals all matching people. This pattern applies to participants, assignees, meetings, tasks, competencies, faculty groups, and unavailable-user lists.
+
+### Participant Profile
+
+The participant identity in the sticky header is the profile entry point. The initial profile is an intentional empty state and does not add a sixth bottom-navigation item.
 
 ### Availability Slot
 

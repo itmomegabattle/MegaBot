@@ -7,6 +7,7 @@
     "dev": "tsx server.ts",
     "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
     "start": "node dist/server.cjs",
+    "verify:core": "npm run build && node scripts/verify-core-flows.mjs",
     "deploy:selectel": "bash scripts/deploy-selectel.sh",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit"

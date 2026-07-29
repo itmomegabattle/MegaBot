@@ -17,6 +17,8 @@ import {
   DownloadSimple,
   Moon,
   Sun,
+  MagnifyingGlass,
+  UserCircle,
 } from '@phosphor-icons/react';
 import { Meeting, SimulationState, Task, User } from '../types';
 
@@ -191,6 +193,7 @@ export default function MiniApp({
   const [taskCompetency, setTaskCompetency] = useState('');
   const [taskDeadline, setTaskDeadline] = useState('');
   const [taskAssignedTo, setTaskAssignedTo] = useState<string[]>([]);
+  const [showAllTaskAssignees, setShowAllTaskAssignees] = useState(false);
   const [taskSow, setTaskSow] = useState('');
   const [taskWorkload, setTaskWorkload] = useState<'low' | 'medium' | 'high'>('medium');
   const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
@@ -199,6 +202,10 @@ export default function MiniApp({
   const [showFullCalendar, setShowFullCalendar] = useState(false);
   const [expandedAvailabilityDay, setExpandedAvailabilityDay] = useState<number | null>(null);
   const [expandedUnavailableDay, setExpandedUnavailableDay] = useState<number | null>(null);
+  const [showAllAvailabilityUsers, setShowAllAvailabilityUsers] = useState(false);
+  const [showAllUnavailableUsers, setShowAllUnavailableUsers] = useState(false);
+  const [showAllMeetingParticipants, setShowAllMeetingParticipants] = useState(false);
+  const [showAllMeetings, setShowAllMeetings] = useState(false);
   const [darkTheme, setDarkTheme] = useState(() => {
     const savedTheme = window.localStorage.getItem('megabattle-theme');
     if (savedTheme) return savedTheme === 'dark';
@@ -212,29 +219,39 @@ export default function MiniApp({
   const [newUserRole, setNewUserRole] = useState<'admin' | 'organizer'>('organizer');
   const [newUserBirthday, setNewUserBirthday] = useState('01.01');
   const [showAddUserForm, setShowAddUserForm] = useState(false);
+  const [showAllTeamUsers, setShowAllTeamUsers] = useState(false);
+  const [teamSearchOpen, setTeamSearchOpen] = useState(false);
+  const [teamSearch, setTeamSearch] = useState('');
   const [expandedUserId, setExpandedUserId] = useState<string | null>(null);
   const [editingUserId, setEditingUserId] = useState<string | null>(null);
   const [userDraft, setUserDraft] = useState({ realName: '', username: '', birthday: '', role: 'organizer' as User['role'], competencies: [] as string[], primaryCompetency: '' });
   const [newCompetency, setNewCompetency] = useState('');
+  const [showAllCompetencies, setShowAllCompetencies] = useState(false);
   const [facultyUserDraft, setFacultyUserDraft] = useState({ realName: '', username: '', role: 'faculty_responsible' as User['role'], facultyId: '', competencies: [] as string[] });
   const [facultyTaskDraft, setFacultyTaskDraft] = useState({ facultyId: '', competency: '', title: '', description: '', deadline: '', assignedTo: [] as string[], reminders: [] as any[] });
   const [facultyTaskErrors, setFacultyTaskErrors] = useState<Record<string, boolean>>({});
   const [editingFacultyTaskId, setEditingFacultyTaskId] = useState<string | null>(null);
   const [newFacultyCompetency, setNewFacultyCompetency] = useState('');
+  const [showAllFacultyCompetencies, setShowAllFacultyCompetencies] = useState(false);
   const [showFacultyPeople, setShowFacultyPeople] = useState(false);
+  const [showAllFacultyTaskUsers, setShowAllFacultyTaskUsers] = useState(false);
+  const [showAllFacultyTasks, setShowAllFacultyTasks] = useState(false);
+  const [showAllFacultyBacklog, setShowAllFacultyBacklog] = useState(false);
   const [collapsedFacultyReminders, setCollapsedFacultyReminders] = useState<number[]>([]);
   const [editingFacultyUserId, setEditingFacultyUserId] = useState<string | null>(null);
   const [facultyEditDraft, setFacultyEditDraft] = useState({ realName: '', username: '', role: 'faculty_responsible' as User['role'], facultyId: '', competencies: [] as string[] });
 
   const isAdmin = currentUser.role === 'admin';
+  const coreTeamUsers = state.users.filter((user) => user.role === 'admin' || user.role === 'organizer');
   const votedUsers = useMemo(
     () => state.users.filter((user) => {
+      if (user.role !== 'admin' && user.role !== 'organizer') return false;
       const availability = state.availabilities[user.id];
       return Object.values(alignedSlots(availability)).some((day) => day.length > 0);
     }),
     [state.availabilities, state.users],
   );
-  const majority = Math.floor(state.users.length / 2) + 1;
+  const majority = Math.floor(coreTeamUsers.length / 2) + 1;
   const firstWeekFilled = Array.from({ length: 7 }, (_, dayIndex) => (slots[dayIndex] || []).length > 0).some(Boolean);
   const myTasks = state.tasks.filter((task) => taskAssigneeIds(task).includes(currentUser.id) && task.status !== 'completed');
   const openTasks = state.tasks.filter((task) => task.status === 'open');
@@ -243,6 +260,10 @@ export default function MiniApp({
     .slice()
     .sort((a, b) => String(b.completedAt || b.createdAt || '').localeCompare(String(a.completedAt || a.createdAt || '')));
   const latestCompletedTasks = completedTasks.slice(0, 10);
+  const scheduledMeetings = state.meetings.filter((meeting) => meeting.status === 'scheduled');
+  const visibleScheduledMeetings = showAllMeetings ? scheduledMeetings : scheduledMeetings.slice(0, 3);
+  const facultyTasks = state.tasks.filter((task) => task.facultyId);
+  const visibleFacultyTasks = showAllFacultyTasks ? facultyTasks : facultyTasks.slice(0, 3);
   const tasksByCompetency = state.tasks.reduce<Record<string, Task[]>>((acc, task) => {
     const key = task.competency || 'Без блока';
     if (!acc[key]) acc[key] = [];
@@ -257,14 +278,25 @@ export default function MiniApp({
       acc[key].push(task);
       return acc;
     }, {});
-  const teamUsers = isAdmin ? state.users : [currentUser, ...state.users.filter((user) => user.id !== currentUser.id)];
-  const calendarUsers = [currentUser, ...state.users.filter((user) => user.id !== currentUser.id)];
+  const teamUsers = isAdmin
+    ? coreTeamUsers
+    : [currentUser, ...coreTeamUsers.filter((user) => user.id !== currentUser.id)];
+  const normalizedTeamSearch = teamSearch.trim().toLocaleLowerCase('ru');
+  const filteredTeamUsers = normalizedTeamSearch
+    ? teamUsers.filter((user) => `${user.realName} ${user.username}`.toLocaleLowerCase('ru').includes(normalizedTeamSearch))
+    : teamUsers;
+  const visibleTeamUsers = showAllTeamUsers || normalizedTeamSearch ? filteredTeamUsers : filteredTeamUsers.slice(0, 3);
+  const calendarUsers = [currentUser, ...coreTeamUsers.filter((user) => user.id !== currentUser.id)];
   const visibleCalendarUsers = showFullCalendar ? calendarUsers : calendarUsers.slice(0, 3);
   const competencies = state.competencies || [];
+  const visibleCompetencies = showAllCompetencies ? competencies : competencies.slice(0, 3);
   const faculties = state.faculties || [];
   const facultyCompetencies = state.facultyCompetencies || [];
+  const visibleFacultyCompetencies = showAllFacultyCompetencies ? facultyCompetencies : facultyCompetencies.slice(0, 3);
   const facultyUsers = state.users.filter((user) => user.role === 'faculty_responsible' || user.role === 'faculty_helper');
+  const visibleFacultyUserIds = new Set((showFacultyPeople ? facultyUsers : facultyUsers.slice(0, 3)).map((user) => user.id));
   const facultyTaskUsers = facultyUsers.filter((user) => facultyTaskDraft.facultyId === 'all' || user.facultyId === facultyTaskDraft.facultyId);
+  const visibleFacultyTaskUsers = showAllFacultyTaskUsers ? facultyTaskUsers : facultyTaskUsers.slice(0, 3);
   const facultyTaskMatchedUsers = facultyTaskDraft.competency
     ? facultyTaskUsers.filter((user) => (
         facultyTaskDraft.competency === 'Ответственные'
@@ -277,14 +309,14 @@ export default function MiniApp({
     () =>
       dayLabels.map((day, dayIndex) => ({
         ...day,
-        users: state.users
+        users: coreTeamUsers
           .map((user) => ({
             ...user,
             daySlots: alignedSlots(state.availabilities[user.id])?.[dayIndex] || [],
           }))
           .filter((user) => user.daySlots.length > 0),
-        unavailableUsers: state.users.filter((user) => (alignedSlots(state.availabilities[user.id])?.[dayIndex] || []).length === 0),
-        count: state.users.filter((user) => {
+        unavailableUsers: coreTeamUsers.filter((user) => (alignedSlots(state.availabilities[user.id])?.[dayIndex] || []).length === 0),
+        count: coreTeamUsers.filter((user) => {
           const daySlots = alignedSlots(state.availabilities[user.id])?.[dayIndex] || [];
           return daySlots.length > 0;
         }).length,
@@ -313,7 +345,7 @@ export default function MiniApp({
 
   const downloadAvailabilityCsv = () => {
     const header = ['Имя', 'Telegram', ...dayLabels.map((day) => day.full)];
-    const rows = state.users.map((user) => [
+    const rows = coreTeamUsers.map((user) => [
       user.realName,
       user.username,
       ...dayLabels.map((_, dayIndex) => formatHours(alignedSlots(state.availabilities[user.id])?.[dayIndex] || [])),
@@ -401,7 +433,20 @@ export default function MiniApp({
   const selectMeetingCompetency = (name: string) => {
     setMeetingType('competency');
     setMeetingCompetency(name);
-    setParticipants(state.users.filter((user) => user.competencies?.includes(name)).map((user) => user.id));
+    setParticipants(coreTeamUsers.filter((user) => user.competencies?.includes(name)).map((user) => user.id));
+    setShowAllMeetingParticipants(false);
+  };
+
+  const selectTaskCompetency = (name: string) => {
+    setTaskCompetency(name);
+    setTaskAssignedTo(
+      name
+        ? coreTeamUsers
+            .filter((user) => user.primaryCompetency === name || user.competencies?.includes(name))
+            .map((user) => user.id)
+        : [],
+    );
+    setShowAllTaskAssignees(false);
   };
 
   const saveWeek = async () => {
@@ -429,6 +474,7 @@ export default function MiniApp({
     setMeetingType('general');
     setMeetingCompetency('');
     setParticipants([]);
+    setShowAllMeetingParticipants(false);
   };
 
   const startMeetingEdit = (meeting: Meeting) => {
@@ -496,6 +542,7 @@ export default function MiniApp({
     setTaskCompetency('');
     setTaskDeadline('');
     setTaskAssignedTo([]);
+    setShowAllTaskAssignees(false);
     setTaskSow('');
     setTaskWorkload('medium');
   };
@@ -723,6 +770,7 @@ export default function MiniApp({
   };
 
   const setFacultyTaskScope = (facultyId: string) => {
+    setShowAllFacultyTaskUsers(false);
     setFacultyTaskErrors((prev) => ({ ...prev, facultyId: false, assignedTo: false }));
     setFacultyTaskDraft((prev) => {
       const scopedUsers = facultyUsers.filter((user) => facultyId === 'all' || user.facultyId === facultyId);
@@ -738,6 +786,7 @@ export default function MiniApp({
   };
 
   const setFacultyTaskCompetency = (competency: string) => {
+    setShowAllFacultyTaskUsers(false);
     setFacultyTaskErrors((prev) => ({ ...prev, assignedTo: false }));
     setFacultyTaskDraft((prev) => {
       const scopedUsers = facultyUsers.filter((user) => prev.facultyId === 'all' || user.facultyId === prev.facultyId);
@@ -780,6 +829,7 @@ export default function MiniApp({
     tasks: 'Задачи',
     team: 'Мегаорги',
     faculties: 'Факультеты',
+    profile: 'Профиль',
   }[activeTab] || 'Моя неделя';
 
   useEffect(() => {
@@ -794,10 +844,16 @@ export default function MiniApp({
         <div className="relative px-4 pb-3 pt-[calc(env(safe-area-inset-top)+10px)]">
           <div className="flex items-center justify-between gap-3">
             <img className="mega-logo" src="/brand/megabattle-logo.svg" alt="ITMO MegaBattle" />
-            <div className="min-w-0 flex-1">
+            <button
+              type="button"
+              onClick={() => setActiveTab('profile')}
+              aria-label="Открыть профиль"
+              aria-current={activeTab === 'profile' ? 'page' : undefined}
+              className="mega-profile-trigger min-w-0 flex-1 text-left"
+            >
               <p className="mega-context truncate">{currentUser.realName} · {isAdmin ? 'администратор' : 'организатор'}</p>
               <h1 className="mega-page-title truncate">{pageTitle}</h1>
-            </div>
+            </button>
             <div className="flex items-center gap-2">
               <button onClick={() => setDarkTheme((value) => !value)} className={`${iconButtonClass} h-11 w-11`} title="Тема" aria-label={darkTheme ? 'Включить светлую тему' : 'Включить тёмную тему'}>
                 {darkTheme ? <Sun className="h-5 w-5" weight="regular" /> : <Moon className="h-5 w-5" weight="regular" />}
@@ -811,6 +867,16 @@ export default function MiniApp({
       </header>
 
       <main className="mega-main mx-auto flex w-full max-w-3xl flex-col gap-4 px-4 pb-24 pt-4">
+        {activeTab === 'profile' && (
+          <section className="space-y-4">
+            <div className="rounded-3xl border border-blue-100 bg-white p-6 text-center shadow-sm">
+              <UserCircle className="mx-auto h-12 w-12 text-[#0069E0]" weight="duotone" />
+              <h2 className="mt-3 font-black">Профиль участника</h2>
+              <p className="mt-2 text-sm font-semibold text-slate-500">Раздел подготовлен. Содержимое добавим позже.</p>
+            </div>
+          </section>
+        )}
+
         {activeTab === 'slots' && (
           <section className="space-y-4">
             {slotError && <div role="alert" className="rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm font-bold text-amber-800">{slotError}</div>}
@@ -918,19 +984,24 @@ export default function MiniApp({
               <h2 className="font-black">Календарь свободных дней</h2>
               <div className="mt-3 grid grid-cols-7 gap-1.5">
                 {availabilityByDay.map((day) => {
-                  const ratio = state.users.length ? day.count / state.users.length : 0;
+                  const ratio = coreTeamUsers.length ? day.count / coreTeamUsers.length : 0;
                   const expanded = expandedAvailabilityDay === dayLabels.findIndex((item) => item.short === day.short);
                   const dayIndex = dayLabels.findIndex((item) => item.short === day.short);
                   return (
                     <button
                       key={day.short}
                       type="button"
-                      onClick={() => setExpandedAvailabilityDay((value) => (value === dayIndex ? null : dayIndex))}
+                      onClick={() => {
+                        setExpandedAvailabilityDay((value) => (value === dayIndex ? null : dayIndex));
+                        setExpandedUnavailableDay(null);
+                        setShowAllAvailabilityUsers(false);
+                        setShowAllUnavailableUsers(false);
+                      }}
                       className={`rounded-2xl border p-2 text-center ${pressClass} ${expanded ? 'border-[#0069E0] bg-blue-50 shadow-[0_8px_22px_rgba(0,105,224,0.12)]' : 'border-blue-100 bg-slate-50 hover:bg-blue-50 active:bg-blue-100'}`}
                     >
                       <div className="text-xs font-black text-slate-500">{day.short}</div>
                       <div className="mt-2 text-lg font-black text-[#0069E0]">{day.count}</div>
-                      <div className="text-xs font-bold text-slate-400">из {state.users.length}</div>
+                      <div className="text-xs font-bold text-slate-400">из {coreTeamUsers.length}</div>
                       <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-blue-100">
                         <div className="h-full rounded-full bg-[#0069E0]" style={{ width: `${Math.round(ratio * 100)}%` }} />
                       </div>
@@ -943,11 +1014,22 @@ export default function MiniApp({
                   <div className="font-black">
                     {dayLabels[expandedAvailabilityDay].full}, {formatDayMonth(dateForSlotDay(expandedAvailabilityDay))}
                   </div>
+                  {availabilityByDay[expandedAvailabilityDay].users.length > 3 && (
+                    <ListDisclosure
+                      expanded={showAllAvailabilityUsers}
+                      onToggle={() => setShowAllAvailabilityUsers((value) => !value)}
+                      total={availabilityByDay[expandedAvailabilityDay].users.length}
+                      className="mt-3"
+                    />
+                  )}
                   <div className="mt-3 space-y-2">
                     {availabilityByDay[expandedAvailabilityDay].users.length === 0 ? (
                       <div className="rounded-xl bg-white px-3 py-2 text-sm font-semibold text-slate-500">Никто не отметил свободное время.</div>
                     ) : (
-                      availabilityByDay[expandedAvailabilityDay].users.map((user) => (
+                      (showAllAvailabilityUsers
+                        ? availabilityByDay[expandedAvailabilityDay].users
+                        : availabilityByDay[expandedAvailabilityDay].users.slice(0, 3)
+                      ).map((user) => (
                         <div key={user.id} className="flex items-center justify-between gap-3 rounded-xl bg-white px-3 py-2 text-sm">
                           <div>
                             <div className="font-black">{user.realName}</div>
@@ -960,17 +1042,30 @@ export default function MiniApp({
                   </div>
                   <button
                     type="button"
-                    onClick={() => setExpandedUnavailableDay((value) => (value === expandedAvailabilityDay ? null : expandedAvailabilityDay))}
+                    onClick={() => {
+                      setExpandedUnavailableDay((value) => (value === expandedAvailabilityDay ? null : expandedAvailabilityDay));
+                      setShowAllUnavailableUsers(false);
+                    }}
                     className={`${secondaryButtonClass} mt-3 w-full`}
                   >
                     {expandedUnavailableDay === expandedAvailabilityDay ? 'Скрыть тех, кто не сможет' : `Не смогут (${availabilityByDay[expandedAvailabilityDay].unavailableUsers.length})`}
                   </button>
                   {expandedUnavailableDay === expandedAvailabilityDay && (
                     <div className="mt-3 grid grid-cols-1 gap-2">
+                      {availabilityByDay[expandedAvailabilityDay].unavailableUsers.length > 3 && (
+                        <ListDisclosure
+                          expanded={showAllUnavailableUsers}
+                          onToggle={() => setShowAllUnavailableUsers((value) => !value)}
+                          total={availabilityByDay[expandedAvailabilityDay].unavailableUsers.length}
+                        />
+                      )}
                       {availabilityByDay[expandedAvailabilityDay].unavailableUsers.length === 0 ? (
                         <div className="rounded-xl bg-white px-3 py-2 text-sm font-semibold text-emerald-600">Все отметили свободное время.</div>
                       ) : (
-                        availabilityByDay[expandedAvailabilityDay].unavailableUsers.map((user) => (
+                        (showAllUnavailableUsers
+                          ? availabilityByDay[expandedAvailabilityDay].unavailableUsers
+                          : availabilityByDay[expandedAvailabilityDay].unavailableUsers.slice(0, 3)
+                        ).map((user) => (
                           <a key={user.id} href={telegramLink(user.username)} target="_blank" rel="noreferrer" className="rounded-xl bg-white px-3 py-2 text-sm font-bold text-slate-700">
                             {user.realName} <span className="text-[#0069E0]">{user.username}</span>
                           </a>
@@ -994,6 +1089,14 @@ export default function MiniApp({
                     Скачать
                   </button>
                 </div>
+                {calendarUsers.length > 3 && (
+                  <ListDisclosure
+                    expanded={showFullCalendar}
+                    onToggle={() => setShowFullCalendar((value) => !value)}
+                    total={calendarUsers.length}
+                    className="mt-3"
+                  />
+                )}
                 <div className="mt-4 overflow-x-auto rounded-2xl border border-slate-100">
                   <table className="min-w-[720px] w-full border-collapse text-left text-xs">
                     <thead className="bg-slate-50 text-slate-500">
@@ -1027,11 +1130,6 @@ export default function MiniApp({
                     </tbody>
                   </table>
                 </div>
-                {calendarUsers.length > 3 && (
-                  <button onClick={() => setShowFullCalendar((value) => !value)} className={`${secondaryButtonClass} mt-3`}>
-                    {showFullCalendar ? 'Скрыть участников' : `Показать всех (${calendarUsers.length})`}
-                  </button>
-                )}
               </div>
             )}
 
@@ -1041,7 +1139,7 @@ export default function MiniApp({
                   <h2 className="font-black">Лучшие слоты</h2>
                   <p className="text-xs text-slate-500">По максимуму свободных людей</p>
                 </div>
-                <button onClick={findSuggestions} disabled={suggesting} className={`rounded-full bg-[#0069E0] px-5 py-2.5 text-xs font-black text-white shadow-[0_10px_24px_rgba(0,105,224,0.28)] hover:bg-[#1677E8] active:bg-[#0058BD] ${pressClass} disabled:opacity-70`}>
+                <button onClick={findSuggestions} disabled={suggesting} className={`mega-primary-button rounded-full bg-[#0069E0] px-5 py-2.5 text-xs font-black text-white shadow-[0_10px_24px_rgba(0,105,224,0.28)] hover:bg-[#1677E8] active:bg-[#0058BD] ${pressClass} disabled:opacity-70`}>
                   {suggesting ? 'Считаю...' : 'Найти'}
                 </button>
               </div>
@@ -1050,7 +1148,8 @@ export default function MiniApp({
                   <EmptyState text="Нажми «Найти», когда команда заполнит слоты." />
                 ) : (
                   suggestions.map((suggestion, index) => (
-                    <button key={`${suggestion.dayIndex}-${suggestion.hour}-${suggestion.endHour || ''}`} onClick={() => applySuggestion(suggestion)} className={`w-full rounded-2xl border border-blue-100 bg-blue-50/60 p-3 text-left hover:bg-blue-100 active:bg-blue-200 ${pressClass}`}>
+                    <div key={`${suggestion.dayIndex}-${suggestion.hour}-${suggestion.endHour || ''}`} className="overflow-hidden rounded-2xl border border-blue-100 bg-blue-50/60">
+                      <button onClick={() => applySuggestion(suggestion)} className={`w-full p-3 text-left hover:bg-blue-100 active:bg-blue-200 ${pressClass}`}>
                       <div className="flex items-center justify-between gap-2">
                         <div className="font-black">
                           {index + 1}. {dayLabels[suggestion.dayIndex]?.full}, {suggestion.hour}:00-{suggestion.endHour || suggestion.hour + (suggestion.duration || 1)}:00
@@ -1062,22 +1161,9 @@ export default function MiniApp({
                       <div className="mt-1 text-xs font-semibold text-slate-500">
                         Окно: {suggestion.duration || 1} ч. подряд
                       </div>
-                      <div className="mt-2 text-xs text-slate-600">
-                        Не смогут:{' '}
-                        {suggestion.missingUsers.length === 0 ? (
-                          <span className="font-bold text-emerald-600">никто</span>
-                        ) : (
-                          suggestion.missingUsers.map((user, userIndex) => (
-                            <React.Fragment key={user.id}>
-                              <a href={telegramLink(user.username)} target="_blank" rel="noreferrer" className="font-bold text-[#0069E0] underline decoration-blue-200" onClick={(event) => event.stopPropagation()}>
-                                {user.realName}
-                              </a>
-                              {userIndex < suggestion.missingUsers.length - 1 ? ', ' : ''}
-                            </React.Fragment>
-                          ))
-                        )}
-                      </div>
-                    </button>
+                      </button>
+                      <CompactUserLinks users={suggestion.missingUsers} />
+                    </div>
                   ))
                 )}
               </div>
@@ -1107,7 +1193,20 @@ export default function MiniApp({
                   </button>
                 )}
               </div>
-              <Segmented value={meetingType} onChange={(value) => setMeetingType(value as 'general' | 'custom' | 'competency')} options={[["general", "Вся команда"], ["custom", "Выбрать людей"], ["competency", "Выбрать блок"]]} />
+              <Segmented
+                value={meetingType}
+                onChange={(value) => {
+                  const nextType = value as 'general' | 'custom' | 'competency';
+                  setMeetingType(nextType);
+                  setShowAllMeetingParticipants(false);
+                  if (nextType === 'general') setParticipants([]);
+                  if (nextType === 'custom') {
+                    setMeetingCompetency('');
+                    setParticipants([]);
+                  }
+                }}
+                options={[["general", "Вся команда"], ["custom", "Выбрать людей"], ["competency", "Выбрать блок"]]}
+              />
               <Field label="Название">
                 <input value={meetingTitle} onChange={(e) => setMeetingTitle(e.target.value)} className={inputClass} />
               </Field>
@@ -1137,7 +1236,14 @@ export default function MiniApp({
               )}
               {(meetingType === 'custom' || meetingType === 'competency') && (
                 <div className="grid grid-cols-1 gap-2">
-                  {state.users.map((user) => (
+                  {coreTeamUsers.length > 3 && (
+                    <ListDisclosure
+                      expanded={showAllMeetingParticipants}
+                      onToggle={() => setShowAllMeetingParticipants((value) => !value)}
+                      total={coreTeamUsers.length}
+                    />
+                  )}
+                  {(showAllMeetingParticipants ? coreTeamUsers : coreTeamUsers.slice(0, 3)).map((user) => (
                     <label key={user.id} className="flex items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm">
                       <span>{user.realName}</span>
                       <input type="checkbox" checked={participants.includes(user.id)} onChange={() => setParticipants((prev) => (prev.includes(user.id) ? prev.filter((id) => id !== user.id) : [...prev, user.id]))} />
@@ -1152,11 +1258,20 @@ export default function MiniApp({
             )}
 
             <div className="space-y-3">
-              <h2 className="px-1 font-black">Ближайшие встречи</h2>
-              {state.meetings.filter((meeting) => meeting.status === 'scheduled').length === 0 ? (
+              <div className="flex items-center justify-between gap-3 px-1">
+                <h2 className="font-black">Ближайшие встречи</h2>
+                {scheduledMeetings.length > 3 && (
+                  <ListDisclosure
+                    expanded={showAllMeetings}
+                    onToggle={() => setShowAllMeetings((value) => !value)}
+                    total={scheduledMeetings.length}
+                  />
+                )}
+              </div>
+              {scheduledMeetings.length === 0 ? (
                 <EmptyState text="Встреч пока нет" />
               ) : (
-                state.meetings.filter((meeting) => meeting.status === 'scheduled').map((meeting) => {
+                visibleScheduledMeetings.map((meeting) => {
                   const host = state.users.find((user) => user.id === meeting.hostId);
                   const canManage = isAdmin || meeting.hostId === currentUser.id;
                   const expanded = expandedMeetingId === meeting.id;
@@ -1227,7 +1342,7 @@ export default function MiniApp({
                   <textarea value={taskDesc} onChange={(e) => setTaskDesc(e.target.value)} className={inputClass} rows={3} />
                 </Field>
                 <Field label="Блок">
-                  <select value={taskCompetency} onChange={(e) => setTaskCompetency(e.target.value)} className={selectClass}>
+                  <select value={taskCompetency} onChange={(e) => selectTaskCompetency(e.target.value)} className={selectClass}>
                     <option value="">Выбери блок задачи</option>
                     {competencies.map((name) => (
                       <option key={name} value={name}>{name}</option>
@@ -1250,7 +1365,22 @@ export default function MiniApp({
                 <Field label="Исполнитель">
                   <div className="space-y-2 rounded-2xl border border-slate-200 bg-slate-50 p-2">
                     <div className="px-1 text-xs font-bold text-slate-500">Никого не выбирай, если задача открытая.</div>
-                    {state.users.map((user) => (
+                    <button
+                      type="button"
+                      onClick={() => setTaskAssignedTo(taskAssignedTo.length === coreTeamUsers.length ? [] : coreTeamUsers.map((user) => user.id))}
+                      className={`${secondaryButtonClass} w-full`}
+                    >
+                      <UsersThree className="h-4 w-4" />
+                      {taskAssignedTo.length === coreTeamUsers.length ? 'Снять выбор со всей команды' : 'Назначить всей команде'}
+                    </button>
+                    {coreTeamUsers.length > 3 && (
+                      <ListDisclosure
+                        expanded={showAllTaskAssignees}
+                        onToggle={() => setShowAllTaskAssignees((value) => !value)}
+                        total={coreTeamUsers.length}
+                      />
+                    )}
+                    {(showAllTaskAssignees ? coreTeamUsers : coreTeamUsers.slice(0, 3)).map((user) => (
                       <label key={user.id} className="flex items-center justify-between rounded-xl bg-white px-3 py-2 text-sm font-semibold">
                         <span>{user.realName}</span>
                         <input
@@ -1356,11 +1486,19 @@ export default function MiniApp({
                     Добавить
                   </button>
                 </div>
+                {competencies.length > 3 && (
+                  <ListDisclosure
+                    expanded={showAllCompetencies}
+                    onToggle={() => setShowAllCompetencies((value) => !value)}
+                    total={competencies.length}
+                    className="mt-3"
+                  />
+                )}
                 <div className="mt-3 flex flex-wrap gap-2">
                   {competencies.length === 0 ? (
                     <span className="text-sm font-bold text-slate-400">Пока нет блоков</span>
                   ) : (
-                    competencies.map((name) => (
+                    visibleCompetencies.map((name) => (
                       <button key={name} type="button" onClick={() => deleteCompetency(name)} className={`${miniButtonClass} bg-slate-50 text-slate-700`}>
                         {name}
                         <X className="h-3 w-3" />
@@ -1372,10 +1510,45 @@ export default function MiniApp({
             )}
 
             <div className="space-y-3">
+              <div className="flex items-center justify-between gap-2 px-1">
+                <div className={`flex min-w-0 items-center gap-2 transition-all ${teamSearchOpen ? 'flex-1' : ''}`}>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setTeamSearchOpen((value) => !value);
+                      if (teamSearchOpen) setTeamSearch('');
+                    }}
+                    className={miniButtonClass}
+                    aria-label={teamSearchOpen ? 'Закрыть поиск' : 'Найти участника'}
+                  >
+                    {teamSearchOpen ? <X className="h-4 w-4" /> : <MagnifyingGlass className="h-4 w-4" />}
+                  </button>
+                  {teamSearchOpen && (
+                    <input
+                      autoFocus
+                      type="search"
+                      value={teamSearch}
+                      onChange={(event) => setTeamSearch(event.target.value)}
+                      className={`${inputClass} min-w-0 flex-1`}
+                      placeholder="Имя, фамилия или @username"
+                      aria-label="Поиск участника"
+                    />
+                  )}
+                </div>
+                {!normalizedTeamSearch && filteredTeamUsers.length > 3 && (
+                  <ListDisclosure
+                    expanded={showAllTeamUsers}
+                    onToggle={() => setShowAllTeamUsers((value) => !value)}
+                    total={filteredTeamUsers.length}
+                  />
+                )}
+              </div>
               {state.users.length === 0 ? (
                 <EmptyState text="Пока в команде никого нет" />
+              ) : visibleTeamUsers.length === 0 ? (
+                <EmptyState text="Никого не найдено" />
               ) : (
-                teamUsers.map((user) => {
+                visibleTeamUsers.map((user) => {
                   const expanded = expandedUserId === user.id;
                   const editing = editingUserId === user.id;
                   return (
@@ -1511,10 +1684,18 @@ export default function MiniApp({
                       <Plus className="h-4 w-4" />
                     </button>
                   </div>
+                  {facultyCompetencies.length > 3 && (
+                    <ListDisclosure
+                      expanded={showAllFacultyCompetencies}
+                      onToggle={() => setShowAllFacultyCompetencies((value) => !value)}
+                      total={facultyCompetencies.length}
+                      className="mt-3"
+                    />
+                  )}
                   <div className="mt-3 flex flex-wrap gap-2">
                     {facultyCompetencies.length === 0 ? (
                       <span className="text-sm font-bold text-slate-400">Пока нет компетенций</span>
-                    ) : facultyCompetencies.map((name) => (
+                    ) : visibleFacultyCompetencies.map((name) => (
                       <span key={name} className="inline-flex items-center gap-2 rounded-full bg-blue-50 px-3 py-1.5 text-sm font-black text-[#0069E0]">
                         {name}
                         <button type="button" onClick={() => deleteFacultyCompetency(name)} className="rounded-full p-0.5 text-[#0069E0] transition hover:bg-blue-100 active:scale-95">
@@ -1561,15 +1742,18 @@ export default function MiniApp({
                 <div className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
                   <button type="button" onClick={() => setShowFacultyPeople((value) => !value)} className="flex w-full items-center justify-between gap-3 text-left">
                     <span className="font-black">Составы ответственных</span>
-                    <span className={`${miniButtonClass} w-auto`}>
-                      {showFacultyPeople ? <Minus className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
-                      {showFacultyPeople ? 'Свернуть' : 'Показать'}
-                    </span>
+                    {facultyUsers.length > 3 && (
+                      <span className={`${miniButtonClass} w-auto`}>
+                        {showFacultyPeople ? <Minus className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
+                        {showFacultyPeople ? 'Свернуть' : `Показать всех (${facultyUsers.length})`}
+                      </span>
+                    )}
                   </button>
-                  {showFacultyPeople && (
                   <div className="mt-4 space-y-3">
                     {faculties.map((faculty) => {
-                      const people = facultyUsers.filter((user) => user.facultyId === faculty.id);
+                      const allPeople = facultyUsers.filter((user) => user.facultyId === faculty.id);
+                      const people = allPeople.filter((user) => visibleFacultyUserIds.has(user.id));
+                      if (!showFacultyPeople && allPeople.length > 0 && people.length === 0) return null;
                       return (
                         <div key={faculty.id} className="rounded-2xl bg-slate-50 p-3">
                           <div className="font-black">{faculty.name}</div>
@@ -1652,7 +1836,6 @@ export default function MiniApp({
                       );
                     })}
                   </div>
-                  )}
                 </div>
 
                 <form onSubmit={createFacultyTask} className="space-y-3 rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
@@ -1672,7 +1855,14 @@ export default function MiniApp({
                         <option value="Ответственные">Ответственные</option>
                         {facultyCompetencies.map((name) => <option key={name} value={name}>{name}</option>)}
                       </select>
-                      {facultyTaskUsers.map((user) => (
+                      {facultyTaskUsers.length > 3 && (
+                        <ListDisclosure
+                          expanded={showAllFacultyTaskUsers}
+                          onToggle={() => setShowAllFacultyTaskUsers((value) => !value)}
+                          total={facultyTaskUsers.length}
+                        />
+                      )}
+                      {visibleFacultyTaskUsers.map((user) => (
                         <label key={user.id} className={`flex items-center justify-between rounded-xl px-3 py-2 text-sm font-semibold ${facultyTaskDraft.competency && facultyTaskMatchedUsers.some((item) => item.id === user.id) ? 'bg-blue-50 text-[#0069E0]' : 'bg-white'} ${facultyTaskErrors.assignedTo ? 'ring-2 ring-rose-200' : ''}`}>
                           <span>
                             {user.realName}
@@ -1759,12 +1949,21 @@ export default function MiniApp({
                 </form>
 
                 <div className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
-                  <h2 className="font-black">Задачи факультетов</h2>
+                  <div className="flex items-center justify-between gap-3">
+                    <h2 className="font-black">Задачи факультетов</h2>
+                    {facultyTasks.length > 3 && (
+                      <ListDisclosure
+                        expanded={showAllFacultyTasks}
+                        onToggle={() => setShowAllFacultyTasks((value) => !value)}
+                        total={facultyTasks.length}
+                      />
+                    )}
+                  </div>
                   <div className="mt-3 space-y-3">
-                    {state.tasks.filter((task) => task.facultyId).length === 0 ? (
+                    {facultyTasks.length === 0 ? (
                       <EmptyState text="Пока нет задач факультетам" />
                     ) : (
-                      state.tasks.filter((task) => task.facultyId).map((task) => {
+                      visibleFacultyTasks.map((task) => {
                         const faculty = task.facultyId === 'all'
                           ? { name: 'Все факультеты' }
                           : faculties.find((item) => item.id === task.facultyId);
@@ -1813,10 +2012,19 @@ export default function MiniApp({
                 <div className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <h2 className="font-black">Бэклог задач факультетов</h2>
-                    <a href="/api/tasks/export" target="_blank" rel="noreferrer" className={miniButtonClass}>
-                      <DownloadSimple className="h-4 w-4" />
-                      Excel
-                    </a>
+                    <div className="flex flex-wrap gap-2">
+                      {facultyTasks.length > 3 && (
+                        <ListDisclosure
+                          expanded={showAllFacultyBacklog}
+                          onToggle={() => setShowAllFacultyBacklog((value) => !value)}
+                          total={facultyTasks.length}
+                        />
+                      )}
+                      <a href="/api/tasks/export" target="_blank" rel="noreferrer" className={miniButtonClass}>
+                        <DownloadSimple className="h-4 w-4" />
+                        Excel
+                      </a>
+                    </div>
                   </div>
                   <div className="mt-3 space-y-3">
                     {Object.keys(facultyTasksByCompetency).length === 0 ? (
@@ -1825,7 +2033,7 @@ export default function MiniApp({
                       <div key={name} className="rounded-2xl bg-slate-50 p-3">
                         <div className="font-black">{name}</div>
                         <div className="mt-2 space-y-2">
-                          {tasks.map((task) => {
+                          {tasks.slice(0, showAllFacultyBacklog ? tasks.length : 3).map((task) => {
                             const creator = state.users.find((user) => user.id === task.creatorId);
                             const executors = taskAssigneeIds(task).map((id) => state.users.find((user) => user.id === id)?.realName).filter(Boolean).join(', ');
                             return (
@@ -1866,18 +2074,24 @@ export default function MiniApp({
 const pressClass = 'transition duration-150 hover:brightness-105 active:scale-[0.98] active:brightness-90';
 const inputClass = 'w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-3 text-base font-semibold outline-none transition focus:border-[#0069E0] focus:bg-white';
 const selectClass = 'w-full appearance-none rounded-2xl border border-blue-100 bg-white px-3 py-3 pr-10 text-base font-black text-slate-950 shadow-sm outline-none transition hover:border-[#0069E0]/40 hover:bg-slate-50 focus:border-[#0069E0] focus:bg-white focus:shadow-[0_0_0_4px_rgba(0,105,224,0.10)] [background-image:linear-gradient(45deg,transparent_50%,#0069E0_50%),linear-gradient(135deg,#0069E0_50%,transparent_50%)] [background-position:calc(100%-18px)_50%,calc(100%-13px)_50%] [background-repeat:no-repeat] [background-size:6px_6px,6px_6px]';
-const primaryButtonClass = `flex w-full items-center justify-center gap-2 rounded-3xl bg-[#0069E0] px-5 py-3 text-sm font-black text-white shadow-[0_12px_28px_rgba(0,105,224,0.24)] hover:bg-[#1677E8] active:bg-[#0058BD] ${pressClass}`;
-const primaryCompactButtonClass = `flex items-center justify-center gap-2 rounded-full bg-[#0069E0] px-4 py-2 text-xs font-black text-white shadow-[0_10px_24px_rgba(0,105,224,0.22)] hover:bg-[#1677E8] active:bg-[#0058BD] ${pressClass}`;
-const secondaryButtonClass = `flex items-center justify-center gap-2 rounded-full border border-blue-100 bg-blue-50 px-3 py-2 text-xs font-black text-[#0069E0] hover:bg-blue-100 active:bg-blue-200 ${pressClass}`;
-const miniButtonClass = `flex items-center justify-center gap-1 rounded-full border border-blue-100 bg-blue-50 px-3 py-2 text-xs font-black text-[#0069E0] hover:bg-blue-100 active:bg-blue-200 ${pressClass}`;
+const primaryButtonClass = `mega-primary-button flex w-full items-center justify-center gap-2 rounded-3xl bg-[#0069E0] px-5 py-3 text-sm font-black text-white shadow-[0_12px_28px_rgba(0,105,224,0.24)] hover:bg-[#1677E8] active:bg-[#0058BD] ${pressClass}`;
+const primaryCompactButtonClass = `mega-primary-button flex items-center justify-center gap-2 rounded-full bg-[#0069E0] px-4 py-2 text-xs font-black text-white shadow-[0_10px_24px_rgba(0,105,224,0.22)] hover:bg-[#1677E8] active:bg-[#0058BD] ${pressClass}`;
+const secondaryButtonClass = `mega-secondary-button flex items-center justify-center gap-2 rounded-full border border-blue-100 bg-blue-50 px-3 py-2 text-xs font-black text-[#0069E0] hover:bg-blue-100 active:bg-blue-200 ${pressClass}`;
+const miniButtonClass = `mega-secondary-button flex items-center justify-center gap-1 rounded-full border border-blue-100 bg-blue-50 px-3 py-2 text-xs font-black text-[#0069E0] hover:bg-blue-100 active:bg-blue-200 ${pressClass}`;
 const iconButtonClass = `flex items-center justify-center rounded-full border border-white/25 bg-white/15 text-white backdrop-blur hover:bg-white/25 active:bg-white/30 ${pressClass}`;
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  const labelledChild = React.isValidElement<Record<string, unknown>>(children)
+    && typeof children.type === 'string'
+    && ['input', 'select', 'textarea'].includes(children.type)
+    ? React.cloneElement(children, { 'aria-label': children.props['aria-label'] || label })
+    : children;
+
   return (
-    <label className="block">
+    <div className="block" role="group" aria-label={label}>
       <span className="mb-1.5 block text-xs font-black uppercase text-slate-500">{label}</span>
-      {children}
-    </label>
+      {labelledChild}
+    </div>
   );
 }
 
@@ -1928,7 +2142,7 @@ function Segmented({ value, onChange, options }: { value: string; onChange: (val
   return (
     <div className={`grid gap-2 rounded-3xl bg-slate-100 p-1 ${options.length === 3 ? 'grid-cols-1 sm:grid-cols-3' : 'grid-cols-2'}`}>
       {options.map(([key, label]) => (
-        <button key={key} type="button" onClick={() => onChange(key)} className={`rounded-2xl px-3 py-2 text-sm font-black ${pressClass} ${value === key ? 'bg-white text-[#0069E0] shadow-sm hover:bg-white' : 'text-slate-500 hover:bg-white/70 active:bg-white'}`}>
+        <button key={key} type="button" onClick={() => onChange(key)} className={`mega-segment-option rounded-2xl px-3 py-2 text-sm font-black ${pressClass} ${value === key ? 'mega-segment-option-active shadow-sm' : 'mega-segment-option-idle'}`}>
           {label}
         </button>
       ))}
@@ -1954,14 +2168,21 @@ function TaskList({
   onRelease?: (taskId: string) => void;
 }) {
   const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
+  const [showAll, setShowAll] = useState(false);
+  const visibleTasks = showAll ? tasks : tasks.slice(0, 3);
 
   return (
     <div className="space-y-3">
-      <h2 className="px-1 font-black">{title}</h2>
+      <div className="flex items-center justify-between gap-3 px-1">
+        <h2 className="font-black">{title}</h2>
+        {tasks.length > 3 && (
+          <ListDisclosure expanded={showAll} onToggle={() => setShowAll((value) => !value)} total={tasks.length} />
+        )}
+      </div>
       {tasks.length === 0 ? (
         <EmptyState text="Пока пусто" />
       ) : (
-        tasks.map((task) => {
+        visibleTasks.map((task) => {
           const expanded = expandedTaskId === task.id;
           const creator = users.find((user) => user.id === task.creatorId);
           const executors = taskAssigneeIds(task).map((id) => users.find((user) => user.id === id)).filter(Boolean) as User[];
@@ -1974,7 +2195,7 @@ function TaskList({
                 <p className="mt-1 text-sm text-slate-500">{task.description}</p>
               </div>
               {task.status !== 'completed' && (
-                <button onClick={(event) => { event.stopPropagation(); onAction(task.id); }} className={`shrink-0 rounded-full bg-[#0069E0] px-3 py-2 text-xs font-black text-white hover:bg-[#1677E8] active:bg-[#0058BD] ${pressClass}`}>
+                <button onClick={(event) => { event.stopPropagation(); onAction(task.id); }} className={`mega-primary-button shrink-0 rounded-full bg-[#0069E0] px-3 py-2 text-xs font-black text-white hover:bg-[#1677E8] active:bg-[#0058BD] ${pressClass}`}>
                   {actionLabel}
                 </button>
               )}
@@ -2028,6 +2249,7 @@ function TaskList({
 
 function TaskLogView({ tasksByCompetency, users }: { tasksByCompetency: Record<string, Task[]>; users: User[] }) {
   const blockNames = Object.keys(tasksByCompetency).sort((a, b) => a.localeCompare(b, 'ru'));
+  const [expandedBlocks, setExpandedBlocks] = useState<string[]>([]);
   if (blockNames.length === 0) return <EmptyState text="В логе пока нет задач" />;
 
   return (
@@ -2036,14 +2258,28 @@ function TaskLogView({ tasksByCompetency, users }: { tasksByCompetency: Record<s
         <div key={blockName} className="rounded-2xl border border-slate-100 bg-slate-50 p-3">
           <div className="mb-3 flex items-center justify-between gap-2">
             <h3 className="font-black">{blockName}</h3>
-            <span className="rounded-full bg-white px-2.5 py-1 text-xs font-black text-[#0069E0]">
-              {tasksByCompetency[blockName].length}
-            </span>
+            <div className="flex items-center gap-2">
+              <span className="rounded-full bg-white px-2.5 py-1 text-xs font-black text-[#0069E0]">
+                {tasksByCompetency[blockName].length}
+              </span>
+              {tasksByCompetency[blockName].length > 3 && (
+                <ListDisclosure
+                  expanded={expandedBlocks.includes(blockName)}
+                  onToggle={() => setExpandedBlocks((current) => (
+                    current.includes(blockName)
+                      ? current.filter((item) => item !== blockName)
+                      : [...current, blockName]
+                  ))}
+                  total={tasksByCompetency[blockName].length}
+                />
+              )}
+            </div>
           </div>
           <div className="space-y-2">
             {tasksByCompetency[blockName]
               .slice()
               .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')))
+              .slice(0, expandedBlocks.includes(blockName) ? tasksByCompetency[blockName].length : 3)
               .map((task) => {
                 const creator = users.find((user) => user.id === task.creatorId);
                 const executors = taskAssigneeIds(task)
@@ -2075,6 +2311,64 @@ function TaskLogView({ tasksByCompetency, users }: { tasksByCompetency: Record<s
           </div>
         </div>
       ))}
+    </div>
+  );
+}
+
+function ListDisclosure({
+  expanded,
+  onToggle,
+  total,
+  className = '',
+}: {
+  expanded: boolean;
+  onToggle: () => void;
+  total: number;
+  className?: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      aria-expanded={expanded}
+      className={`${secondaryButtonClass} shrink-0 ${className}`}
+    >
+      {expanded ? <Minus className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
+      {expanded ? 'Свернуть' : `Ещё ${Math.max(0, total - 3)}`}
+    </button>
+  );
+}
+
+function CompactUserLinks({ users }: { users: Pick<User, 'id' | 'realName' | 'username'>[] }) {
+  const [expanded, setExpanded] = useState(false);
+  const visibleUsers = expanded ? users : users.slice(0, 3);
+
+  return (
+    <div className="border-t border-blue-100 px-3 py-3 text-xs text-slate-600">
+      {users.length > 3 && (
+        <ListDisclosure
+          expanded={expanded}
+          onToggle={() => setExpanded((value) => !value)}
+          total={users.length}
+          className="mb-2"
+        />
+      )}
+      <div>
+        Не смогут:{' '}
+        {users.length === 0 ? (
+          <span className="font-bold text-emerald-600">никто</span>
+        ) : (
+          visibleUsers.map((user, userIndex) => (
+            <React.Fragment key={user.id}>
+              <a href={telegramLink(user.username)} target="_blank" rel="noreferrer" className="font-bold text-[#0069E0] underline decoration-blue-200">
+                {user.realName}
+              </a>
+              {userIndex < visibleUsers.length - 1 ? ', ' : ''}
+            </React.Fragment>
+          ))
+        )}
+        {!expanded && users.length > 3 ? <span className="text-slate-400"> …</span> : null}
+      </div>
     </div>
   );
 }

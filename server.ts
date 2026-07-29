@@ -44,8 +44,10 @@ function telegramFetch(input: string, init: RequestInit = {}) {
   return run();
 }
 
-const PORT = 3000;
-const DB_FILE = path.join(process.cwd(), 'database.json');
+const PORT = Number(process.env.PORT || 3000);
+const DB_FILE = process.env.DB_FILE
+  ? path.resolve(process.env.DB_FILE)
+  : path.join(process.cwd(), 'database.json');
 
 // Empty initial data. Real users are created through Telegram or added by admins.
 const INITIAL_USERS: User[] = [];
@@ -107,10 +109,13 @@ function isFacultyUser(user?: User) {
 function findUserByTelegramIdentity(state: SimulationState, telegramId: string | number, username?: string) {
   const id = String(telegramId);
   const normalizedUsername = (username || '').replace(/^@/, '').toLowerCase();
-  return state.users.find((user) => user.telegramId === id)
-    || (normalizedUsername
-      ? state.users.find((user) => user.username.replace(/^@/, '').toLowerCase() === normalizedUsername)
-      : undefined);
+  const userByTelegramId = state.users.find((user) => user.telegramId === id);
+  if (userByTelegramId) return userByTelegramId;
+  if (!normalizedUsername) return undefined;
+  return state.users.find((user) => (
+    !user.telegramId
+    && user.username.replace(/^@/, '').toLowerCase() === normalizedUsername
+  ));
 }
 
 function ensureEnvAdminUser(state: SimulationState, telegramId: string | number, username?: string, realName?: string) {
@@ -164,10 +169,39 @@ function verifyTelegramInitData(initData: string, botToken?: string) {
   }
 }
 
-function isValidBirthday(value?: string) {
-  if (!value || !/^\d{2}\.\d{2}$/.test(value)) return false;
-  const [day, month] = value.split('.').map(Number);
-  return month >= 1 && month <= 12 && day >= 1 && day <= 31;
+function createSessionToken(userId: string) {
+  const secret = process.env.SESSION_SECRET || process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
+  if (!secret) return '';
+  const payload = Buffer.from(JSON.stringify({
+    userId,
+    expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000,
+  })).toString('base64url');
+  const signature = crypto.createHmac('sha256', secret).update(payload).digest('base64url');
+  return `${payload}.${signature}`;
+}
+
+function verifySessionToken(token?: string) {
+  const secret = process.env.SESSION_SECRET || process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
+  if (!secret || !token) return '';
+  const [payload, signature] = token.split('.');
+  if (!payload || !signature) return '';
+  const expected = crypto.createHmac('sha256', secret).update(payload).digest('base64url');
+  try {
+    if (!crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) return '';
+    const data = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+    return data.expiresAt > Date.now() && typeof data.userId === 'string' ? data.userId : '';
+  } catch {
+    return '';
+  }
+}
+
+function cookieValue(cookieHeader: string | undefined, name: string) {
+  if (!cookieHeader) return '';
+  const entry = cookieHeader
+    .split(';')
+    .map((part) => part.trim())
+    .find((part) => part.startsWith(`${name}=`));
+  return entry ? decodeURIComponent(entry.slice(name.length + 1)) : '';
 }
 
 function formatShortDate(value?: string) {
@@ -185,20 +219,6 @@ function parseShortDate(value?: string) {
   if (!match) return null;
   const year = match[3] ? Number(`20${match[3]}`) : new Date().getFullYear();
   return new Date(year, Number(match[2]) - 1, Number(match[1]), 18, 0, 0, 0);
-}
-
-function parseRegistrationInput(text: string) {
-  const input = text.replace(/^\/register(@\w+)?/i, '').trim();
-  const parts = input.split(/\s+/).filter(Boolean);
-  const birthday = parts[parts.length - 1] || '';
-  const nameParts = parts.slice(0, -1);
-  const realName = nameParts.join(' ').trim();
-
-  if (nameParts.length < 2 || !isValidBirthday(birthday)) {
-    return null;
-  }
-
-  return { realName, birthday };
 }
 
 function isRegistrationPrompt(text: string) {
@@ -388,7 +408,58 @@ async function startServer() {
       ok: true,
       service: 'megabot',
       uptimeSeconds: Math.floor(process.uptime()),
+      telegramConfigured: Boolean(process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN),
+      webAppConfigured: Boolean(process.env.WEBAPP_URL),
     });
+  });
+  app.use('/api', (req, res, next) => {
+    const publicPaths = new Set([
+      '/user/get-or-create',
+      '/telegram-webhook',
+      '/setup-webhook',
+    ]);
+    if (publicPaths.has(req.path)) return next();
+
+    const isLocalHost = ['localhost', '127.0.0.1', '::1'].includes(req.hostname);
+    if (process.env.NODE_ENV !== 'production' || (isLocalHost && process.env.ALLOW_LOCAL_PREVIEW === 'true')) {
+      return next();
+    }
+
+    const state = loadDatabase();
+    const sessionUserId = verifySessionToken(cookieValue(req.headers.cookie, 'megabot_session'));
+    const authUser = state.users.find((user) => user.id === sessionUserId && user.registered);
+    if (!authUser) {
+      return res.status(401).json({ error: 'Открой Mini App кнопкой в Telegram, чтобы подтвердить доступ.' });
+    }
+
+    const identityFieldByPath: Record<string, string> = {
+      '/availability': 'userId',
+      '/meeting': 'hostId',
+      '/meeting/update': 'requesterId',
+      '/meeting/delete': 'requesterId',
+      '/task/create': 'creatorId',
+      '/task/claim': 'userId',
+      '/task/release': 'userId',
+      '/task/status': 'requesterId',
+      '/task/log/clear': 'requesterId',
+      '/user/add': 'requesterId',
+      '/user/delete': 'requesterId',
+      '/user/update': 'requesterId',
+      '/competency/add': 'requesterId',
+      '/competency/delete': 'requesterId',
+      '/faculty/competency/add': 'requesterId',
+      '/faculty/competency/delete': 'requesterId',
+      '/faculty/user/add': 'requesterId',
+      '/faculty/user/delete': 'requesterId',
+      '/faculty/user/update': 'requesterId',
+      '/faculty/task/create': 'requesterId',
+      '/faculty/task/update': 'requesterId',
+    };
+    const identityField = identityFieldByPath[req.path];
+    if (identityField && req.body && typeof req.body === 'object') {
+      req.body[identityField] = authUser.id;
+    }
+    return next();
   });
   const chatSessions = new Map<string, {
     flow: string;
@@ -518,6 +589,45 @@ async function startServer() {
     }
   }
 
+  function meetingRecipientIds(state: SimulationState, participants: string[] | 'all', hostId: string) {
+    const ids = new Set<string>();
+    if (participants === 'all') {
+      state.users
+        .filter((user) => !isFacultyUser(user))
+        .forEach((user) => ids.add(user.id));
+    } else {
+      participants.forEach((id) => ids.add(id));
+      ids.add(hostId);
+    }
+    return ids;
+  }
+
+  async function notifyMeetingRecipients(
+    state: SimulationState,
+    recipientIds: Iterable<string>,
+    text: string,
+    notificationPrefix: string,
+  ) {
+    const sendJobs: Promise<boolean>[] = [];
+    for (const userId of recipientIds) {
+      const target = state.users.find((user) => user.id === userId);
+      if (!target) continue;
+      if (!state.messages[target.id]) state.messages[target.id] = [];
+      state.messages[target.id].push({
+        id: `${notificationPrefix}_${Date.now()}_${target.id}`,
+        userId: target.id,
+        sender: 'bot',
+        text,
+        timestamp: new Date().toISOString(),
+        buttons: [{ text: 'Открыть встречи', action: 'open_tma' }],
+      });
+      if (target.telegramId) {
+        sendJobs.push(sendTelegramMessage(target.telegramId, text, [{ text: 'Открыть встречи', action: 'open_tma' }], false, target));
+      }
+    }
+    return Promise.allSettled(sendJobs);
+  }
+
   async function createMeetingAndNotify(state: SimulationState, data: {
     title: string;
     type: Meeting['type'];
@@ -546,41 +656,17 @@ async function startServer() {
     };
 
     state.meetings.push(meeting);
-    const targetUserIds = new Set<string>();
-    if (data.participants === 'all') {
-      state.users.forEach(u => targetUserIds.add(u.id));
-    } else {
-      data.participants.forEach(id => targetUserIds.add(id));
-      targetUserIds.add(data.hostId);
-    }
-
     const text = `Новая встреча запланирована!\n\n${meetingDetailsText(meeting, state)}\n\nПожалуйста, освободите это время.`;
-    const sendJobs: Promise<void>[] = [];
-    for (const targetUserId of targetUserIds) {
-      const target = state.users.find(u => u.id === targetUserId);
-      if (!target) continue;
-      if (!state.messages[target.id]) state.messages[target.id] = [];
-      state.messages[target.id].push({
-        id: 'notify_' + Date.now() + '_' + target.id,
-        userId: target.id,
-        sender: 'bot',
-        text,
-        timestamp: new Date().toISOString(),
-      });
-      if (target.telegramId) {
-        sendJobs.push(sendTelegramMessage(target.telegramId, text, [{ text: 'Открыть встречи', action: 'open_tma' }]));
-      }
-    }
-    await Promise.allSettled(sendJobs);
+    await notifyMeetingRecipients(state, meetingRecipientIds(state, data.participants, data.hostId), text, 'meeting_created');
 
     return meeting;
   }
 
-  async function sendTelegramMessage(chatId: string | number, text: string, buttons?: { text: string; action: string }[], keyboardOnly = false, recipient?: User) {
+  async function sendTelegramMessage(chatId: string | number, text: string, buttons?: { text: string; action: string }[], keyboardOnly = false, recipient?: User): Promise<boolean> {
     const botToken = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
     if (!botToken) {
       console.warn('TELEGRAM_BOT_TOKEN is not set. Telegram message was not sent.');
-      return;
+      return false;
     }
     const webAppUrl = process.env.WEBAPP_URL;
 
@@ -591,9 +677,15 @@ async function startServer() {
       replyMarkup = {};
       replyMarkup.inline_keyboard = buttons.map(b => {
         if (b.action === 'open_tma' || b.action === 'open_tasks') {
+          if (!webAppUrl) {
+            return [{
+              text: b.text,
+              callback_data: b.action,
+            }];
+          }
           return [{
             text: b.text,
-            web_app: { url: webAppUrl || '' }
+            web_app: { url: webAppUrl }
           }];
         }
         return [{
@@ -617,9 +709,12 @@ async function startServer() {
       });
       if (!response.ok) {
         console.error('Telegram sendMessage failed:', response.status, await response.text());
+        return false;
       }
+      return true;
     } catch (err) {
       console.error('Telegram sendMessage failed:', err);
+      return false;
     }
   }
 
@@ -718,8 +813,18 @@ async function startServer() {
         if (!shouldSend) continue;
         for (const id of assignedIds(task)) {
           const target = state.users.find((user) => user.id === id);
+          if (!target) continue;
+          const text = `Напоминание по задаче:\n\n${taskDetailsText(task, state)}\n\nТекущий статус: ${taskStatusLabel(task.status)}`;
+          if (!state.messages[target.id]) state.messages[target.id] = [];
+          state.messages[target.id].push({
+            id: `task_reminder_${task.id}_${reminder.id}_${Date.now()}_${target.id}`,
+            userId: target.id,
+            sender: 'bot',
+            text,
+            timestamp: new Date().toISOString(),
+          });
           if (target?.telegramId) {
-            await sendTelegramMessage(target.telegramId, `Напоминание по задаче:\n\n${taskDetailsText(task, state)}\n\nТекущий статус: ${taskStatusLabel(task.status)}`, undefined, false, target);
+            await sendTelegramMessage(target.telegramId, text, undefined, false, target);
           }
         }
         if (reminder.type === 'before_deadline') reminder.sentAt = now.toISOString();
@@ -762,11 +867,18 @@ async function startServer() {
       user.role = 'admin';
       changed = true;
     }
-    if (user.registered === undefined) {
-      user.registered = false;
+    if (!user.registered) {
+      user.registered = true;
       changed = true;
     }
     if (changed) saveDatabase(state);
+    const sessionToken = createSessionToken(user.id);
+    if (sessionToken) {
+      res.setHeader(
+        'Set-Cookie',
+        `megabot_session=${encodeURIComponent(sessionToken)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${30 * 24 * 60 * 60}; Secure`,
+      );
+    }
 
     if (isFacultyUser(user)) {
       user.registered = true;
@@ -928,11 +1040,10 @@ async function startServer() {
           false,
         );
         return res.json({ ok: true });
-      } else if (!user.telegramId) {
-        user.telegramId = String(fromUser.id);
-      }
-      if (user.registered === undefined) {
-        user.registered = false;
+      } else {
+        if (!user.telegramId) user.telegramId = String(fromUser.id);
+        if (fromUser.username) user.username = `@${fromUser.username}`;
+        user.registered = true;
       }
       if (isEnvAdmin(fromUser.id, fromUser.username) && user.role !== 'admin') {
         user.role = 'admin';
@@ -951,7 +1062,6 @@ async function startServer() {
       let replyText = '';
       let buttons: { text: string; action: string }[] | undefined = undefined;
       const cmd = text.toLowerCase();
-      const registration = parseRegistrationInput(text);
       const chatKey = String(chatId);
       const normalizedText = text.trim().toLowerCase();
       const session = chatSessions.get(chatKey);
@@ -1101,7 +1211,7 @@ async function startServer() {
 
       if (normalizedText === 'собрать всю команду') {
         if (!user.registered) {
-          await sendTelegramKeyboard(chatId, 'Сначала зарегистрируйся: напиши `Имя Фамилия ДД.ММ`.', [['Профиль'], ['Назад']]);
+          await sendTelegramKeyboard(chatId, 'Доступ не активирован. Попроси администратора проверить Telegram username в твоём профиле.', [['Профиль'], ['Назад']]);
           return res.json({ ok: true });
         }
         chatSessions.set(chatKey, { flow: 'meeting_enter_topic', meetingKind: 'general', participantIds: [] });
@@ -1185,37 +1295,14 @@ async function startServer() {
       }
 
       if (cmd.startsWith('/start')) {
-        if (user.registered) {
-          replyText = `Привет, ${user.realName}! Кнопки уже внизу: открывай приложение, смотри встречи, задачи или профиль.`;
-        } else {
-          replyText = 'Привет! Сначала нужно зарегистрироваться в команде.\n\nНапиши одним сообщением:\n`Имя Фамилия ДД.ММ`\n\nНапример: `Иван Кузнецов 12.10`';
-        }
+        replyText = `Привет, ${user.realName}! Telegram успешно привязан к профилю. Кнопки уже внизу: открывай приложение, смотри встречи, задачи или профиль.`;
       } else if (isRegistrationPrompt(text)) {
-        const directRegistration = parseRegistrationInput(text);
-        if (!directRegistration) {
-          if (user.registered) {
-            replyText = `Твой профиль:\n\n*${user.realName}*\nTelegram: *${user.username}*\nДата рождения: *${user.birthday || '01.01'}*\nРоль: *${user.role === 'admin' ? 'админ' : 'организатор'}*\n\nЧтобы изменить данные, отправь одним сообщением:\n\`Имя Фамилия ДД.ММ\``;
-          } else {
-            replyText = 'Введи имя, фамилию и дату рождения одним сообщением:\n`Иван Кузнецов 12.10`';
-          }
-        } else {
-          user.realName = directRegistration.realName;
-          user.birthday = directRegistration.birthday;
-          user.registered = true;
-          replyText = `Готово! Профиль сохранён:\n*${user.realName}*\nДата рождения: *${user.birthday}*.\n\nТеперь можно открыть приложение кнопкой снизу.`;
-        }
-      } else if (registration && !cmd.startsWith('/')) {
-        user.realName = registration.realName;
-        user.birthday = registration.birthday;
-        user.registered = true;
-        replyText = `Готово! Профиль сохранён:\n*${user.realName}*\nДата рождения: *${user.birthday}*.\n\nТеперь можно открыть приложение кнопкой снизу.`;
+        replyText = `Твой профиль:\n\n*${user.realName}*\nTelegram: *${user.username}*\nДата рождения: *${user.birthday || 'не указана'}*\nРоль: *${user.role === 'admin' ? 'админ' : user.role === 'organizer' ? 'организатор' : 'участник факультета'}*\n\nФИО, роль и дату рождения меняет администратор в приложении.`;
       } else if (isOpenAppText(text)) {
-        replyText = user.registered
-          ? 'Открывай приложение кнопкой снизу. Если Telegram не открыл его автоматически, нажми кнопку ещё раз.'
-          : 'Сначала зарегистрируйся: напиши `Имя Фамилия ДД.ММ`, например `Иван Кузнецов 12.10`.';
+        replyText = 'Открывай приложение кнопкой снизу. Если Telegram не открыл его автоматически, нажми кнопку ещё раз.';
       } else if (cmd.startsWith('/meetings') || cmd === 'встречи') {
         if (!user.registered) {
-          await sendTelegramKeyboard(chatId, 'Сначала зарегистрируйся: напиши `Имя Фамилия ДД.ММ`.', [['Профиль'], ['Назад']]);
+          await sendTelegramKeyboard(chatId, 'Доступ не активирован. Попроси администратора проверить Telegram username в твоём профиле.', [['Профиль'], ['Назад']]);
           return res.json({ ok: true });
         } else {
         const activeMeetings = state.meetings.filter(m => m.status === 'scheduled');
@@ -1232,7 +1319,7 @@ async function startServer() {
         }
       } else if (cmd.startsWith('/tasks') || cmd === 'задачи') {
         if (!user.registered) {
-          replyText = 'Сначала зарегистрируйся: напиши `Имя Фамилия ДД.ММ`.';
+          replyText = 'Доступ не активирован. Попроси администратора проверить Telegram username в твоём профиле.';
         } else {
         const myTasks = state.tasks.filter(t => assignedIds(t).includes(user.id) && t.status !== 'completed');
         if (myTasks.length === 0) {
@@ -1245,11 +1332,9 @@ async function startServer() {
         }
         }
       } else if (cmd.startsWith('/help') || cmd === 'помощь') {
-        replyText = '*Кнопки бота:*\n\n*Профиль* — регистрация или обновление имени и даты рождения.\n*Встречи* — список ближайших встреч.\n*Задачи* — твои активные задачи.\n\nMini App открывается системной кнопкой рядом с полем сообщения.\n\nДля регистрации напиши: `Имя Фамилия ДД.ММ`.';
+        replyText = '*Кнопки бота:*\n\n*Профиль* — показывает данные, которые внёс администратор.\n*Встречи* — список ближайших встреч.\n*Задачи* — твои активные задачи.\n\nMini App открывается системной кнопкой рядом с полем сообщения. Доступ появляется после привязки Telegram к заранее созданному профилю.';
       } else {
-        replyText = user.registered
-          ? 'Пользуйся кнопками снизу: приложение, профиль, встречи, задачи и помощь.'
-          : 'Сначала зарегистрируйся: напиши `Имя Фамилия ДД.ММ`, например `Иван Кузнецов 12.10`.';
+        replyText = 'Пользуйся кнопками снизу: приложение, профиль, встречи, задачи и помощь.';
       }
       state.messages[user.id].push({
         id: 'bot_' + Date.now(),
@@ -1528,7 +1613,10 @@ async function startServer() {
     if (!isAdminUser(state, requesterId) && !state.users.some((u) => u.id === requesterId && u.role === 'organizer')) {
       return res.status(403).json({ error: 'Создавать задачи факультетам могут только мегаорги' });
     }
-    const assigneeIds = Array.isArray(assignedTo) ? assignedTo.filter(Boolean) : [];
+    const assigneeIds = Array.isArray(assignedTo)
+      ? [...new Set(assignedTo.filter(Boolean))]
+          .filter((id) => state.users.some((user) => user.id === id && isFacultyUser(user)))
+      : [];
     if (!facultyId || !title || !description || !deadline || assigneeIds.length === 0) {
       return res.status(400).json({ error: 'Заполни факультет, название, описание, дедлайн и исполнителей' });
     }
@@ -1561,15 +1649,25 @@ async function startServer() {
     state.tasks.push(task);
     for (const id of assigneeIds) {
       const target = state.users.find((u) => u.id === id);
+      if (!target) continue;
+      const text = `Новая задача от MEGABATTLE:\n\n${taskDetailsText(task, state)}\n\nЧтобы поменять статус, нажми «Мои задачи».`;
+      if (!state.messages[target.id]) state.messages[target.id] = [];
+      state.messages[target.id].push({
+        id: `faculty_task_created_${Date.now()}_${target.id}`,
+        userId: target.id,
+        sender: 'bot',
+        text,
+        timestamp: new Date().toISOString(),
+      });
       if (target?.telegramId) {
-        await sendTelegramMessage(target.telegramId, `Новая задача от MEGABATTLE:\n\n${taskDetailsText(task, state)}\n\nЧтобы поменять статус, нажми «Мои задачи».`, undefined, false, target);
+        await sendTelegramMessage(target.telegramId, text, undefined, false, target);
       }
     }
     saveDatabase(state);
     res.json({ success: true, task });
   });
 
-  app.post('/api/faculty/task/update', (req, res) => {
+  app.post('/api/faculty/task/update', async (req, res) => {
     const { requesterId, taskId, title, description, deadline, assignedTo, reminders, facultyId, competency } = req.body;
     const state = loadDatabase();
     const task = state.tasks.find((item) => item.id === taskId);
@@ -1577,12 +1675,17 @@ async function startServer() {
     if (task.creatorId !== requesterId && !isAdminUser(state, requesterId)) {
       return res.status(403).json({ error: 'Редактировать задачу может автор или админ' });
     }
+    const previousAssigneeIds = new Set(assignedIds(task));
     if (title !== undefined) task.title = title;
     if (description !== undefined) task.description = description;
     if (deadline !== undefined) task.deadline = deadline;
     if (facultyId !== undefined) task.facultyId = facultyId;
     if (competency !== undefined) task.competency = String(competency || '').trim() || 'Факультет';
-    if (Array.isArray(assignedTo)) task.assignedTo = assignedTo.filter(Boolean);
+    if (Array.isArray(assignedTo)) {
+      const assigneeIds = [...new Set(assignedTo.filter(Boolean))]
+        .filter((id) => state.users.some((user) => user.id === id && isFacultyUser(user)));
+      task.assignedTo = assigneeIds.length ? assigneeIds : null;
+    }
     if (Array.isArray(reminders)) {
       task.reminders = reminders.filter((item: any) => Number(item.value) > 0).slice(0, 3).map((item: any, index: number) => ({
         id: item.id || 'rem_' + Date.now() + '_' + index,
@@ -1593,13 +1696,33 @@ async function startServer() {
         lastSentAt: item.lastSentAt,
       }));
     }
+    const currentAssigneeIds = new Set(assignedIds(task));
+    const notificationIds = new Set([...previousAssigneeIds, ...currentAssigneeIds]);
+    for (const id of notificationIds) {
+      const target = state.users.find((user) => user.id === id);
+      if (!target) continue;
+      const text = currentAssigneeIds.has(id)
+        ? `Задача обновлена.\n\n${taskDetailsText(task, state)}`
+        : `Назначение снято.\n\nВы больше не исполнитель задачи «${task.title}».`;
+      if (!state.messages[target.id]) state.messages[target.id] = [];
+      state.messages[target.id].push({
+        id: `faculty_task_updated_${Date.now()}_${target.id}`,
+        userId: target.id,
+        sender: 'bot',
+        text,
+        timestamp: new Date().toISOString(),
+      });
+      if (target.telegramId) {
+        await sendTelegramMessage(target.telegramId, text, undefined, false, target);
+      }
+    }
     saveDatabase(state);
     res.json({ success: true, task });
   });
 
   // Save/Update User Availability
   app.post('/api/availability', (req, res) => {
-    const { userId, slots, weekStart } = req.body;
+    const { userId, slots, weekStart, hardUnavailableDays } = req.body;
     const state = loadDatabase();
 
     if (!isRegisteredUser(state, userId)) {
@@ -1609,7 +1732,9 @@ async function startServer() {
     state.availabilities[userId] = {
       userId,
       slots,
-      hardUnavailableDays: [],
+      hardUnavailableDays: Array.isArray(hardUnavailableDays)
+        ? [...new Set(hardUnavailableDays.map(Number).filter((day) => Number.isInteger(day) && day >= 0 && day < 35))]
+        : [],
       weekStart: String(weekStart || ''),
       updatedAt: new Date().toISOString()
     };
@@ -1627,6 +1752,10 @@ async function startServer() {
       return res.status(403).json({ error: 'Сначала нужно зарегистрироваться в чате с ботом' });
     }
 
+    const cleanParticipants = participants === 'all'
+      ? 'all'
+      : [...new Set(Array.isArray(participants) ? participants : [])]
+          .filter((id) => state.users.some((user) => user.id === id && !isFacultyUser(user)));
     const newMeeting = await createMeetingAndNotify(state, {
       title,
       type,
@@ -1634,7 +1763,7 @@ async function startServer() {
       time,
       duration,
       hostId,
-      participants,
+      participants: cleanParticipants,
       topic,
       description,
       competency,
@@ -1644,7 +1773,7 @@ async function startServer() {
     res.json({ success: true, meeting: newMeeting });
   });
 
-  app.post('/api/meeting/update', (req, res) => {
+  app.post('/api/meeting/update', async (req, res) => {
     const { requesterId, meetingId, title, type, date, time, duration, participants, topic, description, competency } = req.body;
     const state = loadDatabase();
     const meeting = state.meetings.find(m => m.id === meetingId);
@@ -1654,21 +1783,35 @@ async function startServer() {
       return res.status(403).json({ error: 'Редактировать встречу может автор или админ' });
     }
 
+    const previousRecipientIds = meetingRecipientIds(state, meeting.participants, meeting.hostId);
     if (title) meeting.title = title;
     if (type) meeting.type = type;
     if (date) meeting.date = date;
     if (time) meeting.time = time;
     if (duration) meeting.duration = duration;
-    if (participants) meeting.participants = participants;
+    if (participants !== undefined) {
+      meeting.participants = participants === 'all'
+        ? 'all'
+        : [...new Set(Array.isArray(participants) ? participants : [])]
+            .filter((id) => state.users.some((user) => user.id === id && !isFacultyUser(user)));
+    }
     meeting.topic = topic || '';
     meeting.description = description || '';
     meeting.competency = competency || '';
 
+    const recipients = meetingRecipientIds(state, meeting.participants, meeting.hostId);
+    previousRecipientIds.forEach((id) => recipients.add(id));
+    await notifyMeetingRecipients(
+      state,
+      recipients,
+      `Встреча изменена.\n\n${meetingDetailsText(meeting, state)}\n\nПроверьте обновлённые дату, время и состав участников.`,
+      'meeting_updated',
+    );
     saveDatabase(state);
     res.json({ success: true, meeting });
   });
 
-  app.post('/api/meeting/delete', (req, res) => {
+  app.post('/api/meeting/delete', async (req, res) => {
     const { requesterId, meetingId } = req.body;
     const state = loadDatabase();
     const meeting = state.meetings.find(m => m.id === meetingId);
@@ -1678,7 +1821,14 @@ async function startServer() {
       return res.status(403).json({ error: 'Удалить встречу может автор или админ' });
     }
 
+    const recipients = meetingRecipientIds(state, meeting.participants, meeting.hostId);
     meeting.status = 'cancelled';
+    await notifyMeetingRecipients(
+      state,
+      recipients,
+      `Встреча отменена.\n\n${meeting.title}\nДата: ${formatShortDate(meeting.date)}\nВремя: ${meeting.time}`,
+      'meeting_cancelled',
+    );
     saveDatabase(state);
     res.json({ success: true, meeting });
   });
@@ -1693,7 +1843,9 @@ async function startServer() {
     }
 
     const weightMap = { low: 1, medium: 2, high: 3 };
-    const assigneeIds = Array.isArray(assignedTo) ? assignedTo.filter(Boolean) : assignedTo ? [assignedTo] : [];
+    const requestedAssigneeIds = Array.isArray(assignedTo) ? assignedTo.filter(Boolean) : assignedTo ? [assignedTo] : [];
+    const assigneeIds = [...new Set(requestedAssigneeIds)]
+      .filter((id) => state.users.some((user) => user.id === id && !isFacultyUser(user)));
     const now = new Date().toISOString();
     const newTask: Task = {
       id: 't_' + Date.now(),
@@ -1713,7 +1865,7 @@ async function startServer() {
     };
 
     state.tasks.push(newTask);
-    const sendJobs: Promise<void>[] = [];
+    const sendJobs: Promise<boolean>[] = [];
 
     // If assigned to someone, notify them
     if (assigneeIds.length) {
@@ -1842,7 +1994,7 @@ async function startServer() {
     task.completedAt = '';
     saveDatabase(state);
 
-    const sendJobs: Promise<void>[] = [];
+    const sendJobs: Promise<boolean>[] = [];
     const creator = state.users.find(u => u.id === task.creatorId);
     if (creator?.telegramId && creator.id !== user.id) {
       sendJobs.push(sendTelegramMessage(creator.telegramId, `${userMention(user)} отказался от задачи *"${task.title}"*. Она снова на бирже.`));
@@ -1857,12 +2009,20 @@ async function startServer() {
   });
 
   // Update task status (complete)
-  app.post('/api/task/status', (req, res) => {
-    const { taskId, status } = req.body;
+  app.post('/api/task/status', async (req, res) => {
+    const { taskId, status, requesterId } = req.body;
     const state = loadDatabase();
 
     const task = state.tasks.find(t => t.id === taskId);
     if (!task) return res.status(404).json({ error: 'Задача не найдена' });
+    if (!['open', 'assigned', 'completed', 'waiting', 'in_progress'].includes(status)) {
+      return res.status(400).json({ error: 'Неизвестный статус задачи' });
+    }
+    const requester = state.users.find((user) => user.id === requesterId && user.registered);
+    if (!requester) return res.status(403).json({ error: 'Нет доступа к задаче' });
+    if (requester.role !== 'admin' && !assignedIds(task).includes(requester.id)) {
+      return res.status(403).json({ error: 'Изменить статус может исполнитель или администратор' });
+    }
 
     task.status = status;
     if (status === 'completed') task.completedAt = new Date().toISOString();
@@ -1874,16 +2034,22 @@ async function startServer() {
         .map((id) => state.users.find(u => u.id === id)?.realName)
         .filter(Boolean)
         .join(', ') || 'Участник';
+      const sendJobs: Promise<boolean>[] = [];
       state.users.filter(u => u.role === 'admin').forEach(admin => {
+        const text = `Задача выполнена!\nБлок: ${task.competency || 'не указан'}\nИсполнитель: ${workerName}\nЗадача: "${task.title}"`;
         if (!state.messages[admin.id]) state.messages[admin.id] = [];
         state.messages[admin.id].push({
           id: 'task_comp_admin_' + Date.now() + '_' + admin.id,
           userId: admin.id,
           sender: 'bot',
-          text: `Задача выполнена!\n*Блок:* ${task.competency || 'не указан'}\n*Исполнитель:* ${workerName}\n*Задача:* "${task.title}"`,
+          text,
           timestamp: new Date().toISOString()
         });
+        if (admin.telegramId) {
+          sendJobs.push(sendTelegramMessage(admin.telegramId, text, undefined, false, admin));
+        }
       });
+      await Promise.allSettled(sendJobs);
     }
 
     saveDatabase(state);
@@ -1964,6 +2130,7 @@ async function startServer() {
   // Suggest meeting windows with a pure algorithm.
   app.post('/api/meeting/suggest', async (req, res) => {
     const state = loadDatabase();
+    const teamUsers = state.users.filter((user) => !isFacultyUser(user));
 
     const windowScores: {
       day: number;
@@ -1980,7 +2147,7 @@ async function startServer() {
       for (const duration of durations) {
         for (let h = 16; h <= 24 - duration; h++) {
           const hoursWindow = Array.from({ length: duration }, (_, index) => h + index);
-          const availableUsers = state.users
+          const availableUsers = teamUsers
             .filter(u => {
               const daySlots = alignedAvailabilitySlots(state.availabilities[u.id])?.[d] || [];
               return hoursWindow.every(hour => daySlots.includes(hour));
@@ -2020,7 +2187,7 @@ async function startServer() {
 
     const suggestions = picked.map(s => {
       const hoursWindow = Array.from({ length: s.duration }, (_, index) => s.hour + index);
-      const missingUsers = state.users.filter(u => {
+      const missingUsers = teamUsers.filter(u => {
         const daySlots = alignedAvailabilitySlots(state.availabilities[u.id])?.[s.day] || [];
         return !hoursWindow.every(hour => daySlots.includes(hour));
       }).map(u => ({
@@ -2036,7 +2203,7 @@ async function startServer() {
         endHour: s.endHour,
         duration: s.duration,
         count: s.count,
-        total: state.users.length,
+        total: teamUsers.length,
         users: s.users,
         missingUsers: missingUsers,
       };
@@ -2097,7 +2264,7 @@ async function startServer() {
         body: JSON.stringify({
           commands: [
             { command: 'start', description: 'Открыть Mini App' },
-            { command: 'register', description: 'Зарегистрироваться в команде' },
+            { command: 'register', description: 'Показать профиль' },
             { command: 'meetings', description: 'Показать встречи' },
             { command: 'tasks', description: 'Показать мои задачи' },
             { command: 'help', description: 'Справка по боту' }
