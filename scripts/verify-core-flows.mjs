@@ -212,6 +212,91 @@ try {
   assert.ok(telegramCalls.some((call) => call.path.endsWith('/deleteMessage')));
   assert.ok(telegramCalls.some((call) => call.path.endsWith('/sendMessage')));
   assert.ok(!telegramCalls.some((call) => String(call.body.text || '').includes('меняет администратор')));
+  const startMenuCall = telegramCalls.find((call) => call.path.endsWith('/sendMessage') && call.body.reply_markup?.keyboard);
+  const startMenuButtons = startMenuCall.body.reply_markup.keyboard.flat().map((button) => button.text);
+  assert.ok(startMenuButtons.includes('Профиль'));
+  assert.ok(!startMenuButtons.includes('Команда'));
+
+  telegramCalls.length = 0;
+  await request('/api/telegram-webhook', {
+    update_id: 101,
+    message: {
+      message_id: 101,
+      chat: { id: 200, type: 'private' },
+      from: aliceTelegram,
+      text: 'Встречи',
+    },
+  });
+  const meetingsMenu = telegramCalls.find((call) => call.path.endsWith('/sendMessage') && call.body.reply_markup?.keyboard);
+  const meetingsButtons = meetingsMenu.body.reply_markup.keyboard.flat().map((button) => button.text);
+  assert.deepEqual(meetingsButtons, ['Назначить собрание', 'Назад']);
+
+  telegramCalls.length = 0;
+  await request('/api/telegram-webhook', {
+    update_id: 102,
+    message: {
+      message_id: 102,
+      chat: { id: 200, type: 'private' },
+      from: aliceTelegram,
+      text: 'Назад',
+    },
+  });
+  const menuAfterMeetings = telegramCalls.find((call) => call.path.endsWith('/sendMessage') && call.body.reply_markup?.keyboard);
+  assert.ok(menuAfterMeetings.body.reply_markup.keyboard.flat().some((button) => button.text === 'Профиль'));
+
+  telegramCalls.length = 0;
+  await request('/api/telegram-webhook', {
+    update_id: 103,
+    message: {
+      message_id: 103,
+      chat: { id: 200, type: 'private' },
+      from: aliceTelegram,
+      text: 'Задачи',
+    },
+  });
+  const tasksMenu = telegramCalls.find((call) => call.path.endsWith('/sendMessage') && call.body.reply_markup?.keyboard);
+  const tasksButtons = tasksMenu.body.reply_markup.keyboard.flat().map((button) => button.text);
+  assert.ok(tasksButtons.includes('Назад'));
+  assert.ok(!tasksButtons.includes('Профиль'));
+
+  telegramCalls.length = 0;
+  await request('/api/telegram-webhook', {
+    update_id: 104,
+    message: {
+      message_id: 104,
+      chat: { id: 200, type: 'private' },
+      from: aliceTelegram,
+      text: 'Свободные задачи',
+    },
+  });
+  const openTasksPanel = telegramCalls.find((call) => call.path.endsWith('/sendMessage') && call.body.reply_markup?.inline_keyboard);
+  assert.ok(openTasksPanel.body.reply_markup.inline_keyboard.flat().some((button) => button.callback_data === 'nav_tasks' && button.text === 'Назад'));
+
+  telegramCalls.length = 0;
+  await request('/api/telegram-webhook', {
+    update_id: 105,
+    callback_query: {
+      id: 'back-to-tasks',
+      from: aliceTelegram,
+      data: 'nav_tasks',
+      message: { message_id: 999, chat: { id: 200, type: 'private' } },
+    },
+  });
+  const tasksMenuAfterBack = telegramCalls.find((call) => call.path.endsWith('/sendMessage') && call.body.reply_markup?.keyboard);
+  assert.ok(tasksMenuAfterBack.body.reply_markup.keyboard.flat().some((button) => button.text === 'Свободные задачи'));
+
+  telegramCalls.length = 0;
+  await request('/api/telegram-webhook', {
+    update_id: 106,
+    message: {
+      message_id: 106,
+      chat: { id: 200, type: 'private' },
+      from: aliceTelegram,
+      text: 'Выполненные задачи',
+    },
+  });
+  const completedTasksMenu = telegramCalls.find((call) => call.path.endsWith('/sendMessage') && call.body.reply_markup?.keyboard);
+  assert.deepEqual(completedTasksMenu.body.reply_markup.keyboard.flat().map((button) => button.text), ['Назад']);
 
   telegramCalls.length = 0;
   await request('/api/telegram-webhook', {
@@ -240,7 +325,7 @@ try {
     callback_query: {
       id: 'slots-day',
       from: aliceTelegram,
-      data: 'slots_day:0',
+      data: 'slots_day:1',
       message: { message_id: slotsPanelId, chat: { id: 200, type: 'private' } },
     },
   });
@@ -252,11 +337,27 @@ try {
     callback_query: {
       id: 'slots-hour',
       from: aliceTelegram,
-      data: 'slot_toggle:0:18',
+      data: 'slot_toggle:1:18',
       message: { message_id: slotsPanelId, chat: { id: 200, type: 'private' } },
     },
   });
   assert.ok(telegramCalls.some((call) => call.path.endsWith('/editMessageText')));
+
+  telegramCalls.length = 0;
+  await request('/api/telegram-webhook', {
+    update_id: 131,
+    callback_query: {
+      id: 'slots-back-to-days',
+      from: aliceTelegram,
+      data: 'nav_slots',
+      message: { message_id: slotsPanelId, chat: { id: 200, type: 'private' } },
+    },
+  });
+  const slotsDaysCall = telegramCalls.find((call) => (
+    call.path.endsWith('/sendMessage') && call.body.reply_markup?.inline_keyboard
+  ));
+  assert.ok(slotsDaysCall);
+  assert.ok(slotsDaysCall.body.reply_markup.inline_keyboard.flat().some((button) => button.callback_data === 'slots_day:1' && button.text.includes('✓')));
 
   telegramCalls.length = 0;
   await request('/api/telegram-webhook', {
@@ -268,7 +369,13 @@ try {
       message: { message_id: slotsPanelId, chat: { id: 200, type: 'private' } },
     },
   });
-  assert.ok(telegramCalls.some((call) => call.path.endsWith('/sendMessage')));
+  const slotsSavedMenu = telegramCalls.find((call) => call.path.endsWith('/sendMessage') && call.body.reply_markup?.keyboard);
+  assert.ok(slotsSavedMenu);
+  const slotsSavedButtons = slotsSavedMenu.body.reply_markup.keyboard.flat().map((button) => button.text);
+  assert.ok(slotsSavedButtons.includes('Профиль'));
+  assert.ok(!slotsSavedButtons.includes('Команда'));
+  const slotsSavedDatabase = JSON.parse(await readFile(testDatabasePath, 'utf8'));
+  assert.ok(slotsSavedDatabase.availabilities.u_alice.slots['1'].includes(18));
 
   telegramCalls.length = 0;
   await request('/api/telegram-webhook', {
@@ -302,11 +409,57 @@ try {
     assignedTo: ['u_alice', 'u_bob', 'u_alice', 'missing'],
     creatorId: 'u_admin',
     competency: 'Дизайн',
-    workload: 'medium',
+    priority: 'critical',
   });
   assert.equal(taskResult.response.status, 200);
   assert.deepEqual(taskResult.data.task.assignedTo, ['u_alice', 'u_bob']);
+  assert.equal(taskResult.data.task.priority, 'critical');
   assert.equal(telegramCalls.filter((call) => call.path.endsWith('/sendMessage')).length, 2);
+
+  telegramCalls.length = 0;
+  const openTaskResult = await request('/api/task/create', {
+    title: 'Открытая задача автора',
+    description: 'Проверка уведомления самому автору',
+    deadline: '2030-01-05',
+    assignedTo: [],
+    creatorId: 'u_alice',
+    competency: 'Дизайн',
+    priority: 'important',
+  });
+  assert.equal(openTaskResult.response.status, 200);
+  telegramCalls.length = 0;
+  const selfClaim = await request('/api/task/claim', {
+    taskId: openTaskResult.data.task.id,
+    userId: 'u_alice',
+  });
+  assert.equal(selfClaim.response.status, 200);
+  assert.ok(telegramCalls.some((call) => call.path.endsWith('/sendMessage') && String(call.body.chat_id) === '200'));
+
+  telegramCalls.length = 0;
+  await request('/api/telegram-webhook', {
+    update_id: 107,
+    callback_query: {
+      id: 'complete-with-time',
+      from: aliceTelegram,
+      data: `task_complete:${openTaskResult.data.task.id}`,
+      message: { message_id: 1007, chat: { id: 200, type: 'private' } },
+    },
+  });
+  const completionTimeMenu = telegramCalls.find((call) => call.path.endsWith('/sendMessage') && call.body.reply_markup?.keyboard);
+  assert.ok(completionTimeMenu.body.reply_markup.keyboard.flat().some((button) => button.text === 'Не указывать'));
+
+  telegramCalls.length = 0;
+  await request('/api/telegram-webhook', {
+    update_id: 108,
+    message: {
+      message_id: 108,
+      chat: { id: 200, type: 'private' },
+      from: aliceTelegram,
+      text: '30 минут',
+    },
+  });
+  const afterChatCompletion = JSON.parse(await readFile(testDatabasePath, 'utf8'));
+  assert.equal(afterChatCompletion.tasks.find((task) => task.id === openTaskResult.data.task.id).timeSpentMinutes, 30);
 
   telegramCalls.length = 0;
   const meetingResult = await request('/api/meeting', {
@@ -348,8 +501,10 @@ try {
     requesterId: 'u_alice',
     taskId: taskResult.data.task.id,
     status: 'completed',
+    timeSpentMinutes: 95,
   });
   assert.equal(completed.response.status, 200);
+  assert.equal(completed.data.task.timeSpentMinutes, 95);
   assert.equal(telegramCalls.filter((call) => call.path.endsWith('/sendMessage')).length, 1);
   assert.equal(telegramCalls.find((call) => call.path.endsWith('/sendMessage')).body.chat_id, '100');
 

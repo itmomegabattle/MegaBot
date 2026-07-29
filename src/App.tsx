@@ -185,21 +185,25 @@ export default function App() {
     }
   };
 
-  const handleCompleteTask = async (taskId: string) => {
+  const handleCompleteTask = async (taskId: string, timeSpentMinutes?: number): Promise<boolean> => {
     try {
       const res = await fetch('/api/task/status', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ taskId, status: 'completed', requesterId: currentUserId }),
+        body: JSON.stringify({ taskId, status: 'completed', requesterId: currentUserId, timeSpentMinutes }),
       });
       const data = await res.json();
       if (data.success) {
         await fetchState();
         triggerToast('Задача выполнена', 'success');
+        return true;
       }
+      triggerToast(data.error || 'Не удалось завершить задачу', 'warning');
     } catch (err) {
       console.error(err);
+      triggerToast('Не удалось завершить задачу', 'warning');
     }
+    return false;
   };
 
   if (loading || !state) {

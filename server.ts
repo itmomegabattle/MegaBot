@@ -297,6 +297,19 @@ function userMention(user?: User) {
   return `${user.realName} (${user.username})`;
 }
 
+function taskPriorityLabel(priority?: Task['priority']) {
+  if (priority === 'critical') return 'очень важная';
+  if (priority === 'important') return 'важная';
+  return 'обычная';
+}
+
+function taskDurationLabel(minutes?: number) {
+  if (!minutes) return '';
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return [hours ? `${hours} ч` : '', rest ? `${rest} мин` : ''].filter(Boolean).join(' ');
+}
+
 function taskDetailsText(task: Task, state: SimulationState) {
   const creator = state.users.find((user) => user.id === task.creatorId);
   const executors = assignedIds(task)
@@ -308,7 +321,7 @@ function taskDetailsText(task: Task, state: SimulationState) {
       ? executors.map(userMention).join(', ')
       : 'не указан';
 
-  return `*${task.title}*\n\n${task.description}\n\n*Блок:* ${task.competency || 'не указан'}\n*Автор:* ${userMention(creator)}\n*Срок:* ${formatShortDate(task.deadline)}\n*Исполнитель:* ${executorText}${task.sow ? `\n\n*ТЗ:* ${task.sow}` : ''}${task.tips?.length ? `\n\n*Подсказки:*\n${task.tips.map((tip) => `• ${tip}`).join('\n')}` : ''}`;
+  return `*${task.title}*\n\n${task.description}\n\n*Блок:* ${task.competency || 'не указан'}\n*Приоритет:* ${taskPriorityLabel(task.priority)}\n*Автор:* ${userMention(creator)}\n*Срок:* ${formatShortDate(task.deadline)}\n*Исполнитель:* ${executorText}${task.timeSpentMinutes ? `\n*Затрачено:* ${taskDurationLabel(task.timeSpentMinutes)}` : ''}${task.sow ? `\n\n*ТЗ:* ${task.sow}` : ''}${task.tips?.length ? `\n\n*Подсказки:*\n${task.tips.map((tip) => `• ${tip}`).join('\n')}` : ''}`;
 }
 
 function meetingDetailsText(meeting: Meeting, state: SimulationState) {
@@ -531,6 +544,13 @@ function loadDatabase(): SimulationState {
     if (task.competency === undefined) task.competency = '';
     if (task.createdAt === undefined) task.createdAt = new Date().toISOString();
     if (task.completedAt === undefined) task.completedAt = task.status === 'completed' ? new Date().toISOString() : '';
+    if (!['normal', 'important', 'critical'].includes(task.priority)) {
+      task.priority = 'normal';
+    }
+    if (task.timeSpentMinutes !== undefined) {
+      const minutes = Number(task.timeSpentMinutes);
+      task.timeSpentMinutes = Number.isFinite(minutes) && minutes > 0 ? Math.round(minutes) : undefined;
+    }
     if (task.facultyId === undefined) task.facultyId = '';
     if (!Array.isArray(task.reminders)) task.reminders = [];
   });
@@ -632,6 +652,8 @@ async function startServer() {
     taskDescription?: string;
     taskDeadline?: string;
     taskCompetency?: string;
+    taskPriority?: Task['priority'];
+    completionTaskId?: string;
   }>();
   const chatPanelMessageIds = new Map<string, number>();
   const groupCheckins = new Map<string, { title: string; userIds: Set<string> }>();
@@ -667,7 +689,7 @@ async function startServer() {
       [{ text: 'Профиль' }, { text: 'Слоты' }],
       [{ text: 'Встречи' }, { text: 'Задачи' }],
     );
-    if (user?.role === 'admin') keyboard.push([{ text: 'Команда' }, { text: 'МФ' }]);
+    if (user?.role === 'admin') keyboard.push([{ text: 'МФ' }]);
     keyboard.push([{ text: 'Помощь' }]);
 
     return {
@@ -983,12 +1005,14 @@ async function startServer() {
   }
 
   async function showProfilePanel(chatId: string | number, user: User, state: SimulationState) {
+    chatSessions.delete(String(chatId));
     const rows = isFacultyUser(user)
-      ? [['Мои задачи', 'Помощь']]
+      ? [['Профиль', 'Мои задачи'], ['Помощь']]
       : [
-          ['Слоты', 'Встречи'],
-          ['Задачи', 'Помощь'],
-          ...(user.role === 'admin' ? [['Команда', 'МФ']] : []),
+          ['Профиль', 'Слоты'],
+          ['Встречи', 'Задачи'],
+          ...(user.role === 'admin' ? [['МФ']] : []),
+          ['Помощь'],
         ];
     await sendTelegramKeyboard(chatId, profileSummaryText(user, state), rows, false, user);
   }
@@ -1014,9 +1038,21 @@ async function startServer() {
     };
   }
 
-  async function showSlotsPanel(chatId: string | number, user: User, state: SimulationState) {
+  async function showSlotsPanel(
+    chatId: string | number,
+    user: User,
+    state: SimulationState,
+    overrideSlots?: Record<number, number[]>,
+  ) {
     const dayNames = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
-    const availability = alignedAvailabilitySlots(state.availabilities[user.id]);
+    const chatKey = String(chatId);
+    const availability = overrideSlots || alignedAvailabilitySlots(state.availabilities[user.id]);
+    chatSessions.set(chatKey, {
+      flow: 'slots_edit',
+      pendingSlots: Object.fromEntries(
+        Object.entries(availability).map(([day, selectedHours]) => [Number(day), [...selectedHours]]),
+      ),
+    });
     const keyboard = [
       dayNames.slice(0, 4).map((day, index) => ({
         text: `${(availability[index] || []).length ? '✓ ' : ''}${day}`,
@@ -1032,39 +1068,43 @@ async function startServer() {
   }
 
   async function showMeetingsPanel(chatId: string | number, user: User, state: SimulationState) {
+    chatSessions.set(String(chatId), { flow: 'meetings_root' });
     await sendTelegramKeyboard(chatId, meetingsSummaryText(user, state), [
       ['Назначить собрание'],
-      ['Профиль', 'Назад'],
+      ['Назад'],
     ], false, user);
   }
 
   async function showTasksPanel(chatId: string | number, user: User, state: SimulationState) {
+    chatSessions.set(String(chatId), { flow: 'tasks_root' });
     await sendTelegramKeyboard(chatId, tasksSummaryText(user, state), [
       ['Управлять задачами', 'Создать задачу'],
       ['Свободные задачи', 'Выполненные задачи'],
-      ['Профиль', 'Назад'],
+      ['Назад'],
     ], false, user);
   }
 
   async function showTeamPanel(chatId: string | number, user: User, state: SimulationState) {
     if (user.role !== 'admin') {
-      await sendTelegramKeyboard(chatId, 'Раздел команды доступен администратору.', [['Профиль', 'Назад']], false, user);
+      await sendTelegramKeyboard(chatId, 'Раздел команды доступен администратору.', [['Назад']], false, user);
       return;
     }
+    chatSessions.set(String(chatId), { flow: 'team_root' });
     await sendTelegramKeyboard(chatId, teamSummaryText(state), [
       ['Найти участника', 'Добавить участника'],
-      ['Профиль', 'Назад'],
+      ['Назад'],
     ], false, user);
   }
 
   async function showFacultiesPanel(chatId: string | number, user: User, state: SimulationState) {
     if (user.role !== 'admin') {
-      await sendTelegramKeyboard(chatId, 'Раздел факультетов доступен администратору.', [['Профиль', 'Назад']], false, user);
+      await sendTelegramKeyboard(chatId, 'Раздел факультетов доступен администратору.', [['Назад']], false, user);
       return;
     }
+    chatSessions.set(String(chatId), { flow: 'faculties_root' });
     await sendTelegramKeyboard(chatId, facultiesSummaryText(state), [
       ['Задачи факультетов'],
-      ['Профиль', 'Назад'],
+      ['Назад'],
     ], false, user);
   }
 
@@ -1305,8 +1345,15 @@ async function startServer() {
 
       if (action === 'nav_slots') {
         await answerCallback(callback.id);
-        chatSessions.delete(String(chatId));
-        await showSlotsPanel(chatId, user, state);
+        const pendingSlots = chatSessions.get(String(chatId))?.pendingSlots
+          || alignedAvailabilitySlots(state.availabilities[user.id]);
+        await showSlotsPanel(chatId, user, state, pendingSlots);
+        return res.json({ ok: true });
+      }
+
+      if (action === 'nav_tasks') {
+        await answerCallback(callback.id);
+        await showTasksPanel(chatId, user, state);
         return res.json({ ok: true });
       }
 
@@ -1358,7 +1405,7 @@ async function startServer() {
         chatSessions.delete(chatKey);
         saveDatabase(state);
         await answerCallback(callback.id, 'Слоты сохранены');
-        await showSlotsPanel(chatId, user, state);
+        await showProfilePanel(chatId, user, state);
         return res.json({ ok: true });
       }
 
@@ -1394,11 +1441,11 @@ async function startServer() {
         await answerCallback(callback.id);
         const buttons = task.status === 'open'
           ? [
-              { text: 'Взять задачу', action: `task_claim:${task.id}` },
-              { text: 'Скип', action: 'task_skip' },
+              [{ text: 'Взять задачу', callback_data: `task_claim:${task.id}` }],
+              [{ text: 'Назад', callback_data: 'nav_tasks' }],
             ]
-          : [{ text: 'Посмотреть в приложении', action: 'open_tasks' }];
-        await sendTelegramMessage(chatId, taskDetailsText(task, state), buttons);
+          : [[{ text: 'Назад', callback_data: 'nav_tasks' }]];
+        await sendInlinePanel(chatId, taskDetailsText(task, state), buttons);
         return res.json({ ok: true });
       }
 
@@ -1418,10 +1465,8 @@ async function startServer() {
         task.status = 'assigned';
         saveDatabase(state);
         await answerCallback(callback.id, 'Задача закреплена за тобой');
-        await sendTelegramMessage(chatId, `Ты взял задачу:\n\n${taskDetailsText(task, state)}`, [
-          { text: 'Отказаться от задачи', action: `task_release:${task.id}` },
-          { text: 'Посмотреть в приложении', action: 'open_tasks' },
-        ]);
+        await sendGroupMessage(chatId, `Ты взял задачу:\n\n${taskDetailsText(task, state)}`);
+        await showTasksPanel(chatId, user, state);
         const creator = state.users.find(u => u.id === task.creatorId);
         const notifyClaimText = `Задачу "${task.title}" подхватил ${userMention(user)}.\n\nСвязаться: ${user.username}`;
         if (creator?.telegramId && creator.id !== user.id) {
@@ -1447,9 +1492,12 @@ async function startServer() {
         }
         task.assignedTo = null;
         task.status = 'open';
+        task.completedAt = '';
+        task.timeSpentMinutes = undefined;
         saveDatabase(state);
         await answerCallback(callback.id, 'Задача возвращена на биржу');
-        await sendTelegramMessage(chatId, `Ты отказался от задачи *"${task.title}"*. Она снова открыта.`);
+        await sendGroupMessage(chatId, `Ты отказался от задачи *"${task.title}"*. Она снова открыта.`);
+        await showTasksPanel(chatId, user, state);
         const creator = state.users.find(u => u.id === task.creatorId);
         if (creator?.telegramId && creator.id !== user.id) {
           await sendTelegramMessage(creator.telegramId, `${userMention(user)} отказался от задачи *"${task.title}"*. Она снова на бирже.`);
@@ -1467,16 +1515,15 @@ async function startServer() {
           await answerCallback(callback.id, 'Задача не найдена');
           return res.json({ ok: true });
         }
-        task.status = 'completed';
-        task.completedAt = new Date().toISOString();
-        saveDatabase(state);
-        await answerCallback(callback.id, 'Задача выполнена');
-        await showTasksPanel(chatId, user, state);
-        for (const admin of state.users.filter((member) => member.role === 'admin' && member.telegramId)) {
-          if (admin.id !== user.id) {
-            await sendTelegramMessage(admin.telegramId!, `Задача выполнена!\n\n${task.title}\nИсполнитель: ${userMention(user)}`);
-          }
-        }
+        chatSessions.set(String(chatId), { flow: 'task_complete_time', completionTaskId: task.id });
+        await answerCallback(callback.id);
+        await sendTelegramKeyboard(
+          chatId,
+          `Задача *"${task.title}"* готова.\n\nСколько времени ушло на выполнение? Это необязательно, но поможет планировать нагрузку.`,
+          [['15 минут', '30 минут'], ['1 час', '2 часа'], ['Указать вручную'], ['Не указывать', 'Назад']],
+          false,
+          user,
+        );
         return res.json({ ok: true });
       }
 
@@ -1766,8 +1813,96 @@ async function startServer() {
         return res.json({ ok: true });
       }
 
+      if (session?.flow === 'task_complete_time' && normalizedText !== 'назад') {
+        if (normalizedText === 'указать вручную') {
+          chatSessions.set(chatKey, { ...session, flow: 'task_complete_custom' });
+          await sendTelegramKeyboard(chatId, 'Введи количество минут числом, например 75.', [['Назад']], false, user);
+          return res.json({ ok: true });
+        }
+        const presetMinutes: Record<string, number | undefined> = {
+          '15 минут': 15,
+          '30 минут': 30,
+          '1 час': 60,
+          '2 часа': 120,
+          'не указывать': undefined,
+        };
+        if (!(normalizedText in presetMinutes)) {
+          await sendTelegramKeyboard(chatId, 'Выбери вариант кнопкой или укажи время вручную.', [['15 минут', '30 минут'], ['1 час', '2 часа'], ['Указать вручную'], ['Не указывать', 'Назад']], false, user);
+          return res.json({ ok: true });
+        }
+        const task = state.tasks.find((item) => item.id === session.completionTaskId && assignedIds(item).includes(user.id));
+        if (!task) {
+          await sendTelegramKeyboard(chatId, 'Задача больше недоступна.', [['Назад']], false, user);
+          return res.json({ ok: true });
+        }
+        task.status = 'completed';
+        task.completedAt = new Date().toISOString();
+        task.timeSpentMinutes = presetMinutes[normalizedText];
+        saveDatabase(state);
+        for (const admin of state.users.filter((member) => member.role === 'admin' && member.telegramId && member.id !== user.id)) {
+          await sendTelegramMessage(admin.telegramId!, `Задача выполнена!\n\n${task.title}\nИсполнитель: ${userMention(user)}${task.timeSpentMinutes ? `\nЗатрачено: ${taskDurationLabel(task.timeSpentMinutes)}` : ''}`);
+        }
+        await showTasksPanel(chatId, user, state);
+        return res.json({ ok: true });
+      }
+
+      if (session?.flow === 'task_complete_custom' && normalizedText !== 'назад') {
+        const minutes = Number(normalizedText);
+        if (!Number.isInteger(minutes) || minutes <= 0 || minutes > 60000) {
+          await sendTelegramKeyboard(chatId, 'Введи количество минут целым числом больше нуля.', [['Назад']], false, user);
+          return res.json({ ok: true });
+        }
+        const task = state.tasks.find((item) => item.id === session.completionTaskId && assignedIds(item).includes(user.id));
+        if (!task) {
+          await sendTelegramKeyboard(chatId, 'Задача больше недоступна.', [['Назад']], false, user);
+          return res.json({ ok: true });
+        }
+        task.status = 'completed';
+        task.completedAt = new Date().toISOString();
+        task.timeSpentMinutes = minutes;
+        saveDatabase(state);
+        for (const admin of state.users.filter((member) => member.role === 'admin' && member.telegramId && member.id !== user.id)) {
+          await sendTelegramMessage(admin.telegramId!, `Задача выполнена!\n\n${task.title}\nИсполнитель: ${userMention(user)}\nЗатрачено: ${taskDurationLabel(minutes)}`);
+        }
+        await showTasksPanel(chatId, user, state);
+        return res.json({ ok: true });
+      }
+
       if (normalizedText === 'назад' || normalizedText === 'меню') {
         const currentSession = chatSessions.get(chatKey);
+        if (normalizedText === 'назад' && currentSession?.flow === 'tasks_root') {
+          chatSessions.delete(chatKey);
+          await showProfilePanel(chatId, user, state);
+          return res.json({ ok: true });
+        }
+        if (normalizedText === 'назад' && (currentSession?.flow === 'tasks_submenu' || currentSession?.flow.startsWith('task_create_') || currentSession?.flow.startsWith('task_complete_'))) {
+          await showTasksPanel(chatId, user, state);
+          return res.json({ ok: true });
+        }
+        if (normalizedText === 'назад' && currentSession?.flow === 'meetings_root') {
+          await showProfilePanel(chatId, user, state);
+          return res.json({ ok: true });
+        }
+        if (normalizedText === 'назад' && currentSession?.flow === 'faculties_submenu') {
+          await showFacultiesPanel(chatId, user, state);
+          return res.json({ ok: true });
+        }
+        if (normalizedText === 'назад' && currentSession?.flow === 'faculties_root') {
+          await showProfilePanel(chatId, user, state);
+          return res.json({ ok: true });
+        }
+        if (normalizedText === 'назад' && currentSession?.flow === 'team_submenu') {
+          await showTeamPanel(chatId, user, state);
+          return res.json({ ok: true });
+        }
+        if (normalizedText === 'назад' && currentSession?.flow === 'team_root') {
+          await showProfilePanel(chatId, user, state);
+          return res.json({ ok: true });
+        }
+        if (normalizedText === 'назад' && currentSession?.flow.startsWith('team_')) {
+          await showTeamPanel(chatId, user, state);
+          return res.json({ ok: true });
+        }
         if (normalizedText === 'назад' && currentSession?.flow === 'meeting_enter_description') {
           chatSessions.set(chatKey, { ...currentSession, flow: 'meeting_enter_topic', topic: '' });
           await sendTelegramKeyboard(chatId, 'Напиши тему собрания одним сообщением.', [['Назад']]);
@@ -1902,13 +2037,13 @@ async function startServer() {
           !isFacultyUser(member)
           && `${member.realName} ${member.username}`.toLowerCase().includes(query)
         )).slice(0, 10);
-        chatSessions.delete(chatKey);
+        chatSessions.set(chatKey, { flow: 'team_submenu' });
         await sendTelegramKeyboard(
           chatId,
           matches.length
             ? `*Результаты поиска*\n\n${matches.map((member) => `• ${member.realName} · ${member.username} · ${member.primaryCompetency || 'без блока'}`).join('\n')}`
             : 'Никого не нашёл.',
-          [['Найти участника', 'Назад']],
+          [['Назад']],
           false,
           user,
         );
@@ -1969,9 +2104,9 @@ async function startServer() {
         };
         state.users.push(newUser);
         state.messages[newUser.id] = [];
-        chatSessions.delete(chatKey);
+        chatSessions.set(chatKey, { flow: 'team_submenu' });
         saveDatabase(state);
-        await sendTelegramKeyboard(chatId, `Участник добавлен:\n\n*${newUser.realName}*\n${newUser.username}\n${formatBirthday(newUser.birthday)}\n${roleLabel(newUser.role)}`, [['Добавить участника', 'Назад']], false, user);
+        await sendTelegramKeyboard(chatId, `Участник добавлен:\n\n*${newUser.realName}*\n${newUser.username}\n${formatBirthday(newUser.birthday)}\n${roleLabel(newUser.role)}`, [['Назад']], false, user);
         return res.json({ ok: true });
       }
 
@@ -2009,7 +2144,24 @@ async function startServer() {
           await sendTelegramKeyboard(chatId, 'Выбери блок кнопкой.', [[...(state.competencies || [])], ['Без блока'], ['Назад']], false, user);
           return res.json({ ok: true });
         }
-        chatSessions.set(chatKey, { ...session, flow: 'task_create_scope', taskCompetency: competency });
+        chatSessions.set(chatKey, { ...session, flow: 'task_create_priority', taskCompetency: competency });
+        await sendTelegramKeyboard(chatId, 'Выбери приоритет задачи.', [['Обычная', 'Важная'], ['Очень важная'], ['Назад']], false, user);
+        return res.json({ ok: true });
+      }
+
+      if (session?.flow === 'task_create_priority') {
+        const priority = normalizedText === 'обычная'
+          ? 'normal'
+          : normalizedText === 'важная'
+            ? 'important'
+            : normalizedText === 'очень важная'
+              ? 'critical'
+              : null;
+        if (!priority) {
+          await sendTelegramKeyboard(chatId, 'Выбери приоритет кнопкой.', [['Обычная', 'Важная'], ['Очень важная'], ['Назад']], false, user);
+          return res.json({ ok: true });
+        }
+        chatSessions.set(chatKey, { ...session, flow: 'task_create_scope', taskPriority: priority });
         await sendTelegramKeyboard(chatId, 'Кому назначить задачу?', [['Вся команда', 'Участники блока'], ['Открытая задача'], ['Назад']], false, user);
         return res.json({ ok: true });
       }
@@ -2037,8 +2189,7 @@ async function startServer() {
           sow: '',
           tips: [],
           status: assigneeIds.length ? 'assigned' : 'open',
-          workload: 'medium',
-          weightValue: 2,
+          priority: session.taskPriority || 'normal',
           createdAt: new Date().toISOString(),
           completedAt: '',
         };
@@ -2056,7 +2207,8 @@ async function startServer() {
           }
         }
         saveDatabase(state);
-        await sendTelegramKeyboard(chatId, `Задача создана:\n\n${taskDetailsText(task, state)}`, [['Создать задачу', 'Задачи'], ['Назад']], false, user);
+        await sendGroupMessage(chatId, `Задача создана:\n\n${taskDetailsText(task, state)}`);
+        await showTasksPanel(chatId, user, state);
         return res.json({ ok: true });
       }
 
@@ -2096,7 +2248,10 @@ async function startServer() {
           openTasks.length
             ? `*Свободные задачи*\n\n${openTasks.map((task, index) => `${index + 1}. ${task.title} · ${formatShortDate(task.deadline) || 'без даты'}`).join('\n')}`
             : 'Свободных задач сейчас нет.',
-          openTasks.map((task) => [{ text: task.title.slice(0, 48), callback_data: `task_view:${task.id}` }]),
+          [
+            ...openTasks.map((task) => [{ text: task.title.slice(0, 48), callback_data: `task_view:${task.id}` }]),
+            [{ text: 'Назад', callback_data: 'nav_tasks' }],
+          ],
         );
         return res.json({ ok: true });
       } else if (normalizedText === 'выполненные задачи') {
@@ -2104,12 +2259,13 @@ async function startServer() {
           .filter((task) => assignedIds(task).includes(user.id) && task.status === 'completed')
           .slice(-10)
           .reverse();
+        chatSessions.set(chatKey, { flow: 'tasks_submenu' });
         await sendTelegramKeyboard(
           chatId,
           completed.length
             ? `*Последние выполненные задачи*\n\n${completed.map((task) => `• ${task.title}`).join('\n')}`
             : 'Выполненных задач пока нет.',
-          [['Задачи', 'Назад']],
+          [['Назад']],
           false,
           user,
         );
@@ -2121,10 +2277,13 @@ async function startServer() {
           myTasks.length
             ? `*Управление задачами*\n\n${myTasks.map((task, index) => `${index + 1}. ${task.title} · ${taskStatusLabel(task.status)}`).join('\n')}`
             : 'Активных задач нет.',
-          myTasks.map((task) => [
-            { text: `✓ ${task.title.slice(0, 30)}`, callback_data: `task_complete:${task.id}` },
-            { text: 'Отказаться', callback_data: `task_release:${task.id}` },
-          ]),
+          [
+            ...myTasks.map((task) => [
+              { text: `✓ ${task.title.slice(0, 30)}`, callback_data: `task_complete:${task.id}` },
+              { text: 'Отказаться', callback_data: `task_release:${task.id}` },
+            ]),
+            [{ text: 'Назад', callback_data: 'nav_tasks' }],
+          ],
         );
         return res.json({ ok: true });
       } else if (normalizedText === 'создать задачу') {
@@ -2151,12 +2310,13 @@ async function startServer() {
         return res.json({ ok: true });
       } else if (normalizedText === 'задачи факультетов') {
         const facultyTasks = state.tasks.filter((task) => task.facultyId && task.status !== 'completed').slice(0, 12);
+        chatSessions.set(chatKey, { flow: 'faculties_submenu' });
         await sendTelegramKeyboard(
           chatId,
           facultyTasks.length
             ? `*Активные задачи факультетов*\n\n${facultyTasks.map((task) => `• ${task.title} · ${formatShortDate(task.deadline)}`).join('\n')}`
             : 'Активных задач факультетов нет.',
-          [['МФ', 'Назад']],
+          [['Назад']],
           false,
           user,
         );
@@ -2167,7 +2327,7 @@ async function startServer() {
           + '*Слоты* — отметить свободные часы кнопками.\n'
           + '*Встречи* — посмотреть и назначить собрание.\n'
           + '*Задачи* — личные, свободные и выполненные задачи.\n'
-          + `${user.role === 'admin' ? '*Команда* — поиск и добавление людей.\n*МФ* — факультеты и их задачи.\n' : ''}`
+          + `${user.role === 'admin' ? '*МФ* — факультеты и их задачи.\n' : ''}`
           + '\nВ командном чате доступны /all, /meeting, /deadlines, /slots, /birthdays и /checkin.';
       } else {
         replyText = 'Выбери раздел кнопкой внизу.';
@@ -2488,8 +2648,7 @@ async function startServer() {
       sow: '',
       tips: [],
       status: 'waiting',
-      workload: 'medium',
-      weightValue: 2,
+      priority: 'normal',
       createdAt: new Date().toISOString(),
       completedAt: '',
       reminders: cleanReminders,
@@ -2683,14 +2842,14 @@ async function startServer() {
 
   // Create a new task
   app.post('/api/task/create', async (req, res) => {
-    const { title, description, deadline, assignedTo, sow, tips, workload, creatorId, competency } = req.body;
+    const { title, description, deadline, assignedTo, sow, tips, priority, creatorId, competency } = req.body;
     const state = loadDatabase();
 
     if (!isRegisteredUser(state, creatorId)) {
       return res.status(403).json({ error: 'Сначала нужно зарегистрироваться в чате с ботом' });
     }
 
-    const weightMap = { low: 1, medium: 2, high: 3 };
+    const cleanPriority: Task['priority'] = ['normal', 'important', 'critical'].includes(priority) ? priority : 'normal';
     const requestedAssigneeIds = Array.isArray(assignedTo) ? assignedTo.filter(Boolean) : assignedTo ? [assignedTo] : [];
     const assigneeIds = [...new Set(requestedAssigneeIds)]
       .filter((id) => state.users.some((user) => user.id === id && !isFacultyUser(user)));
@@ -2706,8 +2865,7 @@ async function startServer() {
       sow: sow || '',
       tips: tips || [],
       status: assigneeIds.length ? 'assigned' : 'open',
-      workload: workload || 'medium',
-      weightValue: weightMap[workload as 'low' | 'medium' | 'high'] || 2,
+      priority: cleanPriority,
       createdAt: now,
       completedAt: '',
     };
@@ -2793,6 +2951,15 @@ async function startServer() {
       text: `Ты закрепил за собой задачу: *"${task.title}"*\nБлок: ${task.competency || 'не указан'}\nДедлайн: ${formatShortDate(task.deadline)}.\nТЗ можно проверить в Mini App.`,
       timestamp: new Date().toISOString()
     });
+    if (user.telegramId) {
+      await sendTelegramMessage(
+        user.telegramId,
+        `Ты взял задачу в работу:\n\n${taskDetailsText(task, state)}`,
+        [{ text: 'Открыть задачи', action: 'open_tasks' }],
+        false,
+        user,
+      );
+    }
 
     const creator = state.users.find(u => u.id === task.creatorId);
     const text = `${user.realName} взял задачу с доски:\n"${task.title}"\n\nСвязаться: ${user.username}`;
@@ -2840,6 +3007,7 @@ async function startServer() {
     task.assignedTo = null;
     task.status = 'open';
     task.completedAt = '';
+    task.timeSpentMinutes = undefined;
     saveDatabase(state);
 
     const sendJobs: Promise<boolean>[] = [];
@@ -2858,7 +3026,7 @@ async function startServer() {
 
   // Update task status (complete)
   app.post('/api/task/status', async (req, res) => {
-    const { taskId, status, requesterId } = req.body;
+    const { taskId, status, requesterId, timeSpentMinutes } = req.body;
     const state = loadDatabase();
 
     const task = state.tasks.find(t => t.id === taskId);
@@ -2872,9 +3040,19 @@ async function startServer() {
       return res.status(403).json({ error: 'Изменить статус может исполнитель или администратор' });
     }
 
+    const parsedTimeSpent = Number(timeSpentMinutes);
+    if (timeSpentMinutes !== undefined && (!Number.isFinite(parsedTimeSpent) || parsedTimeSpent <= 0 || parsedTimeSpent > 60000)) {
+      return res.status(400).json({ error: 'Время выполнения должно быть больше нуля' });
+    }
     task.status = status;
-    if (status === 'completed') task.completedAt = new Date().toISOString();
-    if (status !== 'completed') task.completedAt = '';
+    if (status === 'completed') {
+      task.completedAt = new Date().toISOString();
+      task.timeSpentMinutes = timeSpentMinutes === undefined ? undefined : Math.round(parsedTimeSpent);
+    }
+    if (status !== 'completed') {
+      task.completedAt = '';
+      task.timeSpentMinutes = undefined;
+    }
 
     // If completed and was assigned to someone, notify admins
     if (status === 'completed' && task.assignedTo) {
@@ -2884,7 +3062,7 @@ async function startServer() {
         .join(', ') || 'Участник';
       const sendJobs: Promise<boolean>[] = [];
       state.users.filter(u => u.role === 'admin').forEach(admin => {
-        const text = `Задача выполнена!\nБлок: ${task.competency || 'не указан'}\nИсполнитель: ${workerName}\nЗадача: "${task.title}"`;
+        const text = `Задача выполнена!\nБлок: ${task.competency || 'не указан'}\nИсполнитель: ${workerName}\nЗадача: "${task.title}"${task.timeSpentMinutes ? `\nЗатрачено: ${taskDurationLabel(task.timeSpentMinutes)}` : ''}`;
         if (!state.messages[admin.id]) state.messages[admin.id] = [];
         state.messages[admin.id].push({
           id: 'task_comp_admin_' + Date.now() + '_' + admin.id,
@@ -2939,7 +3117,8 @@ async function startServer() {
             <td>${escapeHtml(formatDateTimeShort(task.completedAt))}</td>
             <td>${escapeHtml(creator?.realName || 'Не указан')}</td>
             <td>${escapeHtml(executors || 'Не назначен')}</td>
-            <td>${escapeHtml(task.workload === 'high' ? 'Высокая' : task.workload === 'medium' ? 'Средняя' : 'Низкая')}</td>
+            <td>${escapeHtml(taskPriorityLabel(task.priority))}</td>
+            <td>${escapeHtml(taskDurationLabel(task.timeSpentMinutes) || 'Не указано')}</td>
             <td>${escapeHtml((task.tips || []).join('\\n'))}</td>
           </tr>`;
       })
@@ -2962,7 +3141,8 @@ async function startServer() {
                 <th>Дата выполнения</th>
                 <th>Автор</th>
                 <th>Исполнитель</th>
-                <th>Нагрузка</th>
+                <th>Приоритет</th>
+                <th>Затрачено времени</th>
                 <th>Подсказки</th>
               </tr>
             </thead>
