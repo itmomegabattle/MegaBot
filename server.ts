@@ -457,6 +457,16 @@ function alignedHardUnavailableDays(availability?: Availability) {
     .filter((day) => Number.isFinite(day) && day >= 0 && day < 35);
 }
 
+function hasSubmittedAvailabilityForWeek(availability?: Availability, weekIndex = 0) {
+  if (!availability) return false;
+  const slots = alignedAvailabilitySlots(availability);
+  const unavailableDays = new Set(alignedHardUnavailableDays(availability));
+  const firstDay = weekIndex * 7;
+  return Array.from({ length: 7 }, (_, dayOffset) => firstDay + dayOffset).some((dayIndex) => (
+    (slots[dayIndex] || []).length > 0 || unavailableDays.has(dayIndex)
+  ));
+}
+
 function formatDateTimeShort(value?: string) {
   if (!value) return '';
   const date = new Date(value);
@@ -1195,6 +1205,7 @@ async function startServer() {
     let changed = false;
 
     for (const user of state.users) {
+      if (hasSubmittedAvailabilityForWeek(state.availabilities[user.id], 1)) continue;
       const notificationId = `sunday_slots_${dateKey}_${user.id}`;
       if (!state.messages[user.id]) state.messages[user.id] = [];
       if (state.messages[user.id].some((message) => message.id === notificationId)) continue;
@@ -1651,13 +1662,7 @@ async function startServer() {
 
         if (groupCommand === '/slots') {
           const team = state.users.filter((member) => !isFacultyUser(member));
-          const missing = team.filter((member) => {
-            const availability = alignedAvailabilitySlots(state.availabilities[member.id]);
-            const unavailableDays = new Set(alignedHardUnavailableDays(state.availabilities[member.id]).filter((day) => day < 7));
-            return !Array.from({ length: 7 }, (_, dayIndex) => (
-              (availability[dayIndex] || []).length > 0 || unavailableDays.has(dayIndex)
-            )).every(Boolean);
-          });
+          const missing = team.filter((member) => !hasSubmittedAvailabilityForWeek(state.availabilities[member.id]));
           await sendGroupMessage(chatId, missing.length
             ? `*Ещё не отметили слоты (${missing.length}):*\n${missing.map((member) => member.username).join(' ')}`
             : 'Все участники отметили слоты на неделю.');

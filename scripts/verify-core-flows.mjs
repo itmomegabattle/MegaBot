@@ -92,6 +92,15 @@ function telegramInitData(user) {
   return params.toString();
 }
 
+function currentWeekStart() {
+  const today = new Date();
+  const day = today.getDay() === 0 ? 6 : today.getDay() - 1;
+  const monday = new Date(today);
+  monday.setHours(0, 0, 0, 0);
+  monday.setDate(today.getDate() - day);
+  return `${monday.getFullYear()}-${String(monday.getMonth() + 1).padStart(2, '0')}-${String(monday.getDate()).padStart(2, '0')}`;
+}
+
 async function request(pathname, body) {
   const response = await fetch(`http://127.0.0.1:${appPort}${pathname}`, {
     method: body === undefined ? 'GET' : 'POST',
@@ -599,6 +608,29 @@ try {
     ['all', 'meeting', 'deadlines', 'slots', 'birthdays', 'checkin', 'help'],
   );
   assert.ok(!boundChatCommandsCall.body.commands.some((command) => command.command === 'start'));
+
+  const oneDayAvailability = await request('/api/availability', {
+    userId: 'u_alice',
+    weekStart: currentWeekStart(),
+    slots: { 2: [18] },
+    hardUnavailableDays: [],
+  });
+  assert.equal(oneDayAvailability.response.status, 200);
+
+  telegramCalls.length = 0;
+  await request('/api/telegram-webhook', {
+    update_id: 201,
+    message: {
+      message_id: 201,
+      chat: { id: -100500, type: 'supergroup' },
+      from: { id: 100, username: 'admin', first_name: 'Админ' },
+      text: '/slots',
+    },
+  });
+  const missingSlotsMessage = telegramCalls.find((call) => call.path.endsWith('/sendMessage'));
+  assert.ok(missingSlotsMessage);
+  assert.ok(!String(missingSlotsMessage.body.text || '').includes('@alice'));
+  assert.ok(String(missingSlotsMessage.body.text || '').includes('@admin'));
 
   telegramCalls.length = 0;
   await request('/api/telegram-webhook', {
