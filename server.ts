@@ -828,6 +828,37 @@ async function startServer() {
     }
   }
 
+  const groupBotCommands = [
+    { command: 'all', description: 'Текст — упомянуть всю команду' },
+    { command: 'meeting', description: 'Показать ближайшую встречу' },
+    { command: 'deadlines', description: 'Показать ближайшие дедлайны' },
+    { command: 'slots', description: 'Показать, кто не отметил слоты' },
+    { command: 'birthdays', description: 'Показать ближайшие дни рождения' },
+    { command: 'checkin', description: 'Название — запустить перекличку' },
+    { command: 'help', description: 'Показать команды MegaBot' },
+  ];
+
+  async function configureGroupCommandMenu(scope: Record<string, string | number> = { type: 'all_group_chats' }) {
+    const botToken = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
+    if (!botToken) return false;
+    const tgApiBase = process.env.TELEGRAM_API_BASE || 'https://api.telegram.org';
+    try {
+      const response = await telegramFetch(`${tgApiBase}/bot${botToken}/setMyCommands`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scope, commands: groupBotCommands }),
+      });
+      if (!response.ok) {
+        console.error('Telegram group command menu configuration failed:', response.status, await response.text());
+        return false;
+      }
+      return true;
+    } catch (err) {
+      console.error('Telegram group command menu configuration failed:', err);
+      return false;
+    }
+  }
+
   async function configureChatMenuButton(chatId: string | number, user?: User) {
     const botToken = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
     if (!botToken) return;
@@ -1570,6 +1601,7 @@ async function startServer() {
           } else {
             state.settings = { ...(state.settings || {}), teamChatId: String(chatId) };
             saveDatabase(state);
+            await configureGroupCommandMenu({ type: 'chat', chat_id: chatId });
             await sendGroupMessage(chatId, 'Чат привязан к MegaBot. Командные функции активны.');
           }
           return res.json({ ok: true });
@@ -3301,22 +3333,8 @@ async function startServer() {
           ]
         })
       });
-      await telegramFetch(`${tgApiBase}/bot${botToken}/setMyCommands`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          scope: { type: 'all_group_chats' },
-          commands: [
-            { command: 'all', description: 'Упомянуть всю команду' },
-            { command: 'meeting', description: 'Ближайшая встреча' },
-            { command: 'deadlines', description: 'Ближайшие дедлайны' },
-            { command: 'slots', description: 'Кто не отметил слоты' },
-            { command: 'birthdays', description: 'Ближайшие дни рождения' },
-            { command: 'checkin', description: 'Запустить перекличку' },
-            { command: 'help', description: 'Команды MegaBot' },
-          ],
-        }),
-      });
+      await configureGroupCommandMenu();
+      await configureGroupCommandMenu({ type: 'all_chat_administrators' });
 
       await telegramFetch(`${tgApiBase}/bot${botToken}/setChatMenuButton`, {
         method: 'POST',
