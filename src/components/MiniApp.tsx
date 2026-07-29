@@ -40,7 +40,7 @@ interface MiniAppProps {
   onScheduleMeeting: (meetingData: any) => Promise<boolean>;
   onCreateTask: (taskData: any) => Promise<boolean>;
   onClaimTask: (taskId: string) => void;
-  onCompleteTask: (taskId: string) => void;
+  onCompleteTask: (taskId: string, timeSpentMinutes?: number) => Promise<boolean>;
   onReleaseTask: (taskId: string) => void;
   onRefreshState: () => void;
 }
@@ -125,6 +125,19 @@ const taskStatusText = (status: Task['status']) => {
   if (status === 'waiting') return 'Ждет';
   if (status === 'in_progress' || status === 'assigned') return 'В работе';
   return 'Открытая';
+};
+
+const taskPriorityText = (priority?: Task['priority']) => {
+  if (priority === 'critical') return 'Очень важная';
+  if (priority === 'important') return 'Важная';
+  return 'Обычная';
+};
+
+const taskDurationText = (minutes?: number) => {
+  if (!minutes) return '';
+  const hoursPart = Math.floor(minutes / 60);
+  const minutesPart = minutes % 60;
+  return [hoursPart ? `${hoursPart} ч` : '', minutesPart ? `${minutesPart} мин` : ''].filter(Boolean).join(' ');
 };
 
 const mondayOfCurrentWeek = () => {
@@ -240,7 +253,11 @@ export default function MiniApp({
   const [taskAssignedTo, setTaskAssignedTo] = useState<string[]>([]);
   const [showAllTaskAssignees, setShowAllTaskAssignees] = useState(false);
   const [taskSow, setTaskSow] = useState('');
-  const [taskWorkload, setTaskWorkload] = useState<'low' | 'medium' | 'high'>('medium');
+  const [taskPriority, setTaskPriority] = useState<Task['priority']>('normal');
+  const [completingTaskId, setCompletingTaskId] = useState<string | null>(null);
+  const [completionHours, setCompletionHours] = useState('');
+  const [completionMinutes, setCompletionMinutes] = useState('');
+  const [savingCompletion, setSavingCompletion] = useState(false);
   const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
   const [showCompletedTasks, setShowCompletedTasks] = useState(false);
   const [showTaskLog, setShowTaskLog] = useState(false);
@@ -607,7 +624,7 @@ export default function MiniApp({
     setTaskAssignedTo([]);
     setShowAllTaskAssignees(false);
     setTaskSow('');
-    setTaskWorkload('medium');
+    setTaskPriority('normal');
   };
 
   const openTaskForm = () => {
@@ -627,7 +644,7 @@ export default function MiniApp({
       assignedTo: taskAssignedTo,
       sow: taskSow,
       tips: [],
-      workload: taskWorkload,
+      priority: taskPriority,
       creatorId: currentUser.id,
     });
     setSavingTask(false);
@@ -635,6 +652,30 @@ export default function MiniApp({
       resetTaskForm();
       setShowTaskForm(false);
     }
+  };
+
+  const openCompletionPrompt = (taskId: string) => {
+    setCompletingTaskId(taskId);
+    setCompletionHours('');
+    setCompletionMinutes('');
+  };
+
+  const closeCompletionPrompt = () => {
+    if (savingCompletion) return;
+    setCompletingTaskId(null);
+    setCompletionHours('');
+    setCompletionMinutes('');
+  };
+
+  const completeTaskWithTime = async (includeTime: boolean) => {
+    if (!completingTaskId || savingCompletion) return;
+    const hoursValue = Math.max(0, Number.parseInt(completionHours || '0', 10) || 0);
+    const minutesValue = Math.max(0, Number.parseInt(completionMinutes || '0', 10) || 0);
+    const totalMinutes = hoursValue * 60 + minutesValue;
+    setSavingCompletion(true);
+    const ok = await onCompleteTask(completingTaskId, includeTime && totalMinutes > 0 ? totalMinutes : undefined);
+    setSavingCompletion(false);
+    if (ok) closeCompletionPrompt();
   };
 
   const claimTask = async (taskId: string) => {
@@ -1489,11 +1530,11 @@ export default function MiniApp({
                   <Field label="Дедлайн">
                     <DatePickerField value={taskDeadline} onChange={setTaskDeadline} placeholder="Дата не выбрана" />
                   </Field>
-                  <Field label="Нагрузка">
-                    <select value={taskWorkload} onChange={(e) => setTaskWorkload(e.target.value as any)} className={selectClass}>
-                      <option value="low">Низкая</option>
-                      <option value="medium">Средняя</option>
-                      <option value="high">Высокая</option>
+                  <Field label="Приоритет">
+                    <select value={taskPriority} onChange={(e) => setTaskPriority(e.target.value as Task['priority'])} className={selectClass}>
+                      <option value="normal">Обычная</option>
+                      <option value="important">Важная</option>
+                      <option value="critical">Очень важная</option>
                     </select>
                   </Field>
                 </div>
@@ -1536,7 +1577,7 @@ export default function MiniApp({
               </form>
             )}
             {taskError && <div role="alert" className="rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm font-bold text-amber-800">{taskError}</div>}
-            <TaskList title="Мои задачи" tasks={myTasks} users={state.users} currentUser={currentUser} actionLabel="Готово" onAction={(id) => onCompleteTask(id)} onRelease={onReleaseTask} />
+            <TaskList title="Мои задачи" tasks={myTasks} users={state.users} currentUser={currentUser} actionLabel="Готово" onAction={openCompletionPrompt} onRelease={onReleaseTask} />
             <TaskList title="Открытые задачи" tasks={openTasks} users={state.users} currentUser={currentUser} actionLabel="Взять" onAction={claimTask} />
             <button onClick={() => setShowCompletedTasks((value) => !value)} className={secondaryButtonClass}>
               {showCompletedTasks ? <Minus className="h-4 w-4" /> : <Check className="h-4 w-4" />}
@@ -2195,6 +2236,59 @@ export default function MiniApp({
         )}
       </main>
 
+      {completingTaskId && (
+        <div className="fixed inset-0 z-50 flex items-end justify-center bg-slate-950/55 p-3 sm:items-center" role="dialog" aria-modal="true" aria-labelledby="task-completion-title">
+          <div className="w-full max-w-md rounded-[28px] border border-blue-100 bg-white p-5 shadow-[0_24px_70px_rgba(0,0,0,0.28)]">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h2 id="task-completion-title" className="text-xl font-black">Сколько времени заняла задача?</h2>
+                <p className="mt-1 text-sm font-semibold text-slate-500">
+                  Это необязательно, но поможет точнее планировать нагрузку команды.
+                </p>
+              </div>
+              <button type="button" onClick={closeCompletionPrompt} className={miniButtonClass} aria-label="Закрыть">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="mt-5 grid grid-cols-2 gap-3">
+              <Field label="Часы">
+                <input
+                  type="number"
+                  min="0"
+                  max="999"
+                  inputMode="numeric"
+                  value={completionHours}
+                  onChange={(event) => setCompletionHours(event.target.value)}
+                  className={inputClass}
+                  placeholder="0"
+                />
+              </Field>
+              <Field label="Минуты">
+                <input
+                  type="number"
+                  min="0"
+                  max="60000"
+                  inputMode="numeric"
+                  value={completionMinutes}
+                  onChange={(event) => setCompletionMinutes(event.target.value)}
+                  className={inputClass}
+                  placeholder="0"
+                />
+              </Field>
+            </div>
+            <p className="mt-2 text-xs font-semibold text-slate-500">Минуты можно указать общим числом — например, 75 минут сохранятся как 1 ч 15 мин.</p>
+            <div className="mt-5 space-y-2">
+              <button type="button" disabled={savingCompletion} onClick={() => completeTaskWithTime(true)} className={`${primaryButtonClass} disabled:opacity-60`}>
+                {savingCompletion ? 'Сохраняю...' : 'Сохранить и завершить'}
+              </button>
+              <button type="button" disabled={savingCompletion} onClick={() => completeTaskWithTime(false)} className={`${secondaryButtonClass} w-full disabled:opacity-60`}>
+                Завершить без времени
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <nav className="mega-bottom-nav fixed inset-x-0 bottom-0 z-40 border border-blue-100 bg-white/95 p-1.5 shadow-[0_-12px_30px_rgba(0,105,224,0.08)] backdrop-blur">
         <div className="mega-bottom-nav-inner mx-auto grid max-w-3xl grid-cols-5 gap-1">
           <NavButton icon={<CalendarDots />} label="Слоты" active={activeTab === 'slots'} onClick={() => setActiveTab('slots')} />
@@ -2348,7 +2442,7 @@ function TaskList({
                 {formatDateShort(task.deadline)}
               </span>
               <span className="rounded-full bg-blue-50 px-2.5 py-1 text-[#0069E0]">
-                {task.workload === 'high' ? 'Высокая' : task.workload === 'medium' ? 'Средняя' : 'Низкая'}
+                {taskPriorityText(task.priority)}
               </span>
               {creator && <span className="rounded-full bg-slate-100 px-2.5 py-1">Автор: {creator.realName}</span>}
             </div>
@@ -2362,7 +2456,8 @@ function TaskList({
                 <InfoRow label="Дата назначения" value={formatDateTimeShort(task.createdAt)} />
                 {task.completedAt && <InfoRow label="Дата выполнения" value={formatDateTimeShort(task.completedAt)} />}
                 <InfoRow label="Дедлайн" value={formatDateShort(task.deadline)} />
-                <InfoRow label="Нагрузка" value={task.workload === 'high' ? 'Высокая' : task.workload === 'medium' ? 'Средняя' : 'Низкая'} />
+                <InfoRow label="Приоритет" value={taskPriorityText(task.priority)} />
+                {task.timeSpentMinutes ? <InfoRow label="Затрачено времени" value={taskDurationText(task.timeSpentMinutes)} /> : null}
                 {task.sow && <p className="rounded-2xl bg-slate-50 p-3 text-xs text-slate-600">{task.sow}</p>}
                 {task.tips?.length > 0 && (
                   <div className="space-y-1 text-xs text-slate-500">

@@ -63,10 +63,10 @@ export interface Task {
   sow: string;
   tips: string[];
   status: TaskStatus;
-  workload: 'low' | 'medium' | 'high';
-  weightValue: number;
+  priority: 'normal' | 'important' | 'critical';
   createdAt?: string;
   completedAt?: string;
+  timeSpentMinutes?: number;
   facultyId?: string;
   reminders?: TaskReminder[];
 }
