@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { AlertCircle, CheckCircle2 } from 'lucide-react';
+import { CheckCircle, WarningCircle } from '@phosphor-icons/react';
 import { SimulationState } from './types';
 import MiniApp from './components/MiniApp';
 
@@ -200,8 +200,9 @@ export default function App() {
 
   if (loading || !state) {
     return (
-      <div className="min-h-screen bg-slate-50 text-slate-900 flex flex-col justify-center items-center gap-4">
-        <div className="w-12 h-12 border-4 border-blue-500/30 border-t-blue-500 rounded-full animate-spin" />
+      <div className="mega-gate min-h-screen flex flex-col justify-center items-center gap-4">
+        <img src="/brand/megabattle-logo.svg" alt="ITMO MegaBattle" className="mega-gate-logo" />
+        <div className="w-11 h-11 border-4 border-blue-500/20 border-t-blue-500 rounded-full animate-spin" role="status" aria-label="Загрузка" />
         <p className="text-sm text-slate-500 font-medium">Загрузка приложения...</p>
       </div>
     );
@@ -209,8 +210,9 @@ export default function App() {
 
   if (externalOnlyMessage) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-[#f4f7ff] px-6 text-center text-slate-900">
-        <div className="max-w-sm rounded-3xl border border-blue-100 bg-white p-6 shadow-sm">
+      <div className="mega-gate flex min-h-screen items-center justify-center px-6 text-center">
+        <div className="mega-gate-card max-w-sm">
+          <img src="/brand/megabattle-logo.svg" alt="ITMO MegaBattle" className="mega-gate-logo mx-auto" />
           <h1 className="text-xl font-black">Доступ через чат</h1>
           <p className="mt-3 text-sm font-semibold text-slate-500">{externalOnlyMessage}</p>
         </div>
@@ -222,9 +224,9 @@ export default function App() {
 
   if (!currentUser) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-[#f4f7ff] px-6 text-center text-slate-900">
-        <div className="max-w-sm rounded-3xl border border-blue-100 bg-white p-6 shadow-sm">
-          <div className="text-sm font-black uppercase text-[#0050ff]">MegaBot</div>
+      <div className="mega-gate flex min-h-screen items-center justify-center px-6 text-center">
+        <div className="mega-gate-card max-w-sm">
+          <img src="/brand/megabattle-logo.svg" alt="ITMO MegaBattle" className="mega-gate-logo mx-auto" />
           <h1 className="mt-2 text-2xl font-black">Открой через Telegram</h1>
           <p className="mt-3 text-sm font-semibold text-slate-500">
             Mini App показывает данные только после проверки Telegram-аккаунта. Открой приложение кнопкой в чате с ботом.
@@ -236,19 +238,19 @@ export default function App() {
 
   if (!currentUser.registered) {
     return (
-      <div className="min-h-screen bg-slate-50 text-slate-900 flex flex-col justify-center items-center gap-5 px-6 text-center">
-        <div className="max-w-sm rounded-3xl border border-blue-100 bg-white p-6 shadow-sm">
-          <div className="text-sm font-black uppercase text-[#0050ff]">MegaBot</div>
+      <div className="mega-gate min-h-screen flex flex-col justify-center items-center gap-5 px-6 text-center">
+        <div className="mega-gate-card max-w-sm">
+          <img src="/brand/megabattle-logo.svg" alt="ITMO MegaBattle" className="mega-gate-logo mx-auto" />
           <h1 className="mt-2 text-2xl font-black">Сначала регистрация</h1>
           <p className="mt-3 text-sm font-semibold text-slate-500">
             Напиши боту в чате имя, фамилию и дату рождения одним сообщением:
           </p>
-          <div className="mt-4 rounded-2xl bg-blue-50 px-4 py-3 text-sm font-black text-[#0050ff]">
+          <div className="mt-4 rounded-2xl bg-blue-50 px-4 py-3 text-sm font-black text-[#0069E0]">
             Иван Кузнецов 12.10
           </div>
           <button
             onClick={() => (window as any).Telegram?.WebApp?.close?.()}
-            className="mt-5 w-full rounded-3xl bg-[#0050ff] px-5 py-3 text-sm font-black text-white transition hover:bg-[#0a5cff] active:scale-[0.97] active:bg-[#0045d8]"
+            className="mt-5 w-full rounded-3xl bg-[#0069E0] px-5 py-3 text-sm font-black text-white transition hover:bg-[#1677E8] active:scale-[0.97] active:bg-[#0058BD]"
           >
             Вернуться в чат
           </button>
@@ -263,6 +265,8 @@ export default function App() {
         {notifications.map((n) => (
           <div
             key={n.id}
+            role={n.type === 'warning' ? 'alert' : 'status'}
+            aria-live={n.type === 'warning' ? 'assertive' : 'polite'}
             className={`px-4 py-3 rounded-xl shadow-2xl border text-xs font-semibold flex items-center gap-2 animate-fade-in pointer-events-auto ${
               n.type === 'success'
                 ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-600'
@@ -272,9 +276,9 @@ export default function App() {
             }`}
           >
             {n.type === 'success' ? (
-              <CheckCircle2 className="w-4.5 h-4.5 shrink-0" />
+              <CheckCircle className="w-4.5 h-4.5 shrink-0" weight="fill" />
             ) : (
-              <AlertCircle className="w-4.5 h-4.5 shrink-0" />
+              <WarningCircle className="w-4.5 h-4.5 shrink-0" weight="fill" />
             )}
             <span>{n.text}</span>
           </div>

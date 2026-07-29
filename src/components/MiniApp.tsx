@@ -1,25 +1,33 @@
-﻿import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
-  CalendarDays,
-  Users,
+  CalendarDots,
+  UsersThree,
   GraduationCap,
-  BriefcaseBusiness,
+  Briefcase,
   Shield,
   Check,
-  RefreshCw,
+  ArrowsClockwise,
   Plus,
   Minus,
-  Trash2,
+  Trash,
   Clock,
   UserPlus,
-  CircleAlert,
-  Pencil,
+  PencilSimple,
   X,
-  Download,
+  DownloadSimple,
   Moon,
   Sun,
-} from 'lucide-react';
+} from '@phosphor-icons/react';
 import { Meeting, SimulationState, Task, User } from '../types';
+
+/*
+THESIS: MegaBattle is a compact operations surface, not a generic blue card dashboard.
+OWN-WORLD: #0069E0, black and white, Druk/Raleway, official logo, wave and soft-star assets, pill controls, disciplined radii.
+STORY: See current status, coordinate availability and meetings, then act on tasks and team responsibilities without leaving Telegram.
+FIRST VIEWPORT: Branded compact header, current page and role context, then the active workflow; no marketing hero.
+FORM: Operate. Brief-pinned direction; DESIGN_VARIANCE=4, MOTION_INTENSITY=4, VISUAL_DENSITY=7.
+FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, and DESIGN.md
+*/
 
 interface MiniAppProps {
   state: SimulationState;
@@ -775,28 +783,21 @@ export default function MiniApp({
 
   return (
     <div className={`mega-shell min-h-screen text-slate-950 ${darkTheme ? 'bg-[#07111f]' : 'bg-[#eef3fb]'}`}>
-      <header className="sticky top-0 z-30 overflow-hidden border-b border-white/10 bg-[#061123] text-white shadow-[0_12px_30px_rgba(3,12,28,0.18)]">
-        <div className="absolute inset-x-0 -top-12 opacity-20">
-          <WaveMark />
-        </div>
-        <div className="absolute bottom-0 left-0 h-1 w-full bg-[#0050ff]" />
-        <div className="relative px-4 pb-3 pt-2.5">
+      <header className="mega-header sticky top-0 z-30 overflow-hidden text-white">
+        <div className="mega-header-rule" />
+        <div className="relative px-4 pb-3 pt-[calc(env(safe-area-inset-top)+10px)]">
           <div className="flex items-center justify-between gap-3">
-            <div className="font-black italic leading-[0.86] tracking-tight">
-              <div className="text-base">ITMO</div>
-              <div className="text-base">MEGA</div>
-              <div className="text-base">BATTLE</div>
-            </div>
+            <img className="mega-logo" src="/brand/megabattle-logo.svg" alt="ITMO MegaBattle" />
             <div className="min-w-0 flex-1">
-              <p className="text-[11px] font-semibold uppercase text-white/70">MegaOrgia</p>
-              <h1 className="truncate text-xl font-black tracking-tight">{pageTitle}</h1>
+              <p className="mega-context truncate">{currentUser.realName} · {isAdmin ? 'администратор' : 'организатор'}</p>
+              <h1 className="mega-page-title truncate">{pageTitle}</h1>
             </div>
             <div className="flex items-center gap-2">
-              <button onClick={() => setDarkTheme((value) => !value)} className={`${iconButtonClass} h-9 w-9`} title="Тема">
-                {darkTheme ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+              <button onClick={() => setDarkTheme((value) => !value)} className={`${iconButtonClass} h-11 w-11`} title="Тема" aria-label={darkTheme ? 'Включить светлую тему' : 'Включить тёмную тему'}>
+                {darkTheme ? <Sun className="h-5 w-5" weight="regular" /> : <Moon className="h-5 w-5" weight="regular" />}
               </button>
-              <button onClick={onRefreshState} className={`${iconButtonClass} h-9 w-9`} title="Обновить">
-                <RefreshCw className="h-4 w-4" />
+              <button onClick={onRefreshState} className={`${iconButtonClass} h-11 w-11`} title="Обновить" aria-label="Обновить данные">
+                <ArrowsClockwise className="h-5 w-5" weight="regular" />
               </button>
             </div>
           </div>
@@ -881,8 +882,8 @@ export default function MiniApp({
                                 onClick={() => toggleSlot(absoluteDayIndex, hour)}
                                 className={`h-11 rounded-2xl border text-sm font-black ${pressClass} ${
                                   active
-                                    ? 'border-[#0050ff] bg-[#0050ff] text-white shadow-[0_8px_20px_rgba(0,80,255,0.2)] hover:bg-[#0a5cff] active:bg-[#0045d8]'
-                                    : 'border-slate-200 bg-slate-50 text-slate-600 hover:bg-blue-50 active:bg-blue-100'
+                                    ? 'border-[#0069E0] bg-[#0069E0] text-white shadow-[0_8px_20px_rgba(0,105,224,0.2)] hover:bg-[#1677E8] active:bg-[#0058BD]'
+                                    : 'border-slate-200 bg-slate-50 text-slate-600 hover:bg-slate-100 active:bg-blue-100'
                                 }`}
                               >
                                 {hour}:00
@@ -928,13 +929,13 @@ export default function MiniApp({
                       key={day.short}
                       type="button"
                       onClick={() => setExpandedAvailabilityDay((value) => (value === dayIndex ? null : dayIndex))}
-                      className={`rounded-2xl border p-2 text-center ${pressClass} ${expanded ? 'border-[#0050ff] bg-blue-50 shadow-[0_8px_22px_rgba(0,80,255,0.12)]' : 'border-blue-100 bg-slate-50 hover:bg-blue-50 active:bg-blue-100'}`}
+                      className={`rounded-2xl border p-2 text-center ${pressClass} ${expanded ? 'border-[#0069E0] bg-blue-50 shadow-[0_8px_22px_rgba(0,105,224,0.12)]' : 'border-blue-100 bg-slate-50 hover:bg-blue-50 active:bg-blue-100'}`}
                     >
                       <div className="text-xs font-black text-slate-500">{day.short}</div>
-                      <div className="mt-2 text-lg font-black text-[#0050ff]">{day.count}</div>
+                      <div className="mt-2 text-lg font-black text-[#0069E0]">{day.count}</div>
                       <div className="text-[10px] font-bold text-slate-400">из {state.users.length}</div>
                       <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-blue-100">
-                        <div className="h-full rounded-full bg-[#0050ff]" style={{ width: `${Math.round(ratio * 100)}%` }} />
+                        <div className="h-full rounded-full bg-[#0069E0]" style={{ width: `${Math.round(ratio * 100)}%` }} />
                       </div>
                     </button>
                   );
@@ -953,9 +954,9 @@ export default function MiniApp({
                         <div key={user.id} className="flex items-center justify-between gap-3 rounded-xl bg-white px-3 py-2 text-sm">
                           <div>
                             <div className="font-black">{user.realName}</div>
-                            <a href={telegramLink(user.username)} target="_blank" rel="noreferrer" className="text-xs font-bold text-[#0050ff]">{user.username}</a>
+                            <a href={telegramLink(user.username)} target="_blank" rel="noreferrer" className="text-xs font-bold text-[#0069E0]">{user.username}</a>
                           </div>
-                          <div className="text-right font-black text-[#0050ff]">{formatHours(user.daySlots)}</div>
+                          <div className="text-right font-black text-[#0069E0]">{formatHours(user.daySlots)}</div>
                         </div>
                       ))
                     )}
@@ -974,7 +975,7 @@ export default function MiniApp({
                       ) : (
                         availabilityByDay[expandedAvailabilityDay].unavailableUsers.map((user) => (
                           <a key={user.id} href={telegramLink(user.username)} target="_blank" rel="noreferrer" className="rounded-xl bg-white px-3 py-2 text-sm font-bold text-slate-700">
-                            {user.realName} <span className="text-[#0050ff]">{user.username}</span>
+                            {user.realName} <span className="text-[#0069E0]">{user.username}</span>
                           </a>
                         ))
                       )}
@@ -992,7 +993,7 @@ export default function MiniApp({
                     <p className="text-xs text-slate-500">Кто и когда свободен на неделе</p>
                   </div>
                   <button onClick={downloadAvailabilityCsv} className={miniButtonClass}>
-                    <Download className="h-4 w-4" />
+                    <DownloadSimple className="h-4 w-4" />
                     Скачать
                   </button>
                 </div>
@@ -1011,14 +1012,14 @@ export default function MiniApp({
                         <tr key={user.id} className="border-t border-slate-100">
                           <td className="sticky left-0 z-10 bg-white px-3 py-2">
                             <div className="font-black">{user.realName}</div>
-                            <div className="font-bold text-[#0050ff]">{user.username}</div>
+                            <div className="font-bold text-[#0069E0]">{user.username}</div>
                           </td>
                           {dayLabels.map((_, dayIndex) => {
                             const text = formatHours(alignedSlots(state.availabilities[user.id])?.[dayIndex] || []);
                             const filled = text !== '—';
                             return (
                               <td key={dayIndex} className="px-2 py-2 align-top">
-                                <div className={`min-h-10 rounded-xl px-2 py-1.5 text-center font-bold ${filled ? 'bg-blue-50 text-[#0050ff]' : 'bg-slate-50 text-slate-300'}`}>
+                                <div className={`min-h-10 rounded-xl px-2 py-1.5 text-center font-bold ${filled ? 'bg-blue-50 text-[#0069E0]' : 'bg-slate-50 text-[#718293]'}`}>
                                   {text}
                                 </div>
                               </td>
@@ -1043,7 +1044,7 @@ export default function MiniApp({
                   <h2 className="font-black">Лучшие слоты</h2>
                   <p className="text-xs text-slate-500">По максимуму свободных людей</p>
                 </div>
-                <button onClick={findSuggestions} disabled={suggesting} className={`rounded-full bg-[#0050ff] px-5 py-2.5 text-xs font-black text-white shadow-[0_10px_24px_rgba(0,80,255,0.28)] hover:bg-[#0a5cff] active:bg-[#0045d8] ${pressClass} disabled:opacity-70`}>
+                <button onClick={findSuggestions} disabled={suggesting} className={`rounded-full bg-[#0069E0] px-5 py-2.5 text-xs font-black text-white shadow-[0_10px_24px_rgba(0,105,224,0.28)] hover:bg-[#1677E8] active:bg-[#0058BD] ${pressClass} disabled:opacity-70`}>
                   {suggesting ? 'Считаю...' : 'Найти'}
                 </button>
               </div>
@@ -1057,7 +1058,7 @@ export default function MiniApp({
                         <div className="font-black">
                           {index + 1}. {dayLabels[suggestion.dayIndex]?.full}, {suggestion.hour}:00-{suggestion.endHour || suggestion.hour + (suggestion.duration || 1)}:00
                         </div>
-                        <div className="rounded-full bg-white px-2.5 py-1 text-xs font-black text-[#0050ff]">
+                        <div className="rounded-full bg-white px-2.5 py-1 text-xs font-black text-[#0069E0]">
                           {suggestion.count}/{suggestion.total}
                         </div>
                       </div>
@@ -1071,7 +1072,7 @@ export default function MiniApp({
                         ) : (
                           suggestion.missingUsers.map((user, userIndex) => (
                             <React.Fragment key={user.id}>
-                              <a href={telegramLink(user.username)} target="_blank" rel="noreferrer" className="font-bold text-[#0050ff] underline decoration-blue-200" onClick={(event) => event.stopPropagation()}>
+                              <a href={telegramLink(user.username)} target="_blank" rel="noreferrer" className="font-bold text-[#0069E0] underline decoration-blue-200" onClick={(event) => event.stopPropagation()}>
                                 {user.realName}
                               </a>
                               {userIndex < suggestion.missingUsers.length - 1 ? ', ' : ''}
@@ -1173,7 +1174,7 @@ export default function MiniApp({
                           <h3 className="font-black">{meeting.title}</h3>
                           <p className="mt-1 text-sm text-slate-500">{meeting.topic || 'Нажми, чтобы посмотреть детали'}</p>
                         </div>
-                        <div className="rounded-2xl bg-blue-50 px-3 py-2 text-right text-xs font-black text-[#0050ff]">
+                        <div className="rounded-2xl bg-blue-50 px-3 py-2 text-right text-xs font-black text-[#0069E0]">
                           {weekdayShortByDate(meeting.date)}
                           <br />
                           {formatDateShort(meeting.date)}
@@ -1195,11 +1196,11 @@ export default function MiniApp({
                           {canManage && (
                             <div className="flex gap-2 pt-2">
                               <button onClick={() => startMeetingEdit(meeting)} className={miniButtonClass}>
-                                <Pencil className="h-4 w-4" />
+                                <PencilSimple className="h-4 w-4" />
                                 Редактировать
                               </button>
                               <button onClick={() => deleteMeeting(meeting.id)} className={`${miniButtonClass} border-rose-100 bg-rose-50 text-rose-600 hover:bg-rose-100 active:bg-rose-200`}>
-                                <Trash2 className="h-4 w-4" />
+                                <Trash className="h-4 w-4" />
                                 Удалить
                               </button>
                             </div>
@@ -1291,12 +1292,12 @@ export default function MiniApp({
                 </div>
                 <div className="flex flex-wrap gap-2">
                   <a href="/api/task/export" className={miniButtonClass}>
-                    <Download className="h-4 w-4" />
+                    <DownloadSimple className="h-4 w-4" />
                     Excel
                   </a>
                   {isAdmin && (
                     <button onClick={clearTaskLog} className={`${miniButtonClass} border-rose-100 bg-rose-50 text-rose-600 hover:bg-rose-100 active:bg-rose-200`}>
-                      <Trash2 className="h-4 w-4" />
+                      <Trash className="h-4 w-4" />
                       Удалить лог
                     </button>
                   )}
@@ -1324,7 +1325,7 @@ export default function MiniApp({
             {isAdmin && showAddUserForm && (
               <form onSubmit={addUser} className="space-y-3 rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
                 <h2 className="flex items-center gap-2 font-black">
-                  <UserPlus className="h-4 w-4 text-[#0050ff]" />
+                  <UserPlus className="h-4 w-4 text-[#0069E0]" />
                   Добавить человека
                 </h2>
                 <Field label="Имя">
@@ -1385,13 +1386,13 @@ export default function MiniApp({
                       <div className="flex items-center justify-between gap-3">
                         <div>
                           <div className="font-black">{user.realName}</div>
-                          <a href={telegramLink(user.username)} target="_blank" rel="noreferrer" className="text-sm font-bold text-[#0050ff]" onClick={(event) => event.stopPropagation()}>
+                          <a href={telegramLink(user.username)} target="_blank" rel="noreferrer" className="text-sm font-bold text-[#0069E0]" onClick={(event) => event.stopPropagation()}>
                             {user.username}
                           </a>
                         </div>
                         <div className="text-right">
-                          <div className="rounded-full bg-blue-50 px-3 py-1 text-xs font-black text-[#0050ff]">{user.primaryCompetency || 'Блок не выбран'}</div>
-                          <div className={`mt-1 rounded-full px-2.5 py-1 text-[10px] font-black ${user.registered ? 'bg-emerald-50 text-emerald-600' : 'bg-slate-100 text-slate-400'}`}>
+                          <div className="rounded-full bg-blue-50 px-3 py-1 text-xs font-black text-[#0069E0]">{user.primaryCompetency || 'Блок не выбран'}</div>
+                          <div className={`mt-1 rounded-full px-2.5 py-1 text-[10px] font-black ${user.registered ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-600'}`}>
                             {user.registered ? 'В боте' : 'Не в боте'}
                           </div>
                           <div className="mt-1 text-xs text-slate-500">{formatDateShort(user.birthday || '01.01')}</div>
@@ -1411,12 +1412,12 @@ export default function MiniApp({
                               {(isAdmin || user.id === currentUser.id) && (
                                 <div className="flex gap-2 pt-2">
                                   <button onClick={() => startUserEdit(user)} className={miniButtonClass}>
-                                    <Pencil className="h-4 w-4" />
+                                    <PencilSimple className="h-4 w-4" />
                                     Редактировать
                                   </button>
                                   {isAdmin && (
                                     <button onClick={() => deleteUser(user.id)} disabled={user.id === currentUser.id} className={`${miniButtonClass} ml-auto border-rose-100 bg-rose-50 text-rose-600 disabled:opacity-40`}>
-                                      <Trash2 className="h-4 w-4" />
+                                      <Trash className="h-4 w-4" />
                                       Удалить
                                     </button>
                                   )}
@@ -1517,9 +1518,9 @@ export default function MiniApp({
                     {facultyCompetencies.length === 0 ? (
                       <span className="text-sm font-bold text-slate-400">Пока нет компетенций</span>
                     ) : facultyCompetencies.map((name) => (
-                      <span key={name} className="inline-flex items-center gap-2 rounded-full bg-blue-50 px-3 py-1.5 text-sm font-black text-[#0050ff]">
+                      <span key={name} className="inline-flex items-center gap-2 rounded-full bg-blue-50 px-3 py-1.5 text-sm font-black text-[#0069E0]">
                         {name}
-                        <button type="button" onClick={() => deleteFacultyCompetency(name)} className="rounded-full p-0.5 text-[#0050ff] transition hover:bg-blue-100 active:scale-95">
+                        <button type="button" onClick={() => deleteFacultyCompetency(name)} className="rounded-full p-0.5 text-[#0069E0] transition hover:bg-blue-100 active:scale-95">
                           <X className="h-3.5 w-3.5" />
                         </button>
                       </span>
@@ -1587,19 +1588,19 @@ export default function MiniApp({
                                       <div className="flex items-start justify-between gap-3">
                                         <div>
                                           <div className="font-black">{user.realName}</div>
-                                          <a href={telegramLink(user.username)} target="_blank" rel="noreferrer" className="font-bold text-[#0050ff]">{user.username}</a>
-                                          <div className={`mt-1 inline-flex rounded-full px-2.5 py-1 text-[10px] font-black ${user.registered ? 'bg-emerald-50 text-emerald-600' : 'bg-slate-100 text-slate-400'}`}>
+                                          <a href={telegramLink(user.username)} target="_blank" rel="noreferrer" className="font-bold text-[#0069E0]">{user.username}</a>
+                                          <div className={`mt-1 inline-flex rounded-full px-2.5 py-1 text-[10px] font-black ${user.registered ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-600'}`}>
                                             {user.registered ? 'Зарегистрирован' : 'Не зарегистрирован'}
                                           </div>
                                         </div>
                                         <div className="flex flex-wrap justify-end gap-2">
-                                          <span className="rounded-full bg-blue-50 px-2.5 py-1 text-xs font-black text-[#0050ff]">{user.role === 'faculty_helper' ? user.competencies?.[0] || 'Роль не выбрана' : 'Ответственный'}</span>
+                                          <span className="rounded-full bg-blue-50 px-2.5 py-1 text-xs font-black text-[#0069E0]">{user.role === 'faculty_helper' ? user.competencies?.[0] || 'Роль не выбрана' : 'Ответственный'}</span>
                                           <button onClick={() => startFacultyUserEdit(user)} className={miniButtonClass}>
-                                            <Pencil className="h-4 w-4" />
+                                            <PencilSimple className="h-4 w-4" />
                                             Редактировать
                                           </button>
                                           <button onClick={() => deleteFacultyUser(user.id)} className={`${miniButtonClass} border-rose-100 bg-rose-50 text-rose-600`}>
-                                            <Trash2 className="h-4 w-4" />
+                                            <Trash className="h-4 w-4" />
                                           </button>
                                         </div>
                                       </div>
@@ -1675,7 +1676,7 @@ export default function MiniApp({
                         {facultyCompetencies.map((name) => <option key={name} value={name}>{name}</option>)}
                       </select>
                       {facultyTaskUsers.map((user) => (
-                        <label key={user.id} className={`flex items-center justify-between rounded-xl px-3 py-2 text-sm font-semibold ${facultyTaskDraft.competency && facultyTaskMatchedUsers.some((item) => item.id === user.id) ? 'bg-blue-50 text-[#0050ff]' : 'bg-white'} ${facultyTaskErrors.assignedTo ? 'ring-2 ring-rose-200' : ''}`}>
+                        <label key={user.id} className={`flex items-center justify-between rounded-xl px-3 py-2 text-sm font-semibold ${facultyTaskDraft.competency && facultyTaskMatchedUsers.some((item) => item.id === user.id) ? 'bg-blue-50 text-[#0069E0]' : 'bg-white'} ${facultyTaskErrors.assignedTo ? 'ring-2 ring-rose-200' : ''}`}>
                           <span>
                             {user.realName}
                             {user.competencies?.length ? <span className="ml-2 text-xs text-slate-400">{user.competencies.join(', ')}</span> : null}
@@ -1724,7 +1725,7 @@ export default function MiniApp({
                               <option value="before_deadline">За N до дедлайна</option>
                               <option value="repeat">Каждые N</option>
                             </select>
-                            <label className="flex items-center gap-2 rounded-2xl border border-blue-100 bg-white px-3 py-2 text-sm font-black text-slate-500 shadow-sm transition focus-within:border-[#0050ff] focus-within:bg-white">
+                            <label className="flex items-center gap-2 rounded-2xl border border-blue-100 bg-white px-3 py-2 text-sm font-black text-slate-500 shadow-sm transition focus-within:border-[#0069E0] focus-within:bg-white">
                               <span>N =</span>
                               <input value={reminder.value ?? ''} onChange={(e) => setFacultyTaskDraft((prev) => ({ ...prev, reminders: prev.reminders.map((item, i) => i === index ? { ...item, value: e.target.value === '' ? '' : Number(e.target.value) } : item) }))} className="min-w-0 flex-1 bg-transparent text-slate-950 outline-none" inputMode="numeric" />
                             </label>
@@ -1800,7 +1801,7 @@ export default function MiniApp({
                                   }}
                                   className={miniButtonClass}
                                 >
-                                  <Pencil className="h-4 w-4" />
+                                  <PencilSimple className="h-4 w-4" />
                                   Редактировать
                                 </button>
                               )}
@@ -1816,7 +1817,7 @@ export default function MiniApp({
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <h2 className="font-black">Бэклог задач факультетов</h2>
                     <a href="/api/tasks/export" target="_blank" rel="noreferrer" className={miniButtonClass}>
-                      <Download className="h-4 w-4" />
+                      <DownloadSimple className="h-4 w-4" />
                       Excel
                     </a>
                   </div>
@@ -1852,11 +1853,11 @@ export default function MiniApp({
         )}
       </main>
 
-      <nav className="fixed inset-x-0 bottom-0 z-40 border-t border-blue-100 bg-white/95 px-1.5 pb-[calc(env(safe-area-inset-bottom)+6px)] pt-1.5 shadow-[0_-12px_30px_rgba(0,80,255,0.08)] backdrop-blur">
+      <nav className="fixed inset-x-0 bottom-0 z-40 border-t border-blue-100 bg-white/95 px-1.5 pb-[calc(env(safe-area-inset-bottom)+6px)] pt-1.5 shadow-[0_-12px_30px_rgba(0,105,224,0.08)] backdrop-blur">
         <div className="mx-auto grid max-w-3xl grid-cols-5 gap-1">
-          <NavButton icon={<CalendarDays />} label="Слоты" active={activeTab === 'slots'} onClick={() => setActiveTab('slots')} />
-          <NavButton icon={<Users />} label="Встречи" active={activeTab === 'meetings'} onClick={() => setActiveTab('meetings')} />
-          <NavButton icon={<BriefcaseBusiness />} label="Задачи" active={activeTab === 'tasks'} onClick={() => setActiveTab('tasks')} />
+          <NavButton icon={<CalendarDots />} label="Слоты" active={activeTab === 'slots'} onClick={() => setActiveTab('slots')} />
+          <NavButton icon={<UsersThree />} label="Встречи" active={activeTab === 'meetings'} onClick={() => setActiveTab('meetings')} />
+          <NavButton icon={<Briefcase />} label="Задачи" active={activeTab === 'tasks'} onClick={() => setActiveTab('tasks')} />
           <NavButton icon={<Shield />} label="Команда" active={activeTab === 'team'} onClick={() => setActiveTab('team')} />
           <NavButton icon={<GraduationCap />} label="Фак-ти" active={activeTab === 'faculties'} onClick={() => setActiveTab('faculties')} />
         </div>
@@ -1865,13 +1866,13 @@ export default function MiniApp({
   );
 }
 
-const pressClass = 'transition duration-150 hover:brightness-105 active:scale-[0.97] active:brightness-90 active:rounded-2xl';
-const inputClass = 'w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-3 text-sm font-semibold outline-none transition focus:border-[#0050ff] focus:bg-white';
-const selectClass = 'w-full appearance-none rounded-2xl border border-blue-100 bg-white px-3 py-3 pr-10 text-sm font-black text-slate-950 shadow-sm outline-none transition hover:border-[#0050ff]/40 hover:bg-blue-50/40 focus:border-[#0050ff] focus:bg-white focus:shadow-[0_0_0_4px_rgba(0,80,255,0.10)] [background-image:linear-gradient(45deg,transparent_50%,#0050ff_50%),linear-gradient(135deg,#0050ff_50%,transparent_50%)] [background-position:calc(100%-18px)_50%,calc(100%-13px)_50%] [background-repeat:no-repeat] [background-size:6px_6px,6px_6px]';
-const primaryButtonClass = `flex w-full items-center justify-center gap-2 rounded-3xl bg-[#0050ff] px-5 py-3 text-sm font-black text-white shadow-[0_12px_28px_rgba(0,80,255,0.24)] hover:bg-[#0a5cff] active:bg-[#0045d8] ${pressClass}`;
-const primaryCompactButtonClass = `flex items-center justify-center gap-2 rounded-full bg-[#0050ff] px-4 py-2 text-xs font-black text-white shadow-[0_10px_24px_rgba(0,80,255,0.22)] hover:bg-[#0a5cff] active:bg-[#0045d8] ${pressClass}`;
-const secondaryButtonClass = `flex items-center justify-center gap-2 rounded-full border border-blue-100 bg-blue-50 px-3 py-2 text-xs font-black text-[#0050ff] hover:bg-blue-100 active:bg-blue-200 ${pressClass}`;
-const miniButtonClass = `flex items-center justify-center gap-1 rounded-full border border-blue-100 bg-blue-50 px-3 py-2 text-xs font-black text-[#0050ff] hover:bg-blue-100 active:bg-blue-200 ${pressClass}`;
+const pressClass = 'transition duration-150 hover:brightness-105 active:scale-[0.98] active:brightness-90';
+const inputClass = 'w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-3 text-sm font-semibold outline-none transition focus:border-[#0069E0] focus:bg-white';
+const selectClass = 'w-full appearance-none rounded-2xl border border-blue-100 bg-white px-3 py-3 pr-10 text-sm font-black text-slate-950 shadow-sm outline-none transition hover:border-[#0069E0]/40 hover:bg-slate-50 focus:border-[#0069E0] focus:bg-white focus:shadow-[0_0_0_4px_rgba(0,105,224,0.10)] [background-image:linear-gradient(45deg,transparent_50%,#0069E0_50%),linear-gradient(135deg,#0069E0_50%,transparent_50%)] [background-position:calc(100%-18px)_50%,calc(100%-13px)_50%] [background-repeat:no-repeat] [background-size:6px_6px,6px_6px]';
+const primaryButtonClass = `flex w-full items-center justify-center gap-2 rounded-3xl bg-[#0069E0] px-5 py-3 text-sm font-black text-white shadow-[0_12px_28px_rgba(0,105,224,0.24)] hover:bg-[#1677E8] active:bg-[#0058BD] ${pressClass}`;
+const primaryCompactButtonClass = `flex items-center justify-center gap-2 rounded-full bg-[#0069E0] px-4 py-2 text-xs font-black text-white shadow-[0_10px_24px_rgba(0,105,224,0.22)] hover:bg-[#1677E8] active:bg-[#0058BD] ${pressClass}`;
+const secondaryButtonClass = `flex items-center justify-center gap-2 rounded-full border border-blue-100 bg-blue-50 px-3 py-2 text-xs font-black text-[#0069E0] hover:bg-blue-100 active:bg-blue-200 ${pressClass}`;
+const miniButtonClass = `flex items-center justify-center gap-1 rounded-full border border-blue-100 bg-blue-50 px-3 py-2 text-xs font-black text-[#0069E0] hover:bg-blue-100 active:bg-blue-200 ${pressClass}`;
 const iconButtonClass = `flex items-center justify-center rounded-full border border-white/25 bg-white/15 text-white backdrop-blur hover:bg-white/25 active:bg-white/30 ${pressClass}`;
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
@@ -1905,8 +1906,8 @@ function DatePickerField({
         onChange={(event) => onChange(inputDateToShortDate(event.target.value, withYear))}
         className={`${inputClass} cursor-pointer pr-3 ${error ? 'border-rose-300 bg-rose-50 focus:border-rose-500' : ''}`}
       />
-      <div className={`mt-1 flex items-center gap-1.5 text-[11px] font-bold ${value ? 'text-[#0050ff]' : 'text-slate-400'}`}>
-        <CalendarDays className="h-3.5 w-3.5" />
+      <div className={`mt-1 flex items-center gap-1.5 text-[11px] font-bold ${value ? 'text-[#0069E0]' : 'text-slate-400'}`}>
+        <CalendarDots className="h-3.5 w-3.5" />
         {value || placeholder}
       </div>
     </div>
@@ -1919,8 +1920,8 @@ function RequiredHint({ text = 'Обязательное поле' }: { text?: s
 
 function NavButton({ icon, label, active, onClick }: { icon: React.ReactElement; label: string; active: boolean; onClick: () => void }) {
   return (
-    <button onClick={onClick} className={`flex h-12 min-w-0 flex-col items-center justify-center gap-0.5 rounded-2xl px-0.5 text-[9px] font-black leading-tight sm:h-14 sm:text-[10px] ${pressClass} ${active ? 'bg-[#0050ff] text-white shadow-[0_10px_24px_rgba(0,80,255,0.20)] hover:bg-[#0a5cff] active:bg-[#0045d8]' : 'text-slate-500 hover:bg-blue-50 active:bg-blue-100'}`}>
-      {React.cloneElement(icon, { className: 'h-4 w-4 sm:h-4 sm:w-4' })}
+    <button onClick={onClick} aria-current={active ? 'page' : undefined} className={`flex h-12 min-w-0 flex-col items-center justify-center gap-0.5 rounded-2xl px-0.5 text-[9px] font-black leading-tight sm:h-14 sm:text-[10px] ${pressClass} ${active ? 'bg-[#0069E0] text-white shadow-[0_10px_24px_rgba(0,105,224,0.20)] hover:bg-[#1677E8] active:bg-[#0058BD]' : 'text-slate-500 hover:bg-slate-100 active:bg-blue-100'}`}>
+      {React.cloneElement(icon, { className: 'h-5 w-5', weight: active ? 'fill' : 'regular' })}
       <span className="truncate">{label}</span>
     </button>
   );
@@ -1930,7 +1931,7 @@ function Segmented({ value, onChange, options }: { value: string; onChange: (val
   return (
     <div className={`grid gap-2 rounded-3xl bg-slate-100 p-1 ${options.length === 3 ? 'grid-cols-1 sm:grid-cols-3' : 'grid-cols-2'}`}>
       {options.map(([key, label]) => (
-        <button key={key} type="button" onClick={() => onChange(key)} className={`rounded-2xl px-3 py-2 text-sm font-black ${pressClass} ${value === key ? 'bg-white text-[#0050ff] shadow-sm hover:bg-white' : 'text-slate-500 hover:bg-white/70 active:bg-white'}`}>
+        <button key={key} type="button" onClick={() => onChange(key)} className={`rounded-2xl px-3 py-2 text-sm font-black ${pressClass} ${value === key ? 'bg-white text-[#0069E0] shadow-sm hover:bg-white' : 'text-slate-500 hover:bg-white/70 active:bg-white'}`}>
           {label}
         </button>
       ))}
@@ -1976,20 +1977,20 @@ function TaskList({
                 <p className="mt-1 text-sm text-slate-500">{task.description}</p>
               </div>
               {task.status !== 'completed' && (
-                <button onClick={(event) => { event.stopPropagation(); onAction(task.id); }} className={`shrink-0 rounded-full bg-[#0050ff] px-3 py-2 text-xs font-black text-white hover:bg-[#0a5cff] active:bg-[#0045d8] ${pressClass}`}>
+                <button onClick={(event) => { event.stopPropagation(); onAction(task.id); }} className={`shrink-0 rounded-full bg-[#0069E0] px-3 py-2 text-xs font-black text-white hover:bg-[#1677E8] active:bg-[#0058BD] ${pressClass}`}>
                   {actionLabel}
                 </button>
               )}
             </div>
             <div className="mt-3 flex flex-wrap gap-2 text-xs font-bold text-slate-500">
-              <span className="rounded-full bg-blue-50 px-2.5 py-1 text-[#0050ff]">
+              <span className="rounded-full bg-blue-50 px-2.5 py-1 text-[#0069E0]">
                 {task.competency || 'Без блока'}
               </span>
               <span className="flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-1">
                 <Clock className="h-3 w-3" />
                 {formatDateShort(task.deadline)}
               </span>
-              <span className="rounded-full bg-blue-50 px-2.5 py-1 text-[#0050ff]">
+              <span className="rounded-full bg-blue-50 px-2.5 py-1 text-[#0069E0]">
                 {task.workload === 'high' ? 'Высокая' : task.workload === 'medium' ? 'Средняя' : 'Низкая'}
               </span>
               {creator && <span className="rounded-full bg-slate-100 px-2.5 py-1">Автор: {creator.realName}</span>}
@@ -2038,7 +2039,7 @@ function TaskLogView({ tasksByCompetency, users }: { tasksByCompetency: Record<s
         <div key={blockName} className="rounded-2xl border border-slate-100 bg-slate-50 p-3">
           <div className="mb-3 flex items-center justify-between gap-2">
             <h3 className="font-black">{blockName}</h3>
-            <span className="rounded-full bg-white px-2.5 py-1 text-xs font-black text-[#0050ff]">
+            <span className="rounded-full bg-white px-2.5 py-1 text-xs font-black text-[#0069E0]">
               {tasksByCompetency[blockName].length}
             </span>
           </div>
@@ -2059,7 +2060,7 @@ function TaskLogView({ tasksByCompetency, users }: { tasksByCompetency: Record<s
                         <div className="font-black">{task.title}</div>
                         <div className="mt-1 text-xs text-slate-500">{task.description}</div>
                       </div>
-                      <span className="shrink-0 rounded-full bg-blue-50 px-2.5 py-1 text-xs font-black text-[#0050ff]">
+                      <span className="shrink-0 rounded-full bg-blue-50 px-2.5 py-1 text-xs font-black text-[#0069E0]">
                         {task.status === 'completed' ? 'Готово' : task.status === 'assigned' ? 'В работе' : 'Открытая'}
                       </span>
                     </div>
@@ -2086,7 +2087,7 @@ function InfoRow({ label, value, href }: { label: string; value: string; href?: 
     <div className="flex items-center justify-between gap-4">
       <span className="text-slate-400">{label}</span>
       {href ? (
-        <a href={href} target="_blank" rel="noreferrer" className="font-bold text-[#0050ff]">{value}</a>
+        <a href={href} target="_blank" rel="noreferrer" className="font-bold text-[#0069E0]">{value}</a>
       ) : (
         <span className="font-bold text-slate-700">{value}</span>
       )}
@@ -2097,14 +2098,3 @@ function InfoRow({ label, value, href }: { label: string; value: string; href?: 
 function EmptyState({ text }: { text: string }) {
   return <div className="rounded-3xl border border-dashed border-blue-100 bg-white/70 p-5 text-center text-sm font-bold text-slate-400">{text}</div>;
 }
-
-function WaveMark() {
-  return (
-    <svg className="h-36 w-full" viewBox="0 0 430 140" fill="none" aria-hidden="true" preserveAspectRatio="none">
-      {[0, 10, 20, 30, 40, 50, 60].map((offset) => (
-        <path key={offset} d={`M0 ${20 + offset} C 65 ${-12 + offset}, 112 ${56 + offset}, 178 ${26 + offset} C 238 ${-2 + offset}, 280 ${22 + offset}, 330 ${36 + offset} C 370 ${48 + offset}, 395 ${28 + offset}, 430 ${18 + offset}`} stroke="currentColor" strokeWidth="2" opacity="0.75" />
-      ))}
-    </svg>
-  );
-}
-

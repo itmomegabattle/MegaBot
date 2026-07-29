@@ -5,14 +5,9 @@ import express from 'express';
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
-import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
 import { ProxyAgent } from 'undici';
 import { SimulationState, User, Availability, Meeting, Task, BotMessage, Faculty, TaskReminder } from './src/types.js';
-
-// Setup __dirname for ES modules
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
 const telegramProxyAgent = proxyUrl ? new ProxyAgent(proxyUrl) : null;
@@ -387,6 +382,14 @@ function saveDatabase(state: SimulationState) {
 async function startServer() {
   const app = express();
   app.use(express.json());
+
+  app.get('/api/health', (_req, res) => {
+    res.json({
+      ok: true,
+      service: 'megabot',
+      uptimeSeconds: Math.floor(process.uptime()),
+    });
+  });
   const chatSessions = new Map<string, {
     flow: string;
     meetingKind?: 'general' | 'competency';
