@@ -199,7 +199,13 @@ export default function MiniApp({
   const [showFullCalendar, setShowFullCalendar] = useState(false);
   const [expandedAvailabilityDay, setExpandedAvailabilityDay] = useState<number | null>(null);
   const [expandedUnavailableDay, setExpandedUnavailableDay] = useState<number | null>(null);
-  const [darkTheme, setDarkTheme] = useState(false);
+  const [darkTheme, setDarkTheme] = useState(() => {
+    const savedTheme = window.localStorage.getItem('megabattle-theme');
+    if (savedTheme) return savedTheme === 'dark';
+    const telegramTheme = (window as any).Telegram?.WebApp?.colorScheme;
+    if (telegramTheme) return telegramTheme === 'dark';
+    return window.matchMedia('(prefers-color-scheme: dark)').matches;
+  });
 
   const [newUserRealName, setNewUserRealName] = useState('');
   const [newUserUsername, setNewUserUsername] = useState('');
@@ -778,13 +784,13 @@ export default function MiniApp({
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark-theme', darkTheme);
+    window.localStorage.setItem('megabattle-theme', darkTheme ? 'dark' : 'light');
     return () => document.documentElement.classList.remove('dark-theme');
   }, [darkTheme]);
 
   return (
     <div className={`mega-shell min-h-screen text-slate-950 ${darkTheme ? 'bg-[#07111f]' : 'bg-[#eef3fb]'}`}>
       <header className="mega-header sticky top-0 z-30 overflow-hidden text-white">
-        <div className="mega-header-rule" />
         <div className="relative px-4 pb-3 pt-[calc(env(safe-area-inset-top)+10px)]">
           <div className="flex items-center justify-between gap-3">
             <img className="mega-logo" src="/brand/megabattle-logo.svg" alt="ITMO MegaBattle" />
@@ -804,7 +810,7 @@ export default function MiniApp({
         </div>
       </header>
 
-      <main className="mx-auto flex w-full max-w-3xl flex-col gap-4 px-4 pb-24 pt-4">
+      <main className="mega-main mx-auto flex w-full max-w-3xl flex-col gap-4 px-4 pb-24 pt-4">
         {activeTab === 'slots' && (
           <section className="space-y-4">
             <div className={`rounded-3xl border p-4 shadow-sm ${hasUnsavedSlots ? 'border-amber-200 bg-amber-50' : weekSaved ? 'border-emerald-200 bg-emerald-50' : 'border-blue-100 bg-white'}`}>
@@ -883,7 +889,7 @@ export default function MiniApp({
                                 className={`h-11 rounded-2xl border text-sm font-black ${pressClass} ${
                                   active
                                     ? 'border-[#0069E0] bg-[#0069E0] text-white shadow-[0_8px_20px_rgba(0,105,224,0.2)] hover:bg-[#1677E8] active:bg-[#0058BD]'
-                                    : 'border-slate-200 bg-slate-50 text-slate-600 hover:bg-slate-100 active:bg-blue-100'
+                                    : 'border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100 active:bg-slate-100'
                                 }`}
                               >
                                 {hour}:00
@@ -1392,7 +1398,7 @@ export default function MiniApp({
                         </div>
                         <div className="text-right">
                           <div className="rounded-full bg-blue-50 px-3 py-1 text-xs font-black text-[#0069E0]">{user.primaryCompetency || 'Блок не выбран'}</div>
-                          <div className={`mt-1 rounded-full px-2.5 py-1 text-[10px] font-black ${user.registered ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-600'}`}>
+                          <div className={`mt-1 rounded-full px-2.5 py-1 text-[10px] font-black ${user.registered ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-700'}`}>
                             {user.registered ? 'В боте' : 'Не в боте'}
                           </div>
                           <div className="mt-1 text-xs text-slate-500">{formatDateShort(user.birthday || '01.01')}</div>
@@ -1589,7 +1595,7 @@ export default function MiniApp({
                                         <div>
                                           <div className="font-black">{user.realName}</div>
                                           <a href={telegramLink(user.username)} target="_blank" rel="noreferrer" className="font-bold text-[#0069E0]">{user.username}</a>
-                                          <div className={`mt-1 inline-flex rounded-full px-2.5 py-1 text-[10px] font-black ${user.registered ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-600'}`}>
+                                          <div className={`mt-1 inline-flex rounded-full px-2.5 py-1 text-[10px] font-black ${user.registered ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-700'}`}>
                                             {user.registered ? 'Зарегистрирован' : 'Не зарегистрирован'}
                                           </div>
                                         </div>
@@ -1853,13 +1859,13 @@ export default function MiniApp({
         )}
       </main>
 
-      <nav className="fixed inset-x-0 bottom-0 z-40 border-t border-blue-100 bg-white/95 px-1.5 pb-[calc(env(safe-area-inset-bottom)+6px)] pt-1.5 shadow-[0_-12px_30px_rgba(0,105,224,0.08)] backdrop-blur">
-        <div className="mx-auto grid max-w-3xl grid-cols-5 gap-1">
+      <nav className="mega-bottom-nav fixed inset-x-0 bottom-0 z-40 border border-blue-100 bg-white/95 p-1.5 shadow-[0_-12px_30px_rgba(0,105,224,0.08)] backdrop-blur">
+        <div className="mega-bottom-nav-inner mx-auto grid max-w-3xl grid-cols-5 gap-1">
           <NavButton icon={<CalendarDots />} label="Слоты" active={activeTab === 'slots'} onClick={() => setActiveTab('slots')} />
           <NavButton icon={<UsersThree />} label="Встречи" active={activeTab === 'meetings'} onClick={() => setActiveTab('meetings')} />
           <NavButton icon={<Briefcase />} label="Задачи" active={activeTab === 'tasks'} onClick={() => setActiveTab('tasks')} />
           <NavButton icon={<Shield />} label="Команда" active={activeTab === 'team'} onClick={() => setActiveTab('team')} />
-          <NavButton icon={<GraduationCap />} label="Фак-ти" active={activeTab === 'faculties'} onClick={() => setActiveTab('faculties')} />
+          <NavButton icon={<GraduationCap />} label="МФ" active={activeTab === 'faculties'} onClick={() => setActiveTab('faculties')} />
         </div>
       </nav>
     </div>
@@ -1920,7 +1926,7 @@ function RequiredHint({ text = 'Обязательное поле' }: { text?: s
 
 function NavButton({ icon, label, active, onClick }: { icon: React.ReactElement; label: string; active: boolean; onClick: () => void }) {
   return (
-    <button onClick={onClick} aria-current={active ? 'page' : undefined} className={`flex h-12 min-w-0 flex-col items-center justify-center gap-0.5 rounded-2xl px-0.5 text-[9px] font-black leading-tight sm:h-14 sm:text-[10px] ${pressClass} ${active ? 'bg-[#0069E0] text-white shadow-[0_10px_24px_rgba(0,105,224,0.20)] hover:bg-[#1677E8] active:bg-[#0058BD]' : 'text-slate-500 hover:bg-slate-100 active:bg-blue-100'}`}>
+    <button onClick={onClick} aria-current={active ? 'page' : undefined} className={`flex h-12 min-w-0 flex-col items-center justify-center gap-0.5 rounded-2xl px-0.5 text-xs font-black leading-tight sm:h-14 ${pressClass} ${active ? 'bg-[#0069E0] text-white shadow-[0_10px_24px_rgba(0,105,224,0.20)] hover:bg-[#1677E8] active:bg-[#0058BD]' : 'text-slate-500 hover:bg-slate-100 active:bg-slate-100'}`}>
       {React.cloneElement(icon, { className: 'h-5 w-5', weight: active ? 'fill' : 'regular' })}
       <span className="truncate">{label}</span>
     </button>

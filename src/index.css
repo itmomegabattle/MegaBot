@@ -23,6 +23,9 @@
   --mega-link: #0069e0;
   --mega-blue-hover: #1677e8;
   --mega-blue-active: #0058bd;
+  --mega-cyan: #2685bb;
+  --mega-violet: #60309c;
+  --mega-magenta: #9d005f;
   --mega-black: #000000;
   --mega-white: #ffffff;
   --mega-ink: #061222;
@@ -53,6 +56,7 @@ body,
 
 body {
   margin: 0;
+  overflow-x: hidden;
   background: var(--mega-canvas);
   color: var(--mega-ink);
   font-family: "Raleway", "Segoe UI", sans-serif;
@@ -133,8 +137,9 @@ textarea:focus-visible {
   position: relative;
   isolation: isolate;
   min-height: 100svh;
+  font-family: "Raleway", "Segoe UI", sans-serif;
   background:
-    linear-gradient(180deg, rgba(0, 105, 224, 0.07), transparent 190px),
+    linear-gradient(180deg, rgba(0, 105, 224, 0.09), transparent 220px),
     var(--mega-canvas);
   color: var(--mega-ink);
 }
@@ -142,31 +147,42 @@ textarea:focus-visible {
 .mega-shell::before {
   position: fixed;
   z-index: -1;
-  inset: 76px -42vw auto -24vw;
-  width: 152vw;
-  height: 42vh;
-  min-height: 300px;
+  inset: 72px 0 auto;
+  width: 100%;
+  height: 320px;
   content: "";
-  border-radius: 44% 56% 60% 40% / 24% 30% 70% 76%;
   background:
-    linear-gradient(180deg, transparent 0 12%, rgba(255, 255, 255, 0.48) 17%, rgba(0, 105, 224, 0.13) 25%, rgba(255, 255, 255, 0.18) 42%, transparent 73%),
-    repeating-linear-gradient(92deg, transparent 0 5.8%, rgba(255, 255, 255, 0.24) 6.6%, rgba(0, 105, 224, 0.05) 8%, transparent 10.5%);
-  opacity: 0.55;
-  transform: rotate(-5deg) scale(1.06);
+    radial-gradient(circle at 12% 24%, rgba(0, 105, 224, 0.65) 0 2px, transparent 3px),
+    radial-gradient(circle at 82% 18%, rgba(38, 133, 187, 0.68) 0 2px, transparent 3px),
+    radial-gradient(circle at 68% 54%, rgba(0, 105, 224, 0.44) 0 1.5px, transparent 2.5px),
+    repeating-radial-gradient(circle at 108% 4%, transparent 0 26px, rgba(0, 105, 224, 0.13) 27px 28px, transparent 29px 42px),
+    linear-gradient(180deg, rgba(0, 105, 224, 0.08), transparent 78%);
+  opacity: 0.82;
   pointer-events: none;
 }
 
 .mega-header {
   border-bottom: 1px solid rgba(255, 255, 255, 0.16);
-  background: var(--mega-black);
+  background:
+    radial-gradient(ellipse at 72% -110%, rgba(0, 105, 224, 0.9), transparent 58%),
+    linear-gradient(105deg, #05070a 0 66%, #07172a 100%);
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.24);
 }
 
-.mega-header-rule {
+.mega-header::before {
   position: absolute;
-  inset: auto 0 0;
-  height: 4px;
-  background: var(--mega-blue);
+  top: -26px;
+  right: 16%;
+  width: 84px;
+  height: 84px;
+  content: "";
+  background:
+    linear-gradient(90deg, transparent 49.3%, rgba(255, 255, 255, 0.34) 50%, transparent 50.7%),
+    linear-gradient(0deg, transparent 49.3%, rgba(255, 255, 255, 0.34) 50%, transparent 50.7%),
+    radial-gradient(circle, rgba(255, 255, 255, 0.9) 0 1px, transparent 2px);
+  opacity: 0.72;
+  transform: rotate(18deg);
+  pointer-events: none;
 }
 
 .mega-logo {
@@ -186,7 +202,7 @@ textarea:focus-visible {
 .mega-page-title {
   margin-top: 2px;
   font-family: "Druk Text Wide Cyr", "Arial Black", sans-serif;
-  font-size: clamp(17px, 4.8vw, 22px);
+  font-size: clamp(18px, 5.2vw, 24px);
   font-weight: 500;
   line-height: 1;
   letter-spacing: -0.025em;
@@ -194,7 +210,7 @@ textarea:focus-visible {
 }
 
 .mega-shell main {
-  padding-bottom: calc(env(safe-area-inset-bottom) + 92px);
+  padding-bottom: calc(env(safe-area-inset-bottom) + 112px);
 }
 
 .mega-shell section {
@@ -221,6 +237,7 @@ textarea:focus-visible {
 .mega-shell .space-y-3 > .bg-white,
 .mega-shell .space-y-4 > .bg-white {
   border-color: var(--mega-line);
+  background-image: linear-gradient(135deg, color-mix(in srgb, var(--mega-blue) 7%, transparent), transparent 34%);
   box-shadow: var(--mega-shadow);
 }
 
@@ -265,7 +282,9 @@ textarea:focus-visible {
   background-color: var(--mega-blue);
 }
 
-.mega-shell h2 {
+.mega-shell h1,
+.mega-shell h2,
+.mega-shell h3 {
   font-family: "Druk Text Wide Cyr", "Arial Black", sans-serif;
   font-weight: 500;
   line-height: 1.05;
@@ -281,6 +300,16 @@ textarea:focus-visible {
 
 .mega-shell p {
   text-wrap: pretty;
+}
+
+.mega-shell button,
+.mega-shell input,
+.mega-shell textarea,
+.mega-shell select,
+.mega-shell option,
+.mega-shell table,
+.mega-shell label {
+  font-family: "Raleway", "Segoe UI", sans-serif;
 }
 
 .mega-shell input,
@@ -326,17 +355,31 @@ textarea:focus-visible {
   filter: saturate(0.45);
 }
 
-.mega-shell nav {
+.mega-shell .mega-bottom-nav {
+  left: max(10px, env(safe-area-inset-left));
+  right: max(10px, env(safe-area-inset-right));
+  bottom: calc(env(safe-area-inset-bottom) + 8px);
+  width: auto;
+  border-radius: 20px;
   border-color: var(--mega-line);
   background: color-mix(in srgb, var(--mega-surface) 96%, transparent);
-  box-shadow: 0 -12px 32px rgba(6, 18, 34, 0.12);
+  box-shadow: 0 14px 34px rgba(6, 18, 34, 0.2);
+  overflow: hidden;
 }
 
-.mega-shell nav button {
+.mega-shell .mega-bottom-nav::before {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  content: "";
+  background: linear-gradient(180deg, var(--mega-cyan), var(--mega-blue), var(--mega-violet), var(--mega-magenta));
+}
+
+.mega-shell .mega-bottom-nav button {
   border: 1px solid transparent;
 }
 
-.mega-shell nav button:not(.bg-\[\#0069E0\]) {
+.mega-shell .mega-bottom-nav button:not(.bg-\[\#0069E0\]) {
   background: transparent;
 }
 
@@ -368,10 +411,10 @@ html.dark-theme {
   --mega-subtle: #8e9bab;
   --mega-line: rgba(255, 255, 255, 0.16);
   --mega-line-strong: rgba(255, 255, 255, 0.28);
-  --mega-canvas: #000000;
-  --mega-surface: #0d1117;
-  --mega-surface-soft: #101d2b;
-  --mega-control: #151b23;
+  --mega-canvas: #05070a;
+  --mega-surface: #10151c;
+  --mega-surface-soft: #10243a;
+  --mega-control: #181f29;
   --mega-shadow: 0 18px 42px rgba(0, 0, 0, 0.34);
 }
 
@@ -384,15 +427,18 @@ html.dark-theme .bg-\[\#f4f7ff\] {
 
 html.dark-theme .mega-shell {
   background:
-    linear-gradient(180deg, rgba(0, 105, 224, 0.16), transparent 210px),
+    linear-gradient(180deg, rgba(0, 105, 224, 0.2), transparent 240px),
     var(--mega-canvas);
 }
 
 html.dark-theme .mega-shell::before {
   background:
-    linear-gradient(180deg, transparent 0 12%, rgba(255, 255, 255, 0.08) 17%, rgba(0, 105, 224, 0.18) 25%, rgba(255, 255, 255, 0.025) 42%, transparent 73%),
-    repeating-linear-gradient(92deg, transparent 0 5.8%, rgba(255, 255, 255, 0.035) 6.6%, rgba(0, 105, 224, 0.07) 8%, transparent 10.5%);
-  opacity: 0.48;
+    radial-gradient(circle at 12% 24%, rgba(101, 170, 255, 0.9) 0 2px, transparent 3px),
+    radial-gradient(circle at 82% 18%, rgba(38, 133, 187, 0.95) 0 2px, transparent 3px),
+    radial-gradient(circle at 68% 54%, rgba(255, 255, 255, 0.46) 0 1px, transparent 2px),
+    repeating-radial-gradient(circle at 108% 4%, transparent 0 26px, rgba(38, 133, 187, 0.24) 27px 28px, transparent 29px 42px),
+    linear-gradient(180deg, rgba(0, 105, 224, 0.13), transparent 78%);
+  opacity: 0.88;
 }
 
 html.dark-theme .mega-shell .bg-white,
@@ -405,6 +451,63 @@ html.dark-theme .mega-shell input,
 html.dark-theme .mega-shell textarea,
 html.dark-theme .mega-shell select {
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+html.dark-theme .mega-shell .bg-amber-50,
+html.dark-theme .mega-shell .bg-amber-100 {
+  background-color: #2a1d08;
+}
+
+html.dark-theme .mega-shell .bg-emerald-50 {
+  background-color: #09251b;
+}
+
+html.dark-theme .mega-shell .bg-rose-50,
+html.dark-theme .mega-shell .bg-rose-100,
+html.dark-theme .mega-shell .bg-rose-200 {
+  background-color: #2d1119;
+}
+
+html.dark-theme .mega-shell .bg-blue-100,
+html.dark-theme .mega-shell .bg-blue-200 {
+  background-color: #173653;
+}
+
+html.dark-theme .mega-shell .border-amber-100,
+html.dark-theme .mega-shell .border-amber-200 {
+  border-color: rgba(251, 191, 36, 0.42);
+}
+
+html.dark-theme .mega-shell .border-emerald-200 {
+  border-color: rgba(52, 211, 153, 0.4);
+}
+
+html.dark-theme .mega-shell .border-rose-100,
+html.dark-theme .mega-shell .border-rose-300,
+html.dark-theme .mega-shell .border-rose-500 {
+  border-color: rgba(251, 113, 133, 0.46);
+}
+
+html.dark-theme .mega-shell .text-amber-700,
+html.dark-theme .mega-shell .text-amber-800,
+html.dark-theme .mega-shell .text-amber-900 {
+  color: #fcd34d;
+}
+
+html.dark-theme .mega-shell .text-emerald-600,
+html.dark-theme .mega-shell .text-emerald-700,
+html.dark-theme .mega-shell .text-emerald-800 {
+  color: #6ee7b7;
+}
+
+html.dark-theme .mega-shell .text-rose-500,
+html.dark-theme .mega-shell .text-rose-600 {
+  color: #fda4af;
+}
+
+html.dark-theme .mega-shell .mega-bottom-nav {
+  background: rgba(11, 16, 23, 0.96);
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.48);
 }
 
 @media (min-width: 640px) {
