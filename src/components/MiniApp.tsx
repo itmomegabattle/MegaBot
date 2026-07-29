@@ -365,7 +365,7 @@ export default function MiniApp({
   const profileUnavailableDays = new Set(alignedUnavailableDays(state.availabilities[currentUser.id]).filter((day) => day < 7));
   const profileSlotsCompleted = Array.from({ length: 7 }, (_, dayIndex) => (
     (profileAvailability[dayIndex] || []).length > 0 || profileUnavailableDays.has(dayIndex)
-  )).every(Boolean);
+  )).some(Boolean);
   const profileAge = ageFromBirthday(currentUser.birthday);
   const facultyTasks = state.tasks.filter((task) => task.facultyId);
   const visibleFacultyTasks = showAllFacultyTasks ? facultyTasks : facultyTasks.slice(0, 3);
@@ -1040,7 +1040,7 @@ export default function MiniApp({
               <div className="mt-4 space-y-2 text-sm text-slate-600">
                 <InfoRow label="Главный блок" value={currentUser.primaryCompetency || 'не выбран'} />
                 <InfoRow label="Другие блоки" value={(currentUser.competencies || []).filter((item) => item !== currentUser.primaryCompetency).join(', ') || '—'} />
-                <InfoRow label="Статус слотов" value={profileSlotsCompleted ? 'неделя заполнена' : 'нужно заполнить'} />
+                <InfoRow label="Статус слотов" value={profileSlotsCompleted ? 'неделя сохранена' : 'нужно отметить'} />
               </div>
             </div>
 
@@ -1077,7 +1077,7 @@ export default function MiniApp({
               </div>
               {!profileSlotsCompleted && (
                 <p className="mt-4 rounded-2xl bg-blue-50 px-3 py-2 text-sm font-bold text-[#005BC4]">
-                  Заполни всю неделю, чтобы статистика доступности была точнее.
+                  Отметь хотя бы один свободный слот и сохрани неделю.
                 </p>
               )}
             </div>

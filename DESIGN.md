@@ -252,6 +252,8 @@ The participant identity and the dedicated circular profile icon in the sticky h
 
 Each hour is a 44px compact control. Selected time uses Battle Blue, white text, and a blue ambient shadow; unselected time uses Control Gray and muted text. Day cards group the slots and expose whole-day selection without changing the schedule model.
 
+Saving at least one available slot submits the entire week. Days and hours without selected slots are treated as unavailable, so submission status, team summaries, and reminders must never require a participant to mark every day separately.
+
 ## Do's and Don'ts
 
 ### Do:
