@@ -9,3 +9,7 @@ database.json
 backups/
 .idea/
 assets/.aistudio/
+secrets/
+*.service-account.json
+*service-account-key*.json
+.codex_tmp/

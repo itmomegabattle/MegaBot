@@ -8,6 +8,16 @@ import crypto from 'crypto';
 import { createServer as createViteServer } from 'vite';
 import { ProxyAgent } from 'undici';
 import { SimulationState, User, Availability, Meeting, Task, BotMessage, Faculty, TaskReminder } from './src/types.js';
+import {
+  buildUserMappingReport,
+  currentMoscowWeekStart,
+  ensureTemplateSheet,
+  ensureManagedWeekSheets,
+  exportAvailabilityToSheet,
+  googleSheetsConfigFromEnv,
+  importAvailabilitiesFromSheet,
+  verifySheetsWebhook,
+} from './src/googleSheetsSync.js';
 
 const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
 const telegramProxyAgent = proxyUrl ? new ProxyAgent(proxyUrl) : null;
@@ -428,12 +438,7 @@ function nextShortDate(daysAhead = 1) {
 }
 
 function currentWeekStartIso() {
-  const today = new Date();
-  const jsDay = today.getDay() === 0 ? 6 : today.getDay() - 1;
-  const monday = new Date(today);
-  monday.setHours(0, 0, 0, 0);
-  monday.setDate(today.getDate() - jsDay);
-  return `${monday.getFullYear()}-${String(monday.getMonth() + 1).padStart(2, '0')}-${String(monday.getDate()).padStart(2, '0')}`;
+  return currentMoscowWeekStart();
 }
 
 function alignedAvailabilitySlots(availability?: Availability) {
@@ -532,6 +537,9 @@ function loadDatabase(): SimulationState {
   if (!Array.isArray(state.tasks)) state.tasks = [];
   if (!state.messages) state.messages = {};
   if (!state.settings) state.settings = {};
+  if (!Number.isInteger(state.settings.availabilityWeekCount) || Number(state.settings.availabilityWeekCount) < 2) {
+    state.settings.availabilityWeekCount = 2;
+  }
 
   state.users.forEach((user) => {
     if ((user.role as string) === 'faculty_lead') user.role = 'faculty_responsible';
@@ -580,9 +588,37 @@ function saveDatabase(state: SimulationState) {
   }
 }
 
+function pruneExpiredAvailabilityWeeks() {
+  const state = loadDatabase();
+  const weekStart = currentWeekStartIso();
+  let changed = false;
+  Object.entries(state.availabilities).forEach(([userId, availability]) => {
+    if ((availability.weekStart || weekStart) === weekStart) return;
+    state.availabilities[userId] = {
+      ...availability,
+      slots: alignedAvailabilitySlots(availability),
+      hardUnavailableDays: alignedHardUnavailableDays(availability),
+      weekStart,
+      updatedAt: new Date().toISOString(),
+    };
+    changed = true;
+  });
+  if (changed) saveDatabase(state);
+  return changed;
+}
+
 async function startServer() {
+  pruneExpiredAvailabilityWeeks();
   const app = express();
-  app.use(express.json());
+  const sheetsConfig = googleSheetsConfigFromEnv();
+  const processedSheetsEvents = new Set<string>();
+  app.use(express.json({
+    verify: (req, _res, buffer) => {
+      if (req.url.startsWith('/api/integrations/google-sheets/webhook')) {
+        (req as express.Request & { rawBody?: Buffer }).rawBody = Buffer.from(buffer);
+      }
+    },
+  }));
 
   app.get('/api/health', (_req, res) => {
     res.json({
@@ -591,6 +627,7 @@ async function startServer() {
       uptimeSeconds: Math.floor(process.uptime()),
       telegramConfigured: Boolean(process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN),
       webAppConfigured: Boolean(process.env.WEBAPP_URL),
+      googleSheetsConfigured: Boolean(sheetsConfig),
     });
   });
   app.use('/api', (req, res, next) => {
@@ -598,6 +635,7 @@ async function startServer() {
       '/user/get-or-create',
       '/telegram-webhook',
       '/setup-webhook',
+      '/integrations/google-sheets/webhook',
     ]);
     if (publicPaths.has(req.path)) return next();
 
@@ -612,9 +650,11 @@ async function startServer() {
     if (!authUser) {
       return res.status(401).json({ error: 'Открой Mini App кнопкой в Telegram, чтобы подтвердить доступ.' });
     }
+    (req as express.Request & { authUserId?: string }).authUserId = authUser.id;
 
     const identityFieldByPath: Record<string, string> = {
       '/availability': 'userId',
+      '/availability/weeks': 'requesterId',
       '/meeting': 'hostId',
       '/meeting/update': 'requesterId',
       '/meeting/delete': 'requesterId',
@@ -683,6 +723,67 @@ async function startServer() {
   function isRegisteredUser(state: SimulationState, userId?: string) {
     return Boolean(userId && state.users.find((user) => user.id === userId && user.registered));
   }
+
+  app.post('/api/integrations/google-sheets/webhook', async (req, res) => {
+    if (!sheetsConfig) return res.status(503).json({ error: 'Google Sheets integration is not configured' });
+    const rawBody = (req as express.Request & { rawBody?: Buffer }).rawBody || Buffer.from(JSON.stringify(req.body || {}));
+    const timestamp = String(req.headers['x-megabot-timestamp'] || '');
+    const signature = String(req.headers['x-megabot-signature'] || '');
+    if (!verifySheetsWebhook(sheetsConfig.webhookSecret, timestamp, rawBody, signature)) {
+      return res.status(401).json({ error: 'Invalid Google Sheets webhook signature' });
+    }
+    const eventId = String(req.body?.eventId || '');
+    if (!eventId) return res.status(400).json({ error: 'eventId is required' });
+    if (processedSheetsEvents.has(eventId)) return res.json({ success: true, duplicate: true });
+    processedSheetsEvents.add(eventId);
+    if (processedSheetsEvents.size > 2_000) processedSheetsEvents.delete(processedSheetsEvents.values().next().value as string);
+    if (String(req.body?.spreadsheetId || '') !== sheetsConfig.spreadsheetId) {
+      return res.status(403).json({ error: 'Unexpected spreadsheet' });
+    }
+    const isPrimarySheet = sheetsConfig.primarySheetId !== undefined
+      ? Number(req.body?.sheetId) === sheetsConfig.primarySheetId
+      : String(req.body?.sheetTitle || '') === sheetsConfig.primarySheetTitle;
+    const isManagedWeekSheet = /^Неделя \d{4}-\d{2}-\d{2}$/.test(String(req.body?.sheetTitle || ''));
+    if (!isPrimarySheet && !isManagedWeekSheet) {
+      return res.json({ success: true, ignored: 'not_primary_sheet' });
+    }
+    try {
+      const state = loadDatabase();
+      const row = Number(req.body?.row);
+      const rows = Number(req.body?.rows || 1);
+      const changedUserRow = rows === 1 && Number.isInteger(row) && row >= 5 && row <= 200 ? row : undefined;
+      const result = await importAvailabilitiesFromSheet(
+        sheetsConfig,
+        state.users,
+        changedUserRow,
+        String(req.body?.sheetTitle || ''),
+      );
+      result.imported.forEach((availability) => { state.availabilities[availability.userId] = availability; });
+      saveDatabase(state);
+      return res.json({ success: true, importedUsers: result.imported.length });
+    } catch (error: any) {
+      console.error('Google Sheets webhook import failed:', error);
+      return res.status(500).json({ error: error.message || 'Google Sheets import failed' });
+    }
+  });
+
+  app.get('/api/integrations/google-sheets/mapping', async (req, res) => {
+    if (!sheetsConfig) return res.status(503).json({ error: 'Google Sheets integration is not configured' });
+    const state = loadDatabase();
+    const requesterId = (req as express.Request & { authUserId?: string }).authUserId || String(req.query.requesterId || '');
+    if (!isAdminUser(state, requesterId)) return res.status(403).json({ error: 'Admin access required' });
+    try { return res.json(await buildUserMappingReport(sheetsConfig, state.users)); }
+    catch (error: any) { return res.status(500).json({ error: error.message || 'Mapping failed' }); }
+  });
+
+  app.post('/api/integrations/google-sheets/template', async (req, res) => {
+    if (!sheetsConfig) return res.status(503).json({ error: 'Google Sheets integration is not configured' });
+    const state = loadDatabase();
+    const requesterId = (req as express.Request & { authUserId?: string }).authUserId || String(req.body?.requesterId || '');
+    if (!isAdminUser(state, requesterId)) return res.status(403).json({ error: 'Admin access required' });
+    try { return res.json({ success: true, ...(await ensureTemplateSheet(sheetsConfig, state.users)) }); }
+    catch (error: any) { return res.status(500).json({ error: error.message || 'Template creation failed' }); }
+  });
 
   // Helper to send message to Telegram
   function buildChatKeyboard(_includeWebApp = false, user?: User) {
@@ -2764,8 +2865,36 @@ async function startServer() {
     res.json({ success: true, task });
   });
 
+  app.post('/api/availability/weeks', async (req, res) => {
+    const { requesterId, weeks, notifyTeam = false } = req.body || {};
+    const state = loadDatabase();
+    if (!isAdminUser(state, requesterId)) return res.status(403).json({ error: 'Admin access required' });
+    const weekCount = Number(weeks);
+    if (!Number.isInteger(weekCount) || weekCount < 2 || weekCount > 5) {
+      return res.status(400).json({ error: 'Количество недель должно быть от 2 до 5' });
+    }
+    state.settings = { ...(state.settings || {}), availabilityWeekCount: weekCount };
+    saveDatabase(state);
+    let googleSheetsWeeks: unknown = null;
+    if (sheetsConfig) {
+      try { googleSheetsWeeks = await ensureManagedWeekSheets(sheetsConfig, state.users, weekCount); }
+      catch (error: any) {
+        console.error('Google Sheets week update failed:', error);
+        return res.status(502).json({ error: error.message || 'Не удалось обновить недели Google Sheets' });
+      }
+    }
+    let notified = 0;
+    if (notifyTeam) {
+      const text = `Пожалуйста, заполните свободные слоты сразу на ${weekCount} ${weekCount === 2 ? 'недели' : 'недели'} вперёд в Mini App.`;
+      const recipients = state.users.filter((user) => !isFacultyUser(user) && user.telegramId && user.id !== requesterId);
+      const results = await Promise.allSettled(recipients.map((user) => sendTelegramMessage(user.telegramId!, text, [{ text: 'Заполнить слоты', action: 'open_tma' }], false, user)));
+      notified = results.filter((result) => result.status === 'fulfilled').length;
+    }
+    return res.json({ success: true, weeks: weekCount, notified, googleSheets: googleSheetsWeeks });
+  });
+
   // Save/Update User Availability
-  app.post('/api/availability', (req, res) => {
+  app.post('/api/availability', async (req, res) => {
     const { userId, slots, weekStart, hardUnavailableDays } = req.body;
     const state = loadDatabase();
 
@@ -2784,7 +2913,17 @@ async function startServer() {
     };
 
     saveDatabase(state);
-    res.json({ success: true, availability: state.availabilities[userId] });
+    let googleSheets: { synced: boolean; error?: string; updatedCells?: number } = { synced: false };
+    if (sheetsConfig) {
+      try {
+        const result = await exportAvailabilityToSheet(sheetsConfig, state.users, state.availabilities[userId]);
+        googleSheets = { synced: true, updatedCells: result.updatedCells };
+      } catch (error: any) {
+        console.error('Google Sheets availability export failed:', error);
+        googleSheets = { synced: false, error: error.message || 'Google Sheets export failed' };
+      }
+    }
+    res.json({ success: true, availability: state.availabilities[userId], googleSheets });
   });
 
   // Schedule a new meeting
@@ -3411,6 +3550,32 @@ async function startServer() {
     };
 
     poll();
+  }
+
+  setInterval(() => {
+    try { pruneExpiredAvailabilityWeeks(); }
+    catch (error) { console.error('Availability week rotation failed:', error); }
+  }, 60 * 1000);
+
+  if (sheetsConfig) {
+    const maintainSheetsWeeks = async () => {
+      const state = loadDatabase();
+      await ensureManagedWeekSheets(sheetsConfig, state.users, Number(state.settings?.availabilityWeekCount || 2));
+    };
+    maintainSheetsWeeks().catch((error: any) => console.error('Google Sheets week maintenance failed:', error.message || error));
+    setInterval(() => {
+      maintainSheetsWeeks().catch((error: any) => console.error('Google Sheets week maintenance failed:', error.message || error));
+    }, 60 * 60 * 1000);
+    setInterval(async () => {
+      try {
+        const state = loadDatabase();
+        const result = await importAvailabilitiesFromSheet(sheetsConfig, state.users);
+        result.imported.forEach((availability) => { state.availabilities[availability.userId] = availability; });
+        if (result.imported.length) saveDatabase(state);
+      } catch (error: any) {
+        console.error('Google Sheets fallback reconciliation failed:', error.message || error);
+      }
+    }, 60 * 1000);
   }
 
   app.listen(PORT, '0.0.0.0', () => {

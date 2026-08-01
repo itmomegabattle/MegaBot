@@ -9,6 +9,13 @@
     "start": "node dist/server.cjs",
     "verify:core": "npm run build && node scripts/verify-core-flows.mjs",
     "deploy:selectel": "bash scripts/deploy-selectel.sh",
+    "sheets:mapping": "tsx scripts/google-sheets-admin.ts mapping",
+    "sheets:list": "tsx scripts/google-sheets-admin.ts sheets",
+    "sheets:template": "tsx scripts/google-sheets-admin.ts template",
+    "sheets:weeks": "tsx scripts/google-sheets-admin.ts weeks",
+    "sheets:import-preview": "tsx scripts/google-sheets-admin.ts import-preview",
+    "sheets:layout": "tsx scripts/google-sheets-admin.ts layout",
+    "sheets:roundtrip-test": "tsx scripts/google-sheets-admin.ts roundtrip-test",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit"
   },

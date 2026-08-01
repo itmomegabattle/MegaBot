@@ -1,0 +1,500 @@
+import crypto from 'crypto';
+import fs from 'fs';
+
+export type GoogleSheetsConfig = {
+  spreadsheetId: string;
+  credentialsFile: string;
+  webhookSecret: string;
+  primarySheetTitle: string;
+  primarySheetId?: number;
+  templateSheetTitle: string;
+  scanRange: string;
+  nameAliases: Record<string, string>;
+};
+
+type ServiceAccountCredentials = {
+  client_email: string;
+  private_key: string;
+  token_uri?: string;
+};
+
+type SheetUser = { id: string; realName: string; telegramId?: string };
+type SheetAvailability = {
+  userId: string;
+  slots: Record<number, number[]>;
+  hardUnavailableDays?: number[];
+  weekStart?: string;
+  updatedAt: string;
+};
+
+type SheetGrid = {
+  title: string;
+  sheetId: number;
+  formatted: unknown[][];
+  raw: unknown[][];
+  rowTelegramIds: Map<number, string>;
+};
+
+const GOOGLE_SCOPE = 'https://www.googleapis.com/auth/spreadsheets';
+let tokenCache: { value: string; expiresAt: number; key: string } | null = null;
+
+export function googleSheetsConfigFromEnv(): GoogleSheetsConfig | null {
+  const spreadsheetId = process.env.GOOGLE_SHEETS_SPREADSHEET_ID?.trim();
+  const credentialsFile = process.env.GOOGLE_SERVICE_ACCOUNT_FILE?.trim();
+  if (!spreadsheetId || !credentialsFile) return null;
+  const nameAliases = Object.fromEntries((process.env.GOOGLE_SHEETS_NAME_ALIASES || '')
+    .split(',')
+    .map((entry) => entry.split('=').map((part) => part.trim()))
+    .filter((entry) => entry.length === 2 && entry[0] && entry[1]));
+  return {
+    spreadsheetId,
+    credentialsFile,
+    webhookSecret: process.env.GOOGLE_SHEETS_WEBHOOK_SECRET?.trim() || '',
+    primarySheetTitle: process.env.GOOGLE_SHEETS_PRIMARY_SHEET_TITLE?.trim() || 'Основа с 30 до 5',
+    primarySheetId: Number.isInteger(Number(process.env.GOOGLE_SHEETS_PRIMARY_SHEET_ID)) ? Number(process.env.GOOGLE_SHEETS_PRIMARY_SHEET_ID) : undefined,
+    templateSheetTitle: process.env.GOOGLE_SHEETS_TEMPLATE_SHEET_TITLE?.trim() || 'ШАБЛОН НЕДЕЛИ',
+    scanRange: process.env.GOOGLE_SHEETS_SCAN_RANGE?.trim() || 'A1:BZ200',
+    nameAliases,
+  };
+}
+
+function base64Url(value: string | Buffer) {
+  return Buffer.from(value).toString('base64url');
+}
+
+function loadCredentials(config: GoogleSheetsConfig): ServiceAccountCredentials {
+  const parsed = JSON.parse(fs.readFileSync(config.credentialsFile, 'utf8')) as ServiceAccountCredentials;
+  if (!parsed.client_email || !parsed.private_key) throw new Error('Google service account JSON is incomplete');
+  return parsed;
+}
+
+async function accessToken(config: GoogleSheetsConfig) {
+  const credentials = loadCredentials(config);
+  const cacheKey = `${credentials.client_email}:${config.credentialsFile}`;
+  if (tokenCache && tokenCache.key === cacheKey && tokenCache.expiresAt > Date.now() + 60_000) return tokenCache.value;
+  const now = Math.floor(Date.now() / 1000);
+  const header = base64Url(JSON.stringify({ alg: 'RS256', typ: 'JWT' }));
+  const claims = base64Url(JSON.stringify({
+    iss: credentials.client_email,
+    scope: GOOGLE_SCOPE,
+    aud: credentials.token_uri || 'https://oauth2.googleapis.com/token',
+    iat: now,
+    exp: now + 3600,
+  }));
+  const unsigned = `${header}.${claims}`;
+  const assertion = `${unsigned}.${crypto.sign('RSA-SHA256', Buffer.from(unsigned), credentials.private_key).toString('base64url')}`;
+  const response = await fetch(credentials.token_uri || 'https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer', assertion }),
+  });
+  const body = await response.json() as { access_token?: string; expires_in?: number; error_description?: string };
+  if (!response.ok || !body.access_token) throw new Error(body.error_description || `Google token request failed: ${response.status}`);
+  tokenCache = { value: body.access_token, expiresAt: Date.now() + (body.expires_in || 3600) * 1000, key: cacheKey };
+  return body.access_token;
+}
+
+async function googleRequest(config: GoogleSheetsConfig, path: string, init: RequestInit = {}) {
+  const token = await accessToken(config);
+  const response = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${config.spreadsheetId}${path}`, {
+    ...init,
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...(init.headers || {}) },
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(`Google Sheets API ${response.status}: ${JSON.stringify(body)}`);
+  return body as any;
+}
+
+function quotedSheet(title: string) {
+  return `'${title.replace(/'/g, "''")}'`;
+}
+
+const WEEK_SHEET_RE = /^Неделя (\d{4}-\d{2}-\d{2})$/;
+
+function addDays(dateIso: string, days: number) {
+  const date = new Date(`${dateIso}T12:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+function activeManagedSheets(metadata: Awaited<ReturnType<typeof sheetMetadata>>, currentWeek: string) {
+  return metadata.sheets
+    .map((sheet) => ({ ...sheet.properties, weekStart: sheet.properties.title.match(WEEK_SHEET_RE)?.[1] || '' }))
+    .filter((sheet) => sheet.weekStart >= currentWeek && dayIndexFor(sheet.weekStart, currentWeek) < 35)
+    .sort((a, b) => a.weekStart.localeCompare(b.weekStart));
+}
+
+async function sheetMetadata(config: GoogleSheetsConfig) {
+  return googleRequest(config, '?fields=sheets.properties(sheetId,title,index,hidden,gridProperties(rowCount,columnCount)),developerMetadata(metadataId,metadataKey,metadataValue,location)') as Promise<{
+    sheets: { properties: { sheetId: number; title: string; index: number; hidden?: boolean; gridProperties?: { rowCount?: number; columnCount?: number } } }[];
+    developerMetadata?: { metadataId: number; metadataKey: string; metadataValue?: string; location?: { dimensionRange?: { sheetId?: number; dimension?: string; startIndex?: number; endIndex?: number } } }[];
+  }>;
+}
+
+export async function listGoogleSheets(config: GoogleSheetsConfig) {
+  const metadata = await sheetMetadata(config);
+  return metadata.sheets.map((sheet) => sheet.properties);
+}
+
+export async function inspectActiveWeekLayouts(config: GoogleSheetsConfig, users: SheetUser[]) {
+  const grids = await readActiveWeekGrids(config);
+  const weekStart = currentMoscowWeekStart();
+  return grids.map((grid) => {
+    const layout = discover(grid, users, weekStart, config.nameAliases);
+    return {
+      sheet: grid.title,
+      dateRow: layout.dateRow + 1,
+      hourRow: layout.hourRow + 1,
+      topRows: grid.formatted.slice(0, 4).map((row, rowIndex) => ({ row: rowIndex + 1, values: row.map((value, col) => value === '' || value == null ? null : `${columnName(col)}=${String(value)}`).filter(Boolean) })),
+      columns: layout.columnHours.map((hour, col) => hour === null ? null : ({ column: columnName(col), date: layout.columnDates[col], hour })).filter(Boolean),
+    };
+  });
+}
+
+async function readGrid(config: GoogleSheetsConfig, title = config.primarySheetTitle): Promise<SheetGrid> {
+  const metadata = await sheetMetadata(config);
+  const sheet = title === config.primarySheetTitle && config.primarySheetId !== undefined
+    ? metadata.sheets.find((item) => item.properties.sheetId === config.primarySheetId)
+    : metadata.sheets.find((item) => item.properties.title === title);
+  if (!sheet) throw new Error(`Google sheet not found: ${title}`);
+  const actualTitle = sheet.properties.title;
+  const range = encodeURIComponent(`${quotedSheet(actualTitle)}!${config.scanRange}`);
+  const [formatted, raw] = await Promise.all([
+    googleRequest(config, `/values/${range}?majorDimension=ROWS&valueRenderOption=FORMATTED_VALUE`),
+    googleRequest(config, `/values/${range}?majorDimension=ROWS&valueRenderOption=UNFORMATTED_VALUE`),
+  ]);
+  const rowTelegramIds = new Map<number, string>();
+  (metadata.developerMetadata || []).forEach((item) => {
+    const range = item.location?.dimensionRange;
+    if (item.metadataKey === 'megabotTelegramId' && range?.sheetId === sheet.properties.sheetId && range.dimension === 'ROWS' && range.startIndex !== undefined && item.metadataValue) {
+      rowTelegramIds.set(range.startIndex, item.metadataValue);
+    }
+  });
+  return { title: actualTitle, sheetId: sheet.properties.sheetId, formatted: formatted.values || [], raw: raw.values || [], rowTelegramIds };
+}
+
+async function readActiveWeekGrids(config: GoogleSheetsConfig) {
+  const metadata = await sheetMetadata(config);
+  const managed = activeManagedSheets(metadata, currentMoscowWeekStart());
+  if (!managed.length) return [await readGrid(config)];
+  return Promise.all(managed.map((sheet) => readGrid(config, sheet.title)));
+}
+
+function normalizeName(value: unknown) {
+  return String(value || '')
+    .normalize('NFKC')
+    .toLocaleLowerCase('ru-RU')
+    .replace(/ё/g, 'е')
+    .replace(/[^a-zа-я0-9]+/gi, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .sort()
+    .join(' ');
+}
+
+function parseHour(value: unknown) {
+  const match = String(value || '').match(/(?:^|\s)(\d{1,2}):(?:00|0)(?:$|\s)/);
+  const hour = match ? Number(match[1]) : NaN;
+  return Number.isInteger(hour) && hour >= 0 && hour <= 23 ? hour : null;
+}
+
+function moscowDateParts(date = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Europe/Moscow', year: 'numeric', month: '2-digit', day: '2-digit', weekday: 'short',
+  }).formatToParts(date);
+  return Object.fromEntries(parts.map((part) => [part.type, part.value]));
+}
+
+export function currentMoscowWeekStart() {
+  const p = moscowDateParts();
+  const localNoonUtc = new Date(`${p.year}-${p.month}-${p.day}T12:00:00Z`);
+  const day = localNoonUtc.getUTCDay() || 7;
+  localNoonUtc.setUTCDate(localNoonUtc.getUTCDate() - day + 1);
+  return localNoonUtc.toISOString().slice(0, 10);
+}
+
+function parseHeaderDate(value: unknown, anchorWeekStart: string) {
+  if (typeof value === 'number' && value > 20_000) {
+    return new Date(Date.UTC(1899, 11, 30 + value)).toISOString().slice(0, 10);
+  }
+  const text = String(value || '').trim();
+  const match = text.match(/(?:^|\s)(\d{1,2})[./-](\d{1,2})(?:[./-](\d{2,4}))?/);
+  if (!match) return null;
+  const day = Number(match[1]);
+  const month = Number(match[2]);
+  const anchor = new Date(`${anchorWeekStart}T12:00:00Z`);
+  const candidates = [anchor.getUTCFullYear() - 1, anchor.getUTCFullYear(), anchor.getUTCFullYear() + 1]
+    .map((year) => new Date(Date.UTC(year, month - 1, day, 12)));
+  candidates.sort((a, b) => Math.abs(a.getTime() - anchor.getTime()) - Math.abs(b.getTime() - anchor.getTime()));
+  return candidates[0].toISOString().slice(0, 10);
+}
+
+function dayIndexFor(dateIso: string, weekStart: string) {
+  return Math.round((new Date(`${dateIso}T12:00:00Z`).getTime() - new Date(`${weekStart}T12:00:00Z`).getTime()) / 86_400_000);
+}
+
+function discover(grid: SheetGrid, users: SheetUser[], weekStart = currentMoscowWeekStart(), nameAliases: Record<string, string> = {}) {
+  const headerDateRows = Math.min(8, grid.formatted.length);
+  const maxCols = Math.max(...grid.formatted.slice(0, headerDateRows).map((row) => row.length), 0);
+  const columnDates: (string | null)[] = Array(maxCols).fill(null);
+  const columnHours: (number | null)[] = Array(maxCols).fill(null);
+  let dateRow = -1;
+  let hourRow = -1;
+  let bestDateCount = 0;
+  let bestTextDateCount = 0;
+  let bestHourCount = 0;
+  for (let row = 0; row < headerDateRows; row += 1) {
+    const dates = (grid.formatted[row] || []).map((value) => parseHeaderDate(value, weekStart)).filter(Boolean).length;
+    const textDates = (grid.formatted[row] || []).filter((value) => typeof value === 'string' && /\d{1,2}[./-]\d{1,2}/.test(value)).length;
+    const hours = (grid.formatted[row] || []).map(parseHour).filter((value) => value !== null).length;
+    if (textDates > bestTextDateCount
+      || (textDates === bestTextDateCount && dates > bestDateCount)
+      || (textDates === bestTextDateCount && dates === bestDateCount && row > dateRow)) {
+      bestTextDateCount = textDates; bestDateCount = dates; dateRow = row;
+    }
+    if (hours > bestHourCount) { bestHourCount = hours; hourRow = row; }
+  }
+  if (dateRow < 0 || hourRow < 0) throw new Error('Could not discover date/time headers in the primary sheet');
+  let carriedDate: string | null = null;
+  for (let col = 0; col < maxCols; col += 1) {
+    const explicitDate = parseHeaderDate(grid.formatted[dateRow]?.[col], weekStart);
+    if (explicitDate) carriedDate = explicitDate;
+    const hour = parseHour(grid.formatted[hourRow]?.[col]);
+    columnDates[col] = hour === null ? null : carriedDate;
+    columnHours[col] = hour;
+  }
+  const userByName = new Map(users.map((user) => [normalizeName(user.realName), user]));
+  const userByTelegramId = new Map(users.filter((user) => user.telegramId).map((user) => [String(user.telegramId), user]));
+  const normalizedAliases = new Map(Object.entries(nameAliases).map(([name, telegramId]) => [normalizeName(name), telegramId]));
+  const rows: { rowIndex: number; name: string; user?: SheetUser; matchSource?: string }[] = [];
+  const allRows: { rowIndex: number; name: string; user?: SheetUser; matchSource?: string }[] = [];
+  let startedPeople = false;
+  for (let row = hourRow + 1; row < grid.formatted.length; row += 1) {
+    const name = String(grid.formatted[row]?.[0] || '').trim();
+    if (!name) {
+      if (startedPeople) break;
+      continue;
+    }
+    startedPeople = true;
+    const normalized = normalizeName(name);
+    const storedTelegramId = String(grid.rowTelegramIds.get(row) || '').trim();
+    const idUser = storedTelegramId ? userByTelegramId.get(storedTelegramId) : undefined;
+    const exactUser = userByName.get(normalized);
+    const aliasUser = userByTelegramId.get(String(normalizedAliases.get(normalized) || ''));
+    const user = idUser || exactUser || aliasUser;
+    const matchSource = idUser ? 'telegram_id' : exactUser ? 'exact_normalized_name' : aliasUser ? 'confirmed_alias' : undefined;
+    allRows.push({ rowIndex: row, name, user, matchSource });
+    if (user) rows.push({ rowIndex: row, name, user, matchSource });
+  }
+  return { dateRow, hourRow, columnDates, columnHours, rows, allRows };
+}
+
+function isSelected(value: unknown) {
+  if (value === true || value === 1) return true;
+  const normalized = String(value || '').trim().toLocaleLowerCase('ru-RU');
+  return normalized === 'true' || normalized === 'истина' || normalized === 'да' || normalized === '1' || normalized === '✓' || normalized === '✅';
+}
+
+export async function importAvailabilitiesFromSheet(config: GoogleSheetsConfig, users: SheetUser[], changedRow?: number, changedSheetTitle?: string) {
+  const grids = changedSheetTitle ? [await readGrid(config, changedSheetTitle)] : await readActiveWeekGrids(config);
+  const weekStart = currentMoscowWeekStart();
+  const now = new Date().toISOString();
+  const byUser = new Map<string, SheetAvailability>();
+  const allMatches: { sheet: string; sheetRow: number; sheetName: string; userId?: string; telegramId?: string }[] = [];
+  let activeColumns = 0;
+  for (const grid of grids) {
+    const layout = discover(grid, users, weekStart, config.nameAliases);
+    for (const row of layout.rows) {
+      allMatches.push({ sheet: grid.title, sheetRow: row.rowIndex + 1, sheetName: row.name, userId: row.user?.id, telegramId: row.user?.telegramId });
+      if (!row.user || (changedRow && row.rowIndex + 1 !== changedRow)) continue;
+      const availability = byUser.get(row.user.id) || { userId: row.user.id, slots: {}, hardUnavailableDays: [], weekStart, updatedAt: now };
+      for (let col = 0; col < layout.columnHours.length; col += 1) {
+        const hour = layout.columnHours[col];
+        const date = layout.columnDates[col];
+        if (hour === null || !date) continue;
+        const dayIndex = dayIndexFor(date, weekStart);
+        if (dayIndex < 0 || dayIndex >= 35) continue;
+        activeColumns += 1;
+        if (!availability.slots[dayIndex]) availability.slots[dayIndex] = [];
+        if (isSelected(grid.raw[row.rowIndex]?.[col])) availability.slots[dayIndex].push(hour);
+      }
+      byUser.set(row.user.id, availability);
+    }
+  }
+  if (!activeColumns) throw new Error('Active sheets do not contain current or future week headers yet');
+  const imported = [...byUser.values()];
+  imported.forEach((availability) => Object.values(availability.slots).forEach((hours) => hours.sort((a, b) => a - b)));
+  return { imported, matches: allMatches };
+}
+
+function columnName(index: number) {
+  let value = index + 1;
+  let result = '';
+  while (value > 0) { value -= 1; result = String.fromCharCode(65 + (value % 26)) + result; value = Math.floor(value / 26); }
+  return result;
+}
+
+export async function exportAvailabilityToSheet(config: GoogleSheetsConfig, users: SheetUser[], availability: SheetAvailability) {
+  const grids = await readActiveWeekGrids(config);
+  const weekStart = availability.weekStart || currentMoscowWeekStart();
+  const data: { range: string; values: boolean[][] }[] = [];
+  let matchedRow = 0;
+  for (const grid of grids) {
+    const layout = discover(grid, users, weekStart, config.nameAliases);
+    const row = layout.rows.find((item) => item.user?.id === availability.userId);
+    if (!row) continue;
+    matchedRow = row.rowIndex + 1;
+    for (let col = 0; col < layout.columnHours.length; col += 1) {
+      const hour = layout.columnHours[col];
+      const date = layout.columnDates[col];
+      if (hour === null || !date) continue;
+      const dayIndex = dayIndexFor(date, weekStart);
+      if (dayIndex < 0 || dayIndex >= 35) continue;
+      data.push({ range: `${quotedSheet(grid.title)}!${columnName(col)}${row.rowIndex + 1}`, values: [[Boolean(availability.slots[dayIndex]?.includes(hour))]] });
+    }
+  }
+  if (!matchedRow) throw new Error(`User ${availability.userId} was not matched to a row in Google Sheets`);
+  if (!data.length) throw new Error('No writable availability cells were discovered for the requested week');
+  await googleRequest(config, '/values:batchUpdate', {
+    method: 'POST',
+    body: JSON.stringify({ valueInputOption: 'USER_ENTERED', data }),
+  });
+  return { updatedCells: data.length, sheetRow: matchedRow };
+}
+
+export async function buildUserMappingReport(config: GoogleSheetsConfig, users: SheetUser[]) {
+  const grid = await readGrid(config);
+  const layout = discover(grid, users, currentMoscowWeekStart(), config.nameAliases);
+  const matchedIds = new Set(layout.rows.map((row) => row.user?.id).filter(Boolean));
+  return {
+    sheet: grid.title,
+    matches: layout.rows.map((row) => ({ sheetRow: row.rowIndex + 1, sheetName: row.name, appName: row.user?.realName, telegramId: row.user?.telegramId || '', confidence: row.matchSource })),
+    unmatchedSheetUsers: layout.allRows.filter((row) => !row.user).map((row) => ({ sheetRow: row.rowIndex + 1, sheetName: row.name })),
+    unmatchedAppUsers: users.filter((user) => !matchedIds.has(user.id)),
+  };
+}
+
+export function verifySheetsWebhook(secret: string, timestamp: string, body: Buffer, signature: string) {
+  if (!secret || !timestamp || !signature) return false;
+  const age = Math.abs(Date.now() - Number(timestamp));
+  if (!Number.isFinite(age) || age > 5 * 60_000) return false;
+  const expected = crypto.createHmac('sha256', secret).update(`${timestamp}.${body.toString('utf8')}`).digest('hex');
+  try { return crypto.timingSafeEqual(Buffer.from(expected, 'hex'), Buffer.from(signature, 'hex')); } catch { return false; }
+}
+
+export async function ensureTemplateSheet(config: GoogleSheetsConfig, users: SheetUser[]) {
+  const metadata = await sheetMetadata(config);
+  const existing = metadata.sheets.find((item) => item.properties.title === config.templateSheetTitle);
+  if (existing) return { created: false, sheetId: existing.properties.sheetId };
+  const source = config.primarySheetId !== undefined
+    ? metadata.sheets.find((item) => item.properties.sheetId === config.primarySheetId)
+    : metadata.sheets.find((item) => item.properties.title === config.primarySheetTitle);
+  if (!source) throw new Error(`Primary sheet not found: ${config.primarySheetTitle}`);
+  const duplicated = await googleRequest(config, ':batchUpdate', {
+    method: 'POST',
+    body: JSON.stringify({ requests: [{ duplicateSheet: { sourceSheetId: source.properties.sheetId, newSheetName: config.templateSheetTitle, insertSheetIndex: metadata.sheets.length } }] }),
+  });
+  const grid = await readGrid(config, config.templateSheetTitle);
+  const layout = discover(grid, users, currentMoscowWeekStart(), config.nameAliases);
+  const ranges: string[] = [];
+  for (const row of layout.allRows) {
+    for (let col = 0; col < layout.columnHours.length; col += 1) {
+      if (layout.columnHours[col] !== null && layout.columnDates[col]) ranges.push(`${quotedSheet(grid.title)}!${columnName(col)}${row.rowIndex + 1}`);
+    }
+  }
+  if (ranges.length) await googleRequest(config, '/values:batchClear', { method: 'POST', body: JSON.stringify({ ranges }) });
+  return { created: true, sheetId: duplicated.replies?.[0]?.duplicateSheet?.properties?.sheetId, clearedCells: ranges.length };
+}
+
+export async function persistTelegramIdBindings(config: GoogleSheetsConfig, users: SheetUser[]) {
+  const metadata = await sheetMetadata(config);
+  const currentWeek = currentMoscowWeekStart();
+  const managed = activeManagedSheets(metadata, currentWeek);
+  const selected = metadata.sheets.filter((sheet) => (
+    sheet.properties.sheetId === config.primarySheetId
+    || sheet.properties.title === config.templateSheetTitle
+    || managed.some((managedSheet) => managedSheet.sheetId === sheet.properties.sheetId)
+  ));
+  const requests: unknown[] = [];
+  const bindings: { sheet: string; row: number; telegramId: string; name: string }[] = [];
+  for (const sheet of selected) {
+    const grid = await readGrid(config, sheet.properties.title);
+    const layout = discover(grid, users, currentWeek, config.nameAliases);
+    for (const row of layout.rows) {
+      const telegramId = String(row.user?.telegramId || '').trim();
+      if (!telegramId) continue;
+      if (String(grid.rowTelegramIds.get(row.rowIndex) || '').trim() !== telegramId) {
+        requests.push({ createDeveloperMetadata: { developerMetadata: {
+          metadataKey: 'megabotTelegramId', metadataValue: telegramId, visibility: 'DOCUMENT',
+          location: { dimensionRange: { sheetId: sheet.properties.sheetId, dimension: 'ROWS', startIndex: row.rowIndex, endIndex: row.rowIndex + 1 } },
+        } } });
+      }
+      bindings.push({ sheet: grid.title, row: row.rowIndex + 1, telegramId, name: row.name });
+    }
+  }
+  if (requests.length) await googleRequest(config, ':batchUpdate', { method: 'POST', body: JSON.stringify({ requests }) });
+  return { writtenBindings: requests.length, bindings };
+}
+
+export async function ensureManagedWeekSheets(config: GoogleSheetsConfig, users: SheetUser[], weekCount: number) {
+  const count = Math.min(5, Math.max(2, Math.trunc(weekCount)));
+  await ensureTemplateSheet(config, users);
+  let metadata = await sheetMetadata(config);
+  const template = metadata.sheets.find((sheet) => sheet.properties.title === config.templateSheetTitle);
+  if (!template) throw new Error(`Template sheet not found: ${config.templateSheetTitle}`);
+  const primarySource = config.primarySheetId !== undefined
+    ? metadata.sheets.find((sheet) => sheet.properties.sheetId === config.primarySheetId)
+    : metadata.sheets.find((sheet) => sheet.properties.title === config.primarySheetTitle);
+  if (!primarySource) throw new Error('Primary source sheet not found');
+  const currentWeek = currentMoscowWeekStart();
+  const desiredWeeks = Array.from({ length: count }, (_, index) => addDays(currentWeek, index * 7));
+  const desiredTitles = new Set(desiredWeeks.map((week) => `Неделя ${week}`));
+  const deleted: string[] = [];
+  const deleteRequests = metadata.sheets
+    .filter((sheet) => WEEK_SHEET_RE.test(sheet.properties.title) && !desiredTitles.has(sheet.properties.title))
+    .map((sheet) => {
+      deleted.push(sheet.properties.title);
+      return { deleteSheet: { sheetId: sheet.properties.sheetId } };
+    });
+  if (deleteRequests.length) await googleRequest(config, ':batchUpdate', { method: 'POST', body: JSON.stringify({ requests: deleteRequests }) });
+  metadata = await sheetMetadata(config);
+  const created: string[] = [];
+  for (const week of desiredWeeks) {
+    const title = `Неделя ${week}`;
+    if (!metadata.sheets.some((sheet) => sheet.properties.title === title)) {
+      await googleRequest(config, ':batchUpdate', {
+        method: 'POST',
+        body: JSON.stringify({ requests: [{ duplicateSheet: { sourceSheetId: template.properties.sheetId, newSheetName: title, insertSheetIndex: metadata.sheets.length } }] }),
+      });
+      created.push(title);
+      metadata = await sheetMetadata(config);
+    }
+    const targetSheet = metadata.sheets.find((sheet) => sheet.properties.title === title);
+    if (!targetSheet) throw new Error(`Managed sheet not found after creation: ${title}`);
+    await googleRequest(config, ':batchUpdate', {
+      method: 'POST',
+      body: JSON.stringify({ requests: [{ copyPaste: {
+        source: { sheetId: primarySource.properties.sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 0, endColumnIndex: 74 },
+        destination: { sheetId: targetSheet.properties.sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 0, endColumnIndex: 74 },
+        pasteType: 'PASTE_NORMAL', pasteOrientation: 'NORMAL',
+      } }] }),
+    });
+    const grid = await readGrid(config, title);
+    const layout = discover(grid, users, week, config.nameAliases);
+    const explicitDateColumns: number[] = [];
+    for (let col = 0; col < (grid.formatted[layout.dateRow]?.length || 0); col += 1) {
+      if (parseHeaderDate(grid.formatted[layout.dateRow]?.[col], week)) explicitDateColumns.push(col);
+    }
+    const weekdays = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
+    const data = explicitDateColumns.slice(0, 7).map((col, day) => {
+      const date = addDays(week, day);
+      const [year, month, dateDay] = date.split('-');
+      return { range: `${quotedSheet(title)}!${columnName(col)}${layout.dateRow + 1}`, values: [[`${dateDay}.${month} ${weekdays[day]}`]] };
+    });
+    if (data.length !== 7) throw new Error(`Expected 7 date headers in ${title}, found ${data.length}`);
+    await googleRequest(config, '/values:batchUpdate', { method: 'POST', body: JSON.stringify({ valueInputOption: 'USER_ENTERED', data }) });
+  }
+  const userBindings = await persistTelegramIdBindings(config, users);
+  return { weekCount: count, currentWeek, created, deleted, active: desiredWeeks.map((week) => `Неделя ${week}`), userBindings };
+}

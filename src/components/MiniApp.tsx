@@ -228,7 +228,8 @@ export default function MiniApp({
   onRefreshState,
 }: MiniAppProps) {
   const [slots, setSlots] = useState<Record<number, number[]>>({});
-  const [visibleWeeks, setVisibleWeeks] = useState(1);
+  const [visibleWeeks, setVisibleWeeks] = useState(2);
+  const [savingWeekCount, setSavingWeekCount] = useState(false);
   const [suggestions, setSuggestions] = useState<MeetingSuggestion[]>([]);
   const [suggesting, setSuggesting] = useState(false);
   const [savingWeek, setSavingWeek] = useState(false);
@@ -310,6 +311,7 @@ export default function MiniApp({
   const [facultyEditDraft, setFacultyEditDraft] = useState({ realName: '', username: '', role: 'faculty_responsible' as User['role'], facultyId: '', competencies: [] as string[] });
 
   const isAdmin = currentUser.role === 'admin';
+  const configuredWeekCount = Math.min(maxSlotWeeks, Math.max(2, Number(state.settings?.availabilityWeekCount || 2)));
   const coreTeamUsers = state.users.filter((user) => user.role === 'admin' || user.role === 'organizer');
   const votedUsers = useMemo(
     () => state.users.filter((user) => {
@@ -478,9 +480,28 @@ export default function MiniApp({
       .filter(([, value]) => value.length > 0)
       .map(([key]) => Number(key))
       .sort((a, b) => b - a)[0];
-    setVisibleWeeks(Math.min(maxSlotWeeks, Math.max(1, lastFilledDay === undefined ? 1 : Math.floor(lastFilledDay / 7) + 1)));
+    setVisibleWeeks(Math.min(maxSlotWeeks, Math.max(configuredWeekCount, lastFilledDay === undefined ? configuredWeekCount : Math.floor(lastFilledDay / 7) + 1)));
     setSlots(nextSlots);
-  }, [currentUser.id, state.availabilities]);
+  }, [configuredWeekCount, currentUser.id, state.availabilities]);
+
+  const updateAvailabilityWeekCount = async (weeks: number, notifyTeam = false) => {
+    setSavingWeekCount(true);
+    setSlotError('');
+    try {
+      const response = await fetch('/api/availability/weeks', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ requesterId: currentUser.id, weeks, notifyTeam }),
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || 'Не удалось изменить количество недель');
+      await onRefreshState();
+    } catch (error: any) {
+      setSlotError(error.message || 'Не удалось изменить количество недель');
+    } finally {
+      setSavingWeekCount(false);
+    }
+  };
 
   const toggleSlot = (day: number, hour: number) => {
     setWeekSaved(false);
@@ -1088,6 +1109,24 @@ export default function MiniApp({
           <section className="space-y-4">
             {slotError && <div role="alert" className="rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm font-bold text-amber-800">{slotError}</div>}
 
+            {isAdmin && (
+              <div className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
+                <h2 className="font-black">Горизонт заполнения</h2>
+                <p className="mt-1 text-sm font-semibold text-slate-500">Команда видит текущую и следующие недели. Минимум — две.</p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button disabled={savingWeekCount || configuredWeekCount <= 2} onClick={() => updateAvailabilityWeekCount(configuredWeekCount - 1)} className={secondaryButtonClass}>
+                    <Minus className="h-4 w-4" /> Убрать неделю
+                  </button>
+                  <button disabled={savingWeekCount || configuredWeekCount >= maxSlotWeeks} onClick={() => updateAvailabilityWeekCount(configuredWeekCount + 1)} className={secondaryButtonClass}>
+                    <Plus className="h-4 w-4" /> Добавить неделю
+                  </button>
+                  <button disabled={savingWeekCount} onClick={() => updateAvailabilityWeekCount(configuredWeekCount, true)} className={primaryButtonClass}>
+                    Уведомить команду · {configuredWeekCount}
+                  </button>
+                </div>
+              </div>
+            )}
+
             <div className="space-y-4">
               {Array.from({ length: visibleWeeks }, (_, weekIndex) => (
                 <div key={weekIndex} className="space-y-3">
@@ -1098,7 +1137,7 @@ export default function MiniApp({
                         {formatDayMonth(dateForSlotDay(weekIndex * 7))} - {formatDayMonth(dateForSlotDay(weekIndex * 7 + 6))}
                       </p>
                     </div>
-                    {weekIndex === visibleWeeks - 1 && weekIndex > 0 && (
+                    {isAdmin && weekIndex === visibleWeeks - 1 && weekIndex >= configuredWeekCount && (
                       <button
                         onClick={() => {
                           setSlots((prev) => {
@@ -1161,7 +1200,7 @@ export default function MiniApp({
               ))}
             </div>
 
-            {visibleWeeks < maxSlotWeeks && (
+            {isAdmin && visibleWeeks < maxSlotWeeks && visibleWeeks < configuredWeekCount && (
               <button
                 onClick={() => setVisibleWeeks((value) => Math.min(maxSlotWeeks, value + 1))}
                 className={secondaryButtonClass}
