@@ -125,10 +125,26 @@ function activeManagedSheets(metadata: Awaited<ReturnType<typeof sheetMetadata>>
 }
 
 async function sheetMetadata(config: GoogleSheetsConfig) {
-  return googleRequest(config, '?fields=sheets.properties(sheetId,title,index,hidden,gridProperties(rowCount,columnCount)),developerMetadata(metadataId,metadataKey,metadataValue,location)') as Promise<{
+  return googleRequest(config, '?fields=sheets.properties(sheetId,title,index,hidden,gridProperties(rowCount,columnCount))') as Promise<{
     sheets: { properties: { sheetId: number; title: string; index: number; hidden?: boolean; gridProperties?: { rowCount?: number; columnCount?: number } } }[];
-    developerMetadata?: { metadataId: number; metadataKey: string; metadataValue?: string; location?: { dimensionRange?: { sheetId?: number; dimension?: string; startIndex?: number; endIndex?: number } } }[];
   }>;
+}
+
+type TelegramIdMetadata = {
+  metadataId: number;
+  metadataKey: string;
+  metadataValue?: string;
+  location?: { dimensionRange?: { sheetId?: number; dimension?: string; startIndex?: number; endIndex?: number } };
+};
+
+async function telegramIdMetadata(config: GoogleSheetsConfig): Promise<TelegramIdMetadata[]> {
+  const result = await googleRequest(config, '/developerMetadata:search', {
+    method: 'POST',
+    body: JSON.stringify({ dataFilters: [{ developerMetadataLookup: { metadataKey: 'megabotTelegramId' } }] }),
+  }) as { matchedDeveloperMetadata?: { developerMetadata?: TelegramIdMetadata }[] };
+  return (result.matchedDeveloperMetadata || [])
+    .map((match) => match.developerMetadata)
+    .filter((item): item is TelegramIdMetadata => Boolean(item));
 }
 
 export async function listGoogleSheets(config: GoogleSheetsConfig) {
@@ -164,7 +180,7 @@ async function readGrid(config: GoogleSheetsConfig, title = config.primarySheetT
     googleRequest(config, `/values/${range}?majorDimension=ROWS&valueRenderOption=UNFORMATTED_VALUE`),
   ]);
   const rowTelegramIds = new Map<number, string>();
-  (metadata.developerMetadata || []).forEach((item) => {
+  (await telegramIdMetadata(config)).forEach((item) => {
     const range = item.location?.dimensionRange;
     if (item.metadataKey === 'megabotTelegramId' && range?.sheetId === sheet.properties.sheetId && range.dimension === 'ROWS' && range.startIndex !== undefined && item.metadataValue) {
       rowTelegramIds.set(range.startIndex, item.metadataValue);
