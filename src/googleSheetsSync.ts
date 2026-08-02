@@ -152,6 +152,15 @@ export async function listGoogleSheets(config: GoogleSheetsConfig) {
   return metadata.sheets.map((sheet) => sheet.properties);
 }
 
+export async function inspectGoogleSheetRange(config: GoogleSheetsConfig, a1Range: string) {
+  const range = encodeURIComponent(a1Range);
+  const [formulas, formatted] = await Promise.all([
+    googleRequest(config, `/values/${range}?majorDimension=ROWS&valueRenderOption=FORMULA`),
+    googleRequest(config, `/values/${range}?majorDimension=ROWS&valueRenderOption=FORMATTED_VALUE`),
+  ]);
+  return { range: a1Range, formulas: formulas.values || [], values: formatted.values || [] };
+}
+
 export async function inspectActiveWeekLayouts(config: GoogleSheetsConfig, users: SheetUser[]) {
   const grids = await readActiveWeekGrids(config);
   const weekStart = currentMoscowWeekStart();

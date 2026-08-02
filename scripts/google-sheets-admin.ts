@@ -9,6 +9,7 @@ import {
   listGoogleSheets,
   importAvailabilitiesFromSheet,
   inspectActiveWeekLayouts,
+  inspectGoogleSheetRange,
   exportAvailabilityToSheet,
   currentMoscowWeekStart,
 } from '../src/googleSheetsSync.js';
@@ -32,6 +33,10 @@ if (command === 'sheets') {
   console.log(JSON.stringify(await importAvailabilitiesFromSheet(config, users), null, 2));
 } else if (command === 'layout') {
   console.log(JSON.stringify(await inspectActiveWeekLayouts(config, users), null, 2));
+} else if (command === 'range') {
+  const range = process.argv[3];
+  if (!range) throw new Error('A1 range is required');
+  console.log(JSON.stringify(await inspectGoogleSheetRange(config, range), null, 2));
 } else if (command === 'roundtrip-test') {
   const user = users.find((item: any) => item.telegramId) || users[0];
   if (!user) throw new Error('No user available for roundtrip test');

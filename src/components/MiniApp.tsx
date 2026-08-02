@@ -1823,7 +1823,6 @@ export default function MiniApp({
                               <InfoRow label="Telegram" value={user.username} href={telegramLink(user.username)} />
                               <InfoRow label="Дата рождения" value={formatDateShort(user.birthday) || 'не указана'} />
                               <InfoRow label="Регистрация" value={user.registered ? 'зарегистрирован в боте' : 'ещё не заходил в бот'} />
-                              <InfoRow label="В команде с" value={formatDateTimeShort(user.joinedAt) || 'дата не сохранена'} />
                               <InfoRow label="Последняя активность" value={formatDateTimeShort(user.lastSeenAt) || 'ещё не заходил'} />
                               <InfoRow label="Главный блок" value={user.primaryCompetency || 'не выбран'} />
                               <InfoRow label="Блоки" value={(user.competencies || []).join(', ') || 'не выбраны'} />

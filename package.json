@@ -15,6 +15,7 @@
     "sheets:weeks": "tsx scripts/google-sheets-admin.ts weeks",
     "sheets:import-preview": "tsx scripts/google-sheets-admin.ts import-preview",
     "sheets:layout": "tsx scripts/google-sheets-admin.ts layout",
+    "sheets:range": "tsx scripts/google-sheets-admin.ts range",
     "sheets:roundtrip-test": "tsx scripts/google-sheets-admin.ts roundtrip-test",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit"
