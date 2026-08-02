@@ -18,7 +18,13 @@ type ServiceAccountCredentials = {
   token_uri?: string;
 };
 
-type SheetUser = { id: string; realName: string; telegramId?: string };
+type SheetUser = {
+  id: string;
+  realName: string;
+  telegramId?: string;
+  registered?: boolean;
+  lastSeenAt?: string;
+};
 type SheetAvailability = {
   userId: string;
   slots: Record<number, number[]>;
@@ -394,7 +400,15 @@ export async function buildUserMappingReport(config: GoogleSheetsConfig, users: 
   const matchedIds = new Set(layout.rows.map((row) => row.user?.id).filter(Boolean));
   return {
     sheet: grid.title,
-    matches: layout.rows.map((row) => ({ sheetRow: row.rowIndex + 1, sheetName: row.name, appName: row.user?.realName, telegramId: row.user?.telegramId || '', confidence: row.matchSource })),
+    matches: layout.rows.map((row) => ({
+      sheetRow: row.rowIndex + 1,
+      sheetName: row.name,
+      appName: row.user?.realName,
+      telegramId: row.user?.telegramId || '',
+      registered: Boolean(row.user?.registered),
+      lastSeenAt: row.user?.lastSeenAt || '',
+      confidence: row.matchSource,
+    })),
     unmatchedSheetUsers: layout.allRows.filter((row) => !row.user).map((row) => ({ sheetRow: row.rowIndex + 1, sheetName: row.name })),
     unmatchedAppUsers: users.filter((user) => !matchedIds.has(user.id)),
   };
