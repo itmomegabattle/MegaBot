@@ -1132,7 +1132,7 @@ async function startServer() {
     const menuButton = user && !isFacultyUser(user) && webAppUrl
       ? {
           type: 'web_app',
-          text: 'Открыть',
+          text: 'Начать',
           web_app: { url: webAppUrl },
         }
       : { type: 'commands' };
@@ -1256,6 +1256,29 @@ async function startServer() {
     return meeting;
   }
 
+  async function configureBotProfile() {
+    const botToken = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
+    if (!botToken) return;
+    const tgApiBase = process.env.TELEGRAM_API_BASE || 'https://api.telegram.org';
+    const description = 'Нажми синюю кнопку «Начать» внизу слева — откроется MegaBot. Если кнопки нет, отправь /start. Здесь можно отмечать свободные слоты, смотреть встречи и работать с задачами команды.';
+    const shortDescription = 'Слоты, встречи и задачи команды ITMO MEGABATTLE.';
+    const calls = [
+      ['setMyDescription', { description }],
+      ['setMyShortDescription', { short_description: shortDescription }],
+    ] as const;
+    const results = await Promise.allSettled(calls.map(([method, body]) => telegramFetch(
+      `${tgApiBase}/bot${botToken}/${method}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      },
+    )));
+    results.forEach((result, index) => {
+      if (result.status === 'rejected') console.error(`Telegram ${calls[index][0]} failed:`, result.reason);
+    });
+  }
+
   function updateMeetingAttendance(meeting: Meeting, userId: string, attending: boolean) {
     const attendees = new Set(meeting.attendeeIds || []);
     const wasAttending = attendees.has(userId);
@@ -1337,6 +1360,19 @@ async function startServer() {
           ...(user.role === 'admin' ? [['МФ', 'Помощь']] : [['Помощь']]),
         ];
     await sendTelegramKeyboard(chatId, profileSummaryText(user, state), rows, false, user);
+  }
+
+  async function showWelcomePanel(chatId: string | number, user: User) {
+    const facultyText = isFacultyUser(user)
+      ? 'Здесь можно посмотреть профиль и работать со своими задачами.'
+      : 'Здесь можно отметить свободные слоты, посмотреть встречи и работать с задачами. Mini App открывается синей кнопкой «Начать» внизу слева.';
+    await sendTelegramKeyboard(
+      chatId,
+      `*Привет, ${user.realName || 'участник'}!*\n\nЯ MegaBot команды ITMO MEGABATTLE. ${facultyText}\n\nВыбери нужный раздел кнопками под строкой ввода.`,
+      buildChatKeyboard(false, user).keyboard.map((row: any[]) => row.map((item) => item.text)),
+      false,
+      user,
+    );
   }
 
   function slotDayPanel(user: User, state: SimulationState, dayIndex: number, pendingSlots: Record<number, number[]>) {
@@ -2652,7 +2688,7 @@ async function startServer() {
       }
 
       if (cmd.startsWith('/start')) {
-        await showProfilePanel(chatId, user, state);
+        await showWelcomePanel(chatId, user);
         saveDatabase(state);
         return res.json({ ok: true });
       } else if (isRegistrationPrompt(text)) {
@@ -3954,10 +3990,11 @@ async function startServer() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           menu_button: webAppUrl
-            ? { type: 'web_app', text: 'Открыть', web_app: { url: webAppUrl } }
+            ? { type: 'web_app', text: 'Начать', web_app: { url: webAppUrl } }
             : { type: 'commands' },
         })
       });
+      await configureBotProfile();
       const menuState = loadDatabase();
       const menuUsers = menuState.users.filter((user) => user.registered && user.telegramId);
       await Promise.allSettled(menuUsers.map((user) => configureChatMenuButton(user.telegramId!, user)));

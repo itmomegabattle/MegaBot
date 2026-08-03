@@ -70,6 +70,21 @@ const dayLabels = [
 const hours = [16, 17, 18, 19, 20, 21, 22, 23];
 const maxSlotWeeks = 5;
 const telegramLink = (username: string) => `https://t.me/${username.replace('@', '')}`;
+const openTelegramProfile = (event: React.MouseEvent<HTMLAnchorElement>, url: string) => {
+  event.preventDefault();
+  event.stopPropagation();
+  const webApp = (window as any).Telegram?.WebApp;
+  const supportsNonClosingTelegramLinks = !webApp?.isVersionAtLeast || webApp.isVersionAtLeast('7.0');
+  if (webApp?.openTelegramLink && supportsNonClosingTelegramLinks) {
+    webApp.openTelegramLink(url);
+    return;
+  }
+  if (webApp?.openLink) {
+    webApp.openLink(url);
+    return;
+  }
+  window.open(url, '_blank', 'noopener,noreferrer');
+};
 const taskAssigneeIds = (task: Task) => {
   if (!task.assignedTo) return [];
   return Array.isArray(task.assignedTo) ? task.assignedTo : [task.assignedTo];
@@ -1215,7 +1230,7 @@ export default function MiniApp({
                 </div>
                 <div className="min-w-0">
                   <h2 className="truncate text-lg font-black">{currentUser.realName}</h2>
-                  <a href={telegramLink(currentUser.username)} target="_blank" rel="noreferrer" className="text-sm font-bold text-[#0069E0]">
+                  <a href={telegramLink(currentUser.username)} onClick={(event) => openTelegramProfile(event, telegramLink(currentUser.username))} className="text-sm font-bold text-[#0069E0]">
                     {currentUser.username}
                   </a>
                   <p className="mt-1 text-xs font-semibold text-slate-500">
@@ -1615,7 +1630,7 @@ export default function MiniApp({
                         <div key={user.id} className="flex items-center justify-between gap-3 rounded-xl bg-white px-3 py-2 text-sm">
                           <div>
                             <div className="font-black">{user.realName}</div>
-                            <a href={telegramLink(user.username)} target="_blank" rel="noreferrer" className="text-xs font-bold text-[#0069E0]">{user.username}</a>
+                            <a href={telegramLink(user.username)} onClick={(event) => openTelegramProfile(event, telegramLink(user.username))} className="text-xs font-bold text-[#0069E0]">{user.username}</a>
                           </div>
                           <div className="text-right font-black text-[#0069E0]">{formatHours(user.daySlots)}</div>
                         </div>
@@ -1648,7 +1663,7 @@ export default function MiniApp({
                           ? availabilityByDay[expandedAvailabilityDay].unavailableUsers
                           : availabilityByDay[expandedAvailabilityDay].unavailableUsers.slice(0, 3)
                         ).map((user) => (
-                          <a key={user.id} href={telegramLink(user.username)} target="_blank" rel="noreferrer" className="rounded-xl bg-white px-3 py-2 text-sm font-bold text-slate-700">
+                          <a key={user.id} href={telegramLink(user.username)} onClick={(event) => openTelegramProfile(event, telegramLink(user.username))} className="rounded-xl bg-white px-3 py-2 text-sm font-bold text-slate-700">
                             {user.realName} <span className="text-[#0069E0]">{user.username}</span>
                           </a>
                         ))
@@ -2116,7 +2131,7 @@ export default function MiniApp({
                       <div className="flex items-center justify-between gap-3">
                         <div>
                           <div className="font-black">{user.realName}</div>
-                          <a href={telegramLink(user.username)} target="_blank" rel="noreferrer" className="text-sm font-bold text-[#0069E0]" onClick={(event) => event.stopPropagation()}>
+                          <a href={telegramLink(user.username)} className="text-sm font-bold text-[#0069E0]" onClick={(event) => openTelegramProfile(event, telegramLink(user.username))}>
                             {user.username}
                           </a>
                         </div>
@@ -2334,7 +2349,7 @@ export default function MiniApp({
                                       <div className="flex items-start justify-between gap-3">
                                         <div>
                                           <div className="font-black">{user.realName}</div>
-                                          <a href={telegramLink(user.username)} target="_blank" rel="noreferrer" className="font-bold text-[#0069E0]">{user.username}</a>
+                                          <a href={telegramLink(user.username)} onClick={(event) => openTelegramProfile(event, telegramLink(user.username))} className="font-bold text-[#0069E0]">{user.username}</a>
                                           <div className={`mt-1 inline-flex rounded-full px-2.5 py-1 text-xs font-black ${user.registered ? 'bg-emerald-50 text-emerald-800' : 'bg-slate-100 text-[#4D647A]'}`}>
                                             {user.registered ? 'Зарегистрирован' : 'Не зарегистрирован'}
                                           </div>
@@ -3077,7 +3092,7 @@ function CompactUserLinks({ users }: { users: Pick<User, 'id' | 'realName' | 'us
         ) : (
           visibleUsers.map((user, userIndex) => (
             <React.Fragment key={user.id}>
-              <a href={telegramLink(user.username)} target="_blank" rel="noreferrer" className="font-bold text-[#0069E0] underline decoration-blue-200">
+              <a href={telegramLink(user.username)} onClick={(event) => openTelegramProfile(event, telegramLink(user.username))} className="font-bold text-[#0069E0] underline decoration-blue-200">
                 {user.realName}
               </a>
               {userIndex < visibleUsers.length - 1 ? ', ' : ''}
@@ -3095,7 +3110,7 @@ function InfoRow({ label, value, href }: { label: string; value: string; href?: 
     <div className="flex items-start justify-between gap-4">
       <span className="min-w-0 text-slate-400">{label}</span>
       {href ? (
-        <a href={href} target="_blank" rel="noreferrer" className="min-w-0 max-w-[60%] break-words text-right font-bold text-[#0069E0] [overflow-wrap:anywhere]">{value}</a>
+        <a href={href} onClick={(event) => openTelegramProfile(event, href)} className="min-w-0 max-w-[60%] break-words text-right font-bold text-[#0069E0] [overflow-wrap:anywhere]">{value}</a>
       ) : (
         <span className="min-w-0 max-w-[60%] break-words text-right font-bold text-slate-700 [overflow-wrap:anywhere]">{value}</span>
       )}

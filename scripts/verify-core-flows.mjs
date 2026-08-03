@@ -222,8 +222,10 @@ try {
   assert.ok(telegramCalls.some((call) => call.path.endsWith('/sendMessage')));
   const menuButtonCall = telegramCalls.find((call) => call.path.endsWith('/setChatMenuButton'));
   assert.equal(menuButtonCall.body.menu_button.web_app.url, 'https://megaorgiabot.ru');
+  assert.equal(menuButtonCall.body.menu_button.text, 'Начать');
   assert.ok(!telegramCalls.some((call) => String(call.body.text || '').includes('меняет администратор')));
   const startMenuCall = telegramCalls.find((call) => call.path.endsWith('/sendMessage') && call.body.reply_markup?.keyboard);
+  assert.ok(String(startMenuCall.body.text).includes('MegaBot'));
   const startMenuButtons = startMenuCall.body.reply_markup.keyboard.flat().map((button) => button.text);
   assert.ok(startMenuButtons.includes('Профиль'));
   assert.ok(!startMenuButtons.includes('Команда'));
