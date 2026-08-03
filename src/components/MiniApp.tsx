@@ -282,6 +282,7 @@ export default function MiniApp({
     if (telegramTheme) return telegramTheme === 'dark';
     return window.matchMedia('(prefers-color-scheme: dark)').matches;
   });
+  const [adminSection, setAdminSection] = useState<'team' | 'slots' | 'meetings' | 'tasks' | 'faculties'>('team');
 
   const [newUserRealName, setNewUserRealName] = useState('');
   const [newUserUsername, setNewUserUsername] = useState('');
@@ -311,6 +312,27 @@ export default function MiniApp({
   const [facultyEditDraft, setFacultyEditDraft] = useState({ realName: '', username: '', role: 'faculty_responsible' as User['role'], facultyId: '', competencies: [] as string[] });
 
   const isAdmin = currentUser.role === 'admin';
+  const isAdminPanel = isAdmin && activeTab === 'admin';
+
+  useEffect(() => {
+    if (!isAdmin && activeTab === 'admin') {
+      setActiveTab('profile');
+      return;
+    }
+    if (activeTab === 'admin') return;
+
+    // Admin edit state is intentionally scoped to the panel. Clearing it here
+    // keeps every ordinary section identical to the participant experience.
+    setShowAddUserForm(false);
+    setEditingUserId(null);
+    setEditingFacultyUserId(null);
+    setEditingFacultyTaskId(null);
+    setShowTaskLog(false);
+    setShowFullCalendar(false);
+    setEditingMeetingId(null);
+    setShowMeetingForm(false);
+  }, [activeTab, isAdmin, setActiveTab]);
+
   const configuredWeekCount = Math.min(maxSlotWeeks, Math.max(2, Number(state.settings?.availabilityWeekCount || 2)));
   const coreTeamUsers = state.users.filter((user) => user.role === 'admin' || user.role === 'organizer');
   const votedUsers = useMemo(
@@ -385,9 +407,7 @@ export default function MiniApp({
       acc[key].push(task);
       return acc;
     }, {});
-  const teamUsers = isAdmin
-    ? coreTeamUsers
-    : [currentUser, ...coreTeamUsers.filter((user) => user.id !== currentUser.id)];
+  const teamUsers = [currentUser, ...coreTeamUsers.filter((user) => user.id !== currentUser.id)];
   const normalizedTeamSearch = teamSearch.trim().toLocaleLowerCase('ru');
   const filteredTeamUsers = normalizedTeamSearch
     ? teamUsers.filter((user) => `${user.realName} ${user.username}`.toLocaleLowerCase('ru').includes(normalizedTeamSearch))
@@ -784,7 +804,7 @@ export default function MiniApp({
   };
 
   const updateUser = async (userId: string) => {
-    const payload = isAdmin
+    const payload = isAdminPanel
       ? { requesterId: currentUser.id, userId, ...userDraft }
       : { requesterId: currentUser.id, userId, competencies: userDraft.competencies, primaryCompetency: userDraft.primaryCompetency };
     const res = await fetch('/api/user/update', {
@@ -980,6 +1000,7 @@ export default function MiniApp({
     team: 'Мегаорги',
     faculties: 'Факультеты',
     profile: 'Профиль',
+    admin: 'Админская панель',
   }[activeTab] || 'Моя неделя';
 
   useEffect(() => {
@@ -1065,6 +1086,17 @@ export default function MiniApp({
               </div>
             </div>
 
+            {isAdmin && (
+              <button
+                type="button"
+                onClick={() => setActiveTab('admin')}
+                className={`${primaryButtonClass} py-4 text-base`}
+              >
+                <Shield className="h-5 w-5" weight="fill" />
+                Админская панель
+              </button>
+            )}
+
             <div className="rounded-3xl border border-blue-100 bg-white p-5 shadow-sm">
               <h3 className="text-lg font-black">Статистика задач</h3>
               <p className="mt-1 text-sm font-semibold text-slate-500">Только задачи, которые были назначены тебе или созданы тобой</p>
@@ -1105,14 +1137,35 @@ export default function MiniApp({
           </section>
         )}
 
-        {activeTab === 'slots' && (
+        {isAdminPanel && (
           <section className="space-y-4">
-            {slotError && <div role="alert" className="rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm font-bold text-amber-800">{slotError}</div>}
+            <div className="rounded-2xl border border-blue-100 bg-white p-1.5 shadow-sm" role="tablist" aria-label="Разделы админской панели">
+              <div className="grid grid-cols-5 gap-1">
+                {([
+                  ['team', 'Команда'],
+                  ['slots', 'Слоты'],
+                  ['meetings', 'Встречи'],
+                  ['tasks', 'Задачи'],
+                  ['faculties', 'МФ'],
+                ] as const).map(([section, label]) => (
+                  <button
+                    key={section}
+                    type="button"
+                    role="tab"
+                    aria-selected={adminSection === section}
+                    onClick={() => setAdminSection(section)}
+                    className={`min-h-11 min-w-0 rounded-xl px-1 text-xs font-black transition sm:px-4 ${adminSection === section ? 'bg-[#0069E0] text-white shadow-[0_8px_20px_rgba(0,105,224,0.2)]' : 'text-[#4D647A] hover:bg-blue-50 hover:text-[#005BC4] active:bg-blue-100'}`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
 
-            {isAdmin && (
+            {adminSection === 'slots' && (
               <div className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
                 <h2 className="font-black">Горизонт заполнения</h2>
-                <p className="mt-1 text-sm font-semibold text-slate-500">Команда видит текущую и следующие недели. Минимум — две.</p>
+                <p className="mt-1 text-sm font-semibold text-slate-500">Управляй количеством недель в таблице и приложении, затем сообщи команде о новом горизонте.</p>
                 <div className="mt-3 flex flex-wrap gap-2">
                   <button disabled={savingWeekCount || configuredWeekCount <= 2} onClick={() => updateAvailabilityWeekCount(configuredWeekCount - 1)} className={secondaryButtonClass}>
                     <Minus className="h-4 w-4" /> Убрать неделю
@@ -1127,6 +1180,156 @@ export default function MiniApp({
               </div>
             )}
 
+            {adminSection === 'meetings' && (
+              <div className="space-y-4">
+                <div className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <h2 className="font-black">Общий календарь</h2>
+                      <p className="mt-1 text-xs font-semibold text-slate-500">Кто и когда свободен на неделе</p>
+                    </div>
+                    <button onClick={downloadAvailabilityCsv} className={miniButtonClass}>
+                      <DownloadSimple className="h-4 w-4" /> Скачать
+                    </button>
+                  </div>
+                  {calendarUsers.length > 3 && (
+                    <ListDisclosure expanded={showFullCalendar} onToggle={() => setShowFullCalendar((value) => !value)} total={calendarUsers.length} className="mt-3" />
+                  )}
+                  <div className="mt-4 overflow-x-auto rounded-2xl border border-slate-100">
+                    <table className="w-full min-w-[720px] border-collapse text-left text-xs">
+                      <thead className="bg-slate-50 text-slate-500">
+                        <tr>
+                          <th className="sticky left-0 z-10 bg-slate-50 px-3 py-2 font-black">Участник</th>
+                          {dayLabels.map((day, dayIndex) => (
+                            <th key={day.short} className="px-3 py-2 text-center font-black">{day.short} {formatDayMonth(dateForSlotDay(dayIndex))}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {visibleCalendarUsers.map((user) => (
+                          <tr key={user.id} className="border-t border-slate-100">
+                            <td className="sticky left-0 z-10 bg-white px-3 py-2">
+                              <div className="font-black">{user.realName}</div>
+                              <div className="font-bold text-[#0069E0]">{user.username}</div>
+                            </td>
+                            {dayLabels.map((_, dayIndex) => {
+                              const text = formatHours(alignedSlots(state.availabilities[user.id])?.[dayIndex] || []);
+                              const filled = text !== '—';
+                              return (
+                                <td key={dayIndex} className="px-2 py-2 align-top">
+                                  <div className={`min-h-10 rounded-xl px-2 py-1.5 text-center font-bold ${filled ? 'bg-blue-50 text-[#0069E0]' : 'bg-slate-50 text-[#718293]'}`}>{text}</div>
+                                </td>
+                              );
+                            })}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                {showMeetingForm && editingMeetingId && (
+                  <form onSubmit={submitMeeting} className="space-y-3 rounded-3xl border border-blue-100 bg-white p-4 shadow-sm animate-in fade-in slide-in-from-top-2 duration-200">
+                    <div className="flex items-center justify-between gap-2">
+                      <h2 className="font-black">Редактировать собрание</h2>
+                      <button type="button" onClick={resetMeetingForm} className={miniButtonClass}><X className="h-4 w-4" /> Отмена</button>
+                    </div>
+                    <Segmented
+                      value={meetingType}
+                      onChange={(value) => {
+                        const nextType = value as 'general' | 'custom' | 'competency';
+                        setMeetingType(nextType);
+                        setShowAllMeetingParticipants(false);
+                        if (nextType === 'general') setParticipants([]);
+                        if (nextType === 'custom') { setMeetingCompetency(''); setParticipants([]); }
+                      }}
+                      options={[["general", "Вся команда"], ["custom", "Выбрать людей"], ["competency", "Выбрать блок"]]}
+                    />
+                    <Field label="Название"><input value={meetingTitle} onChange={(event) => setMeetingTitle(event.target.value)} className={inputClass} /></Field>
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                      <Field label="Дата"><DatePickerField value={meetingDate} onChange={setMeetingDate} placeholder="Выбери дату" /></Field>
+                      <Field label="Время"><input type="time" value={meetingTime} onChange={(event) => setMeetingTime(event.target.value)} className={inputClass} /></Field>
+                    </div>
+                    <Field label="Тема"><textarea value={meetingTopic} onChange={(event) => setMeetingTopic(event.target.value)} className={inputClass} rows={3} /></Field>
+                    <Field label="Описание"><textarea value={meetingDescription} onChange={(event) => setMeetingDescription(event.target.value)} className={inputClass} rows={3} placeholder="Можно оставить пустым" /></Field>
+                    {meetingType === 'competency' && (
+                      <Field label="Блок">
+                        <select value={meetingCompetency} onChange={(event) => selectMeetingCompetency(event.target.value)} className={selectClass}>
+                          <option value="">Выбери блок</option>
+                          {competencies.map((name) => <option key={name} value={name}>{name}</option>)}
+                        </select>
+                      </Field>
+                    )}
+                    {(meetingType === 'custom' || meetingType === 'competency') && (
+                      <div className="grid grid-cols-1 gap-2">
+                        {coreTeamUsers.length > 3 && <ListDisclosure expanded={showAllMeetingParticipants} onToggle={() => setShowAllMeetingParticipants((value) => !value)} total={coreTeamUsers.length} />}
+                        {(showAllMeetingParticipants ? coreTeamUsers : coreTeamUsers.slice(0, 3)).map((user) => (
+                          <label key={user.id} className="flex items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm">
+                            <span>{user.realName}</span>
+                            <input type="checkbox" checked={participants.includes(user.id)} onChange={() => setParticipants((prev) => prev.includes(user.id) ? prev.filter((id) => id !== user.id) : [...prev, user.id])} />
+                          </label>
+                        ))}
+                      </div>
+                    )}
+                    <button disabled={savingMeeting} className={`${primaryButtonClass} disabled:opacity-70`}>{savingMeeting ? 'Сохраняю...' : 'Сохранить встречу'}</button>
+                  </form>
+                )}
+
+                <div className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
+                  <h2 className="font-black">Управление встречами</h2>
+                  <p className="mt-1 text-xs font-semibold text-slate-500">Редактирование и удаление встреч всей команды.</p>
+                  <div className="mt-4 space-y-3">
+                    {scheduledMeetings.length === 0 ? <EmptyState text="Встреч пока нет" /> : scheduledMeetings.map((meeting) => {
+                      const host = state.users.find((user) => user.id === meeting.hostId);
+                      return (
+                        <div key={meeting.id} className="rounded-2xl bg-slate-50 p-3">
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <div className="font-black">{meeting.title}</div>
+                              <div className="mt-1 text-xs font-semibold text-slate-500">{formatDateShort(meeting.date)} · {meeting.time} · {host?.realName || 'Организатор'}</div>
+                            </div>
+                            <div className="flex shrink-0 gap-2">
+                              <button type="button" onClick={() => startMeetingEdit(meeting)} className={miniButtonClass} aria-label={`Редактировать встречу ${meeting.title}`}><PencilSimple className="h-4 w-4" /></button>
+                              <button type="button" onClick={() => deleteMeeting(meeting.id)} className={`${miniButtonClass} border-rose-100 bg-rose-50 text-rose-600 hover:bg-rose-100 active:bg-rose-200`} aria-label={`Удалить встречу ${meeting.title}`}><Trash className="h-4 w-4" /></button>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {adminSection === 'tasks' && (
+              <div className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <h2 className="font-black">Управление журналом задач</h2>
+                    <p className="mt-1 text-xs font-semibold text-slate-500">Экспортируй историю или полностью очисти журнал задач.</p>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <a href="/api/task/export" className={miniButtonClass}>
+                      <DownloadSimple className="h-4 w-4" /> Excel
+                    </a>
+                    <button onClick={clearTaskLog} className={`${miniButtonClass} border-rose-100 bg-rose-50 text-rose-600 hover:bg-rose-100 active:bg-rose-200`}>
+                      <Trash className="h-4 w-4" /> Удалить лог
+                    </button>
+                    <button onClick={() => setShowTaskLog((value) => !value)} className={miniButtonClass}>
+                      {showTaskLog ? 'Свернуть' : 'Открыть лог'}
+                    </button>
+                  </div>
+                </div>
+                {showTaskLog && <div className="mt-4"><TaskLogView tasksByCompetency={tasksByCompetency} users={state.users} /></div>}
+              </div>
+            )}
+          </section>
+        )}
+
+        {activeTab === 'slots' && (
+          <section className="space-y-4">
+            {slotError && <div role="alert" className="rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm font-bold text-amber-800">{slotError}</div>}
+
             <div className="space-y-4">
               {Array.from({ length: visibleWeeks }, (_, weekIndex) => (
                 <div key={weekIndex} className="space-y-3">
@@ -1137,23 +1340,6 @@ export default function MiniApp({
                         {formatDayMonth(dateForSlotDay(weekIndex * 7))} - {formatDayMonth(dateForSlotDay(weekIndex * 7 + 6))}
                       </p>
                     </div>
-                    {isAdmin && weekIndex === visibleWeeks - 1 && weekIndex >= configuredWeekCount && (
-                      <button
-                        onClick={() => {
-                          setSlots((prev) => {
-                            const next = { ...prev };
-                            for (let day = weekIndex * 7; day < weekIndex * 7 + 7; day += 1) next[day] = [];
-                            return next;
-                          });
-                          setVisibleWeeks((value) => Math.max(1, value - 1));
-                          setHasUnsavedSlots(true);
-                        }}
-                        className={secondaryButtonClass}
-                      >
-                        <Minus className="h-4 w-4" />
-                        Скрыть неделю
-                      </button>
-                    )}
                   </div>
 
                   {dayLabels.map((day, dayIndex) => {
@@ -1199,16 +1385,6 @@ export default function MiniApp({
                 </div>
               ))}
             </div>
-
-            {isAdmin && visibleWeeks < maxSlotWeeks && visibleWeeks < configuredWeekCount && (
-              <button
-                onClick={() => setVisibleWeeks((value) => Math.min(maxSlotWeeks, value + 1))}
-                className={secondaryButtonClass}
-              >
-                <Plus className="h-4 w-4" />
-                Еще неделя
-              </button>
-            )}
 
             <button
               onClick={saveWeek}
@@ -1322,62 +1498,6 @@ export default function MiniApp({
                 </div>
               )}
             </div>
-
-            {isAdmin && (
-              <div className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
-                <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <h2 className="font-black">Общий календарь</h2>
-                    <p className="text-xs text-slate-500">Кто и когда свободен на неделе</p>
-                  </div>
-                  <button onClick={downloadAvailabilityCsv} className={miniButtonClass}>
-                    <DownloadSimple className="h-4 w-4" />
-                    Скачать
-                  </button>
-                </div>
-                {calendarUsers.length > 3 && (
-                  <ListDisclosure
-                    expanded={showFullCalendar}
-                    onToggle={() => setShowFullCalendar((value) => !value)}
-                    total={calendarUsers.length}
-                    className="mt-3"
-                  />
-                )}
-                <div className="mt-4 overflow-x-auto rounded-2xl border border-slate-100">
-                  <table className="min-w-[720px] w-full border-collapse text-left text-xs">
-                    <thead className="bg-slate-50 text-slate-500">
-                      <tr>
-                        <th className="sticky left-0 z-10 bg-slate-50 px-3 py-2 font-black">Участник</th>
-                        {dayLabels.map((day, dayIndex) => (
-                          <th key={day.short} className="px-3 py-2 text-center font-black">{day.short} {formatDayMonth(dateForSlotDay(dayIndex))}</th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {visibleCalendarUsers.map((user) => (
-                        <tr key={user.id} className="border-t border-slate-100">
-                          <td className="sticky left-0 z-10 bg-white px-3 py-2">
-                            <div className="font-black">{user.realName}</div>
-                            <div className="font-bold text-[#0069E0]">{user.username}</div>
-                          </td>
-                          {dayLabels.map((_, dayIndex) => {
-                            const text = formatHours(alignedSlots(state.availabilities[user.id])?.[dayIndex] || []);
-                            const filled = text !== '—';
-                            return (
-                              <td key={dayIndex} className="px-2 py-2 align-top">
-                                <div className={`min-h-10 rounded-xl px-2 py-1.5 text-center font-bold ${filled ? 'bg-blue-50 text-[#0069E0]' : 'bg-slate-50 text-[#718293]'}`}>
-                                  {text}
-                                </div>
-                              </td>
-                            );
-                          })}
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            )}
 
             <div className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
               <div className="flex items-center justify-between gap-3">
@@ -1519,7 +1639,7 @@ export default function MiniApp({
               ) : (
                 visibleScheduledMeetings.map((meeting) => {
                   const host = state.users.find((user) => user.id === meeting.hostId);
-                  const canManage = isAdmin || meeting.hostId === currentUser.id;
+                  const canManage = meeting.hostId === currentUser.id;
                   const expanded = expandedMeetingId === meeting.id;
                   return (
                     <div
@@ -1668,12 +1788,6 @@ export default function MiniApp({
                     <DownloadSimple className="h-4 w-4" />
                     Excel
                   </a>
-                  {isAdmin && (
-                    <button onClick={clearTaskLog} className={`${miniButtonClass} border-rose-100 bg-rose-50 text-rose-600 hover:bg-rose-100 active:bg-rose-200`}>
-                      <Trash className="h-4 w-4" />
-                      Удалить лог
-                    </button>
-                  )}
                   <button onClick={() => setShowTaskLog((value) => !value)} className={miniButtonClass}>
                     {showTaskLog ? 'Свернуть' : 'Открыть лог'}
                   </button>
@@ -1686,16 +1800,16 @@ export default function MiniApp({
           </section>
         )}
 
-        {activeTab === 'team' && (
+        {(activeTab === 'team' || (isAdminPanel && adminSection === 'team')) && (
           <section className="space-y-4">
-            {isAdmin && (
+            {isAdminPanel && (
               <button onClick={() => setShowAddUserForm((value) => !value)} className={primaryButtonClass}>
                 {showAddUserForm ? <Minus className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
                 Добавить человека
               </button>
             )}
 
-            {isAdmin && showAddUserForm && (
+            {isAdminPanel && showAddUserForm && (
               <form onSubmit={addUser} className="space-y-3 rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
                 <h2 className="flex items-center gap-2 font-black">
                   <UserPlus className="h-4 w-4 text-[#0069E0]" />
@@ -1722,7 +1836,7 @@ export default function MiniApp({
               </form>
             )}
 
-            {isAdmin && (
+            {isAdminPanel && (
               <div className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
                 <h2 className="font-black">Блоки и компетенции</h2>
                 <div className="mt-3 flex gap-2">
@@ -1808,7 +1922,7 @@ export default function MiniApp({
                         </div>
                         <div className="text-right">
                           <div className="rounded-full bg-blue-50 px-3 py-1 text-xs font-black text-[#0069E0]">{user.primaryCompetency || 'Блок не выбран'}</div>
-                          <div className={`mt-1 rounded-full px-2.5 py-1 text-xs font-black ${user.registered ? 'bg-emerald-50 text-emerald-800' : 'bg-slate-100 text-slate-700'}`}>
+                          <div className={`mt-1 rounded-full px-2.5 py-1 text-xs font-black ${user.registered ? 'bg-emerald-50 text-emerald-800' : 'bg-slate-100 text-[#4D647A]'}`}>
                             {user.registered ? 'В боте' : 'Не в боте'}
                           </div>
                           <div className="mt-1 text-xs text-slate-500">{formatDateShort(user.birthday) || 'Дата не указана'}</div>
@@ -1826,13 +1940,13 @@ export default function MiniApp({
                               <InfoRow label="Последняя активность" value={formatDateTimeShort(user.lastSeenAt) || 'ещё не заходил'} />
                               <InfoRow label="Главный блок" value={user.primaryCompetency || 'не выбран'} />
                               <InfoRow label="Блоки" value={(user.competencies || []).join(', ') || 'не выбраны'} />
-                              {(isAdmin || user.id === currentUser.id) && (
+                              {(isAdminPanel || user.id === currentUser.id) && (
                                 <div className="flex gap-2 pt-2">
                                   <button onClick={() => startUserEdit(user)} className={miniButtonClass}>
                                     <PencilSimple className="h-4 w-4" />
                                     Редактировать
                                   </button>
-                                  {isAdmin && (
+                                  {isAdminPanel && (
                                     <button onClick={() => deleteUser(user.id)} disabled={user.id === currentUser.id} className={`${miniButtonClass} ml-auto border-rose-100 bg-rose-50 text-rose-600 disabled:opacity-40`}>
                                       <Trash className="h-4 w-4" />
                                       Удалить
@@ -1849,11 +1963,11 @@ export default function MiniApp({
                               <Field label="Telegram">
                                 <input value={userDraft.username} onChange={(e) => setUserDraft((prev) => ({ ...prev, username: e.target.value }))} className={inputClass} />
                               </Field>
-                              <div className={`grid gap-3 ${isAdmin ? 'grid-cols-2' : 'grid-cols-1'}`}>
+                              <div className={`grid gap-3 ${isAdminPanel ? 'grid-cols-2' : 'grid-cols-1'}`}>
                                 <Field label="ДР">
                                   <DatePickerField value={userDraft.birthday} onChange={(value) => setUserDraft((prev) => ({ ...prev, birthday: value }))} placeholder="Выбери дату" fullYear />
                                 </Field>
-                                {isAdmin && (
+                                {isAdminPanel && (
                                   <Field label="Роль">
                                     <select value={userDraft.role} onChange={(e) => setUserDraft((prev) => ({ ...prev, role: e.target.value as User['role'] }))} className={selectClass}>
                                       <option value="organizer">Организатор</option>
@@ -1915,9 +2029,9 @@ export default function MiniApp({
           </section>
         )}
 
-        {activeTab === 'faculties' && (
+        {(activeTab === 'faculties' || (isAdminPanel && adminSection === 'faculties')) && (
           <section className="space-y-4">
-            {!isAdmin ? (
+            {!isAdminPanel ? (
               <EmptyState text="Раздел доступен админу" />
             ) : (
               <>
@@ -2017,7 +2131,7 @@ export default function MiniApp({
                                         <div>
                                           <div className="font-black">{user.realName}</div>
                                           <a href={telegramLink(user.username)} target="_blank" rel="noreferrer" className="font-bold text-[#0069E0]">{user.username}</a>
-                                          <div className={`mt-1 inline-flex rounded-full px-2.5 py-1 text-xs font-black ${user.registered ? 'bg-emerald-50 text-emerald-800' : 'bg-slate-100 text-slate-700'}`}>
+                                          <div className={`mt-1 inline-flex rounded-full px-2.5 py-1 text-xs font-black ${user.registered ? 'bg-emerald-50 text-emerald-800' : 'bg-slate-100 text-[#4D647A]'}`}>
                                             {user.registered ? 'Зарегистрирован' : 'Не зарегистрирован'}
                                           </div>
                                         </div>
@@ -2215,7 +2329,7 @@ export default function MiniApp({
                           ? { name: 'Все факультеты' }
                           : faculties.find((item) => item.id === task.facultyId);
                         const executors = taskAssigneeIds(task).map((id) => state.users.find((user) => user.id === id)?.realName).filter(Boolean).join(', ');
-                        const canEdit = isAdmin || task.creatorId === currentUser.id;
+                        const canEdit = isAdminPanel || task.creatorId === currentUser.id;
                         return (
                           <div key={task.id} className="rounded-2xl bg-slate-50 p-3">
                             <div className="flex items-start justify-between gap-3">
