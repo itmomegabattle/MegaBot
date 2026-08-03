@@ -780,6 +780,7 @@ async function startServer() {
   type StoredChatUiState = {
     version: 2;
     panels: Record<string, { current?: number; known: number[] }>;
+    pendingSheetExports: string[];
     slotDrafts: Record<string, {
       userId: string;
       weekStart: string;
@@ -788,20 +789,20 @@ async function startServer() {
   };
   const loadChatUiState = (): StoredChatUiState => {
     try {
-      if (!fs.existsSync(CHAT_PANEL_FILE)) return { version: 2, panels: {}, slotDrafts: {} };
+      if (!fs.existsSync(CHAT_PANEL_FILE)) return { version: 2, panels: {}, pendingSheetExports: [], slotDrafts: {} };
       const saved = JSON.parse(fs.readFileSync(CHAT_PANEL_FILE, 'utf8')) as StoredChatUiState | Record<string, number>;
       if ((saved as StoredChatUiState).version === 2 && (saved as StoredChatUiState).panels) {
-        return saved as StoredChatUiState;
+        return { ...(saved as StoredChatUiState), pendingSheetExports: (saved as StoredChatUiState).pendingSheetExports || [] };
       }
       const panels = Object.fromEntries(
         Object.entries(saved)
           .filter(([, value]) => Number.isInteger(value))
           .map(([chatId, value]) => [chatId, { current: value, known: [value as number] }]),
       );
-      return { version: 2, panels, slotDrafts: {} };
+      return { version: 2, panels, pendingSheetExports: [], slotDrafts: {} };
     } catch (error) {
       console.error('Error reading chat panel state:', error);
-      return { version: 2, panels: {}, slotDrafts: {} };
+      return { version: 2, panels: {}, pendingSheetExports: [], slotDrafts: {} };
     }
   };
   const chatUiState = loadChatUiState();
@@ -815,6 +816,7 @@ async function startServer() {
       .map(([chatId, panel]) => [chatId, new Set(panel.known.filter(Number.isInteger))]),
   );
   const chatSlotDrafts = new Map(Object.entries(chatUiState.slotDrafts || {}));
+  const pendingSheetAvailabilityExports = new Set(chatUiState.pendingSheetExports || []);
   const persistChatPanelMessageIds = () => {
     try {
       const panels = Object.fromEntries([...chatPanelKnownIds.entries()].map(([chatId, known]) => [chatId, {
@@ -824,6 +826,7 @@ async function startServer() {
       fs.writeFileSync(CHAT_PANEL_FILE, JSON.stringify({
         version: 2,
         panels,
+        pendingSheetExports: [...pendingSheetAvailabilityExports],
         slotDrafts: Object.fromEntries(chatSlotDrafts),
       }, null, 2), 'utf8');
     } catch (error) {
@@ -846,6 +849,24 @@ async function startServer() {
     known?.delete(messageId);
     if (known && known.size === 0) chatPanelKnownIds.delete(chatKey);
     if (chatPanelMessageIds.get(chatKey) === messageId) chatPanelMessageIds.delete(chatKey);
+  };
+  const flushPendingSheetAvailabilityExports = async () => {
+    if (!sheetsConfig || pendingSheetAvailabilityExports.size === 0) return;
+    const state = loadDatabase();
+    for (const userId of [...pendingSheetAvailabilityExports]) {
+      const availability = state.availabilities[userId];
+      if (!availability) {
+        pendingSheetAvailabilityExports.delete(userId);
+        continue;
+      }
+      try {
+        await exportAvailabilityToSheet(sheetsConfig, state.users, availability);
+        pendingSheetAvailabilityExports.delete(userId);
+      } catch (error: any) {
+        console.error(`Google Sheets queued availability export failed for ${userId}:`, error.message || error);
+      }
+    }
+    persistChatPanelMessageIds();
   };
   const groupCheckins = new Map<string, { title: string; userIds: Set<string> }>();
 
@@ -1406,6 +1427,7 @@ async function startServer() {
     user: User,
     state: SimulationState,
     overrideSlots?: Record<number, number[]>,
+    messageId?: number,
   ) {
     const dayNames = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
     const chatKey = String(chatId);
@@ -1429,16 +1451,18 @@ async function startServer() {
     });
     const keyboard = [
       dayNames.slice(0, 4).map((day, index) => ({
-        text: `${(availability[index] || []).length ? '✓ ' : ''}${day}`,
+        text: `${day} · ${(availability[index] || []).length}/8`,
         callback_data: `slots_day:${index}`,
       })),
       dayNames.slice(4).map((day, offset) => ({
-        text: `${(availability[offset + 4] || []).length ? '✓ ' : ''}${day}`,
+        text: `${day} · ${(availability[offset + 4] || []).length}/8`,
         callback_data: `slots_day:${offset + 4}`,
       })),
       [{ text: 'Сохранить', callback_data: 'slot_save' }],
     ];
-    await sendInlinePanel(chatId, slotsSummaryText(user, state, availability), keyboard);
+    const text = `${slotsSummaryText(user, state, availability)}\n\nВыбери день. Внутри можно отметить отдельные часы или нажать «Выбрать весь день».`;
+    if (messageId) await editTelegramPanel(chatId, messageId, text, keyboard);
+    else await sendInlinePanel(chatId, text, keyboard);
   }
 
   async function showMeetingsPanel(chatId: string | number, user: User, state: SimulationState) {
@@ -1757,7 +1781,7 @@ async function startServer() {
         const pendingSlots = chatSlotDrafts.get(String(chatId))?.slots
           || chatSessions.get(String(chatId))?.pendingSlots
           || alignedAvailabilitySlots(state.availabilities[user.id]);
-        await showSlotsPanel(chatId, user, state, pendingSlots);
+        await showSlotsPanel(chatId, user, state, pendingSlots, callbackMessageId);
         return res.json({ ok: true });
       }
 
@@ -1841,17 +1865,20 @@ async function startServer() {
         };
         chatSessions.delete(chatKey);
         chatSlotDrafts.delete(chatKey);
+        if (sheetsConfig) pendingSheetAvailabilityExports.add(user.id);
         persistChatPanelMessageIds();
         saveDatabase(state);
         await answerCallback(callback.id, 'Слоты сохранены');
-        await showProfilePanel(chatId, user, state);
-        if (sheetsConfig) {
-          try {
-            await exportAvailabilityToSheet(sheetsConfig, state.users, state.availabilities[user.id]);
-          } catch (error: any) {
-            console.error('Google Sheets chat availability export failed:', error);
-          }
-        }
+        await editTelegramPanel(
+          chatId,
+          callbackMessageId,
+          `✅ *Слоты сохранены*\n\n${slotsSummaryText(user, state, pendingSlots)}`,
+          [
+            [{ text: 'Изменить слоты', callback_data: 'nav_slots' }],
+            [{ text: 'Профиль', callback_data: 'nav_profile' }],
+          ],
+        );
+        void flushPendingSheetAvailabilityExports();
         return res.json({ ok: true });
       }
 
@@ -3284,9 +3311,13 @@ async function startServer() {
     if (sheetsConfig) {
       try {
         const result = await exportAvailabilityToSheet(sheetsConfig, state.users, state.availabilities[userId]);
+        pendingSheetAvailabilityExports.delete(userId);
+        persistChatPanelMessageIds();
         googleSheets = { synced: true, updatedCells: result.updatedCells };
       } catch (error: any) {
         console.error('Google Sheets availability export failed:', error);
+        pendingSheetAvailabilityExports.add(userId);
+        persistChatPanelMessageIds();
         googleSheets = { synced: false, error: error.message || 'Google Sheets export failed' };
       }
     }
@@ -3939,33 +3970,11 @@ async function startServer() {
     });
   }
 
-  async function startTelegramLongPolling() {
-    if (process.env.DISABLE_TELEGRAM_POLLING === 'true') {
-      console.log('Telegram long polling disabled by DISABLE_TELEGRAM_POLLING.');
-      return;
-    }
-
+  async function configureTelegramBotUi() {
     const botToken = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
-    if (!botToken) {
-      console.warn('BOT_TOKEN / TELEGRAM_BOT_TOKEN is not set in .env. Telegram long polling was not started.');
-      return;
-    }
-
+    if (!botToken) return;
     const tgApiBase = process.env.TELEGRAM_API_BASE || 'https://api.telegram.org';
     const webAppUrl = configuredWebAppUrl();
-
-    console.log('Starting Telegram long polling...');
-
-    // Reset the old webhook before long polling so Telegram sends updates here.
-    try {
-      console.log('Deleting old Telegram webhook...');
-      const response = await telegramFetch(`${tgApiBase}/bot${botToken}/deleteWebhook`);
-      const data = await response.json();
-      console.log('Telegram webhook deletion result:', data);
-    } catch (err: any) {
-      console.error('Failed to delete Telegram webhook:', err.message);
-    }
-
     try {
       await telegramFetch(`${tgApiBase}/bot${botToken}/setMyCommands`, {
         method: 'POST',
@@ -4001,6 +4010,33 @@ async function startServer() {
       console.log('Telegram commands configured. Mini App menu button configured.');
     } catch (err: any) {
       console.error('Failed to configure Telegram commands/menu:', err.message);
+    }
+  }
+
+  async function startTelegramLongPolling() {
+    if (process.env.DISABLE_TELEGRAM_POLLING === 'true') {
+      console.log('Telegram long polling disabled by DISABLE_TELEGRAM_POLLING.');
+      return;
+    }
+
+    const botToken = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
+    if (!botToken) {
+      console.warn('BOT_TOKEN / TELEGRAM_BOT_TOKEN is not set in .env. Telegram long polling was not started.');
+      return;
+    }
+
+    const tgApiBase = process.env.TELEGRAM_API_BASE || 'https://api.telegram.org';
+
+    console.log('Starting Telegram long polling...');
+
+    // Reset the old webhook before long polling so Telegram sends updates here.
+    try {
+      console.log('Deleting old Telegram webhook...');
+      const response = await telegramFetch(`${tgApiBase}/bot${botToken}/deleteWebhook`);
+      const data = await response.json();
+      console.log('Telegram webhook deletion result:', data);
+    } catch (err: any) {
+      console.error('Failed to delete Telegram webhook:', err.message);
     }
 
     await sendDueBirthdayReminders();
@@ -4077,6 +4113,7 @@ async function startServer() {
     }, 60 * 60 * 1000);
     setInterval(async () => {
       try {
+        await flushPendingSheetAvailabilityExports();
         const state = loadDatabase();
         const result = await importAvailabilitiesFromSheet(sheetsConfig, state.users);
         result.imported.forEach((availability) => { state.availabilities[availability.userId] = availability; });
@@ -4089,6 +4126,9 @@ async function startServer() {
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on port ${PORT}`);
+    configureTelegramBotUi().catch((error: any) => {
+      console.error('Telegram UI configuration failed:', error.message || error);
+    });
     startTelegramLongPolling();
   });
 }

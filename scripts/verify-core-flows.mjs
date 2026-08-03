@@ -12,6 +12,7 @@ const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'megabot-core-'));
 const appPort = 31847;
 const botToken = 'integration-test-token';
 const telegramCalls = [];
+let nextTelegramMessageId = 1000;
 let sessionCookie = '';
 
 const fixture = {
@@ -133,15 +134,17 @@ const fakeTelegram = http.createServer((req, res) => {
     rawBody += chunk;
   });
   req.on('end', () => {
+    const resultMessageId = req.url.endsWith('/sendMessage') ? nextTelegramMessageId++ : undefined;
     telegramCalls.push({
       path: req.url,
       body: rawBody ? JSON.parse(rawBody) : {},
+      resultMessageId,
     });
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       ok: true,
-      result: req.url.endsWith('/sendMessage')
-        ? { message_id: telegramCalls.length, chat: { id: 1 }, text: '' }
+      result: resultMessageId
+        ? { message_id: resultMessageId, chat: { id: 1 }, text: '' }
         : true,
     }));
   });
@@ -177,6 +180,14 @@ try {
     serverErrors += chunk.toString();
   });
   await waitForServer();
+  for (let attempt = 0; attempt < 50 && !telegramCalls.some((call) => call.path.endsWith('/setMyDescription')); attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.ok(telegramCalls.some((call) => call.path.endsWith('/setMyDescription')));
+  assert.ok(telegramCalls.some((call) => (
+    call.path.endsWith('/setChatMenuButton')
+    && call.body.menu_button?.web_app?.url === 'https://megaorgiabot.ru'
+  )));
 
   const protectedState = await request('/api/state');
   assert.equal(protectedState.response.status, 401);
@@ -390,7 +401,20 @@ try {
   const slotsSendCall = telegramCalls.find((call) => (
     call.path.endsWith('/sendMessage') && call.body.reply_markup?.inline_keyboard
   ));
-  const slotsPanelId = telegramCalls.indexOf(slotsSendCall) + 1;
+  const slotsPanelId = slotsSendCall.resultMessageId;
+
+  telegramCalls.length = 0;
+  await request('/api/telegram-webhook', {
+    update_id: 111,
+    callback_query: {
+      id: 'stale-slots-day',
+      from: aliceTelegram,
+      data: 'slots_day:2',
+      message: { message_id: slotsPanelId - 1, chat: { id: 200, type: 'private' } },
+    },
+  });
+  assert.ok(telegramCalls.some((call) => call.path.endsWith('/deleteMessage') && call.body.message_id === slotsPanelId - 1));
+  assert.ok(!telegramCalls.some((call) => call.path.endsWith('/editMessageText')));
 
   telegramCalls.length = 0;
   await request('/api/telegram-webhook', {
@@ -402,7 +426,9 @@ try {
       message: { message_id: slotsPanelId, chat: { id: 200, type: 'private' } },
     },
   });
-  assert.ok(telegramCalls.some((call) => call.path.endsWith('/editMessageText')));
+  const dayPanelEdit = telegramCalls.find((call) => call.path.endsWith('/editMessageText'));
+  assert.equal(dayPanelEdit.body.message_id, slotsPanelId);
+  assert.ok(dayPanelEdit.body.reply_markup.inline_keyboard.flat().some((button) => button.text === 'Выбрать весь день'));
 
   telegramCalls.length = 0;
   await request('/api/telegram-webhook', {
@@ -442,11 +468,9 @@ try {
       message: { message_id: slotsPanelId, chat: { id: 200, type: 'private' } },
     },
   });
-  const slotsDaysCall = telegramCalls.find((call) => (
-    call.path.endsWith('/sendMessage') && call.body.reply_markup?.inline_keyboard
-  ));
+  const slotsDaysCall = telegramCalls.find((call) => call.path.endsWith('/editMessageText'));
   assert.ok(slotsDaysCall);
-  assert.ok(slotsDaysCall.body.reply_markup.inline_keyboard.flat().some((button) => button.callback_data === 'slots_day:2' && button.text.includes('✓')));
+  assert.ok(slotsDaysCall.body.reply_markup.inline_keyboard.flat().some((button) => button.callback_data === 'slots_day:2' && button.text === 'Ср · 7/8'));
   assert.ok(String(slotsDaysCall.body.text || '').includes('Ср:'));
 
   telegramCalls.length = 0;
@@ -459,13 +483,30 @@ try {
       message: { message_id: slotsPanelId, chat: { id: 200, type: 'private' } },
     },
   });
-  const slotsSavedMenu = telegramCalls.find((call) => call.path.endsWith('/sendMessage') && call.body.reply_markup?.keyboard);
+  const slotsSavedMenu = telegramCalls.find((call) => call.path.endsWith('/editMessageText'));
   assert.ok(slotsSavedMenu);
-  const slotsSavedButtons = slotsSavedMenu.body.reply_markup.keyboard.flat().map((button) => button.text);
+  const slotsSavedButtons = slotsSavedMenu.body.reply_markup.inline_keyboard.flat().map((button) => button.text);
   assert.ok(slotsSavedButtons.includes('Профиль'));
-  assert.ok(!slotsSavedButtons.includes('Команда'));
+  assert.ok(slotsSavedButtons.includes('Изменить слоты'));
   const slotsSavedDatabase = JSON.parse(await readFile(testDatabasePath, 'utf8'));
-  assert.ok(slotsSavedDatabase.availabilities.u_alice.slots['2'].includes(18));
+  assert.deepEqual(slotsSavedDatabase.availabilities.u_alice.slots['2'], [16, 17, 18, 19, 20, 21, 22]);
+  const slotsSavedUiState = JSON.parse(await readFile(`${testDatabasePath}.chat-panels.json`, 'utf8'));
+  assert.equal(slotsSavedUiState.slotDrafts['200'], undefined);
+
+  telegramCalls.length = 0;
+  await request('/api/telegram-webhook', {
+    update_id: 141,
+    message: {
+      message_id: 141,
+      chat: { id: 200, type: 'private' },
+      from: aliceTelegram,
+      text: 'Слоты',
+    },
+  });
+  const reopenedSlots = telegramCalls.find((call) => call.path.endsWith('/sendMessage') && call.body.reply_markup?.inline_keyboard);
+  assert.ok(reopenedSlots);
+  assert.ok(reopenedSlots.body.reply_markup.inline_keyboard.flat().some((button) => button.text === 'Ср · 7/8'));
+  assert.ok(String(reopenedSlots.body.text).includes('Ср: 16:00, 17:00, 18:00, 19:00, 20:00, 21:00, 22:00'));
 
   telegramCalls.length = 0;
   await request('/api/telegram-webhook', {
@@ -796,7 +837,7 @@ try {
     && call.body.reply_markup?.inline_keyboard?.[0]?.[0]?.callback_data === 'group_checkin'
   ));
   assert.ok(checkinMessage);
-  const checkinPanelId = telegramCalls.indexOf(checkinMessage) + 1;
+  const checkinPanelId = checkinMessage.resultMessageId;
 
   telegramCalls.length = 0;
   await request('/api/telegram-webhook', {
@@ -824,7 +865,7 @@ try {
   assert.equal(persistedPanels.version, 2);
   assert.ok(Number.isInteger(persistedPanels.panels['200'].current));
   assert.ok(Array.isArray(persistedPanels.panels['200'].known));
-  assert.equal(persistedPanels.slotDrafts['200'], undefined);
+  assert.deepEqual(persistedPanels.slotDrafts['200'].slots['2'], [16, 17, 18, 19, 20, 21, 22]);
   assert.match(serverErrors, /Temporary WEBAPP_URL dead-tunnel\.lhr\.life is not allowed in production/);
 
   console.log('Core flow verification passed: registration, access binding, task notifications, meeting notifications, and task completion.');
