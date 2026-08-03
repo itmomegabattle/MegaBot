@@ -12,6 +12,8 @@ import {
   Clock,
   UserPlus,
   PencilSimple,
+  Bell,
+  ChatCircleText,
   X,
   DownloadSimple,
   Moon,
@@ -38,10 +40,10 @@ interface MiniAppProps {
   onSaveAvailability: (slots: Record<number, number[]>, weekStart: string, hardUnavailableDays?: number[]) => Promise<boolean>;
   onScheduleMeeting: (meetingData: any) => Promise<boolean>;
   onCreateTask: (taskData: any) => Promise<boolean>;
-  onClaimTask: (taskId: string) => void;
-  onCompleteTask: (taskId: string, timeSpentMinutes?: number) => Promise<boolean>;
+  onClaimTask: (taskId: string) => Promise<boolean>;
+  onCompleteTask: (taskId: string, timeSpentMinutes?: number, completionComment?: string) => Promise<boolean>;
   onReleaseTask: (taskId: string) => void;
-  onRefreshState: () => void;
+  onRefreshState: () => void | Promise<void>;
 }
 
 type MeetingSuggestion = {
@@ -236,7 +238,9 @@ export default function MiniApp({
   const [weekSaved, setWeekSaved] = useState(false);
   const [hasUnsavedSlots, setHasUnsavedSlots] = useState(false);
   const [slotError, setSlotError] = useState('');
+  const [slotNotice, setSlotNotice] = useState('');
   const [taskError, setTaskError] = useState('');
+  const [taskNotice, setTaskNotice] = useState('');
 
   const [showMeetingForm, setShowMeetingForm] = useState(false);
   const [savingMeeting, setSavingMeeting] = useState(false);
@@ -244,12 +248,15 @@ export default function MiniApp({
   const [meetingTitle, setMeetingTitle] = useState('Общее собрание');
   const [meetingDate, setMeetingDate] = useState('');
   const [meetingTime, setMeetingTime] = useState('18:00');
+  const [meetingDuration, setMeetingDuration] = useState('1');
   const [meetingTopic, setMeetingTopic] = useState('');
   const [meetingDescription, setMeetingDescription] = useState('');
   const [meetingType, setMeetingType] = useState<'general' | 'custom' | 'competency'>('general');
   const [meetingCompetency, setMeetingCompetency] = useState('');
   const [participants, setParticipants] = useState<string[]>([]);
   const [editingMeetingId, setEditingMeetingId] = useState<string | null>(null);
+  const [meetingError, setMeetingError] = useState('');
+  const [rsvpMeetingId, setRsvpMeetingId] = useState<string | null>(null);
 
   const [showTaskForm, setShowTaskForm] = useState(false);
   const [savingTask, setSavingTask] = useState(false);
@@ -261,9 +268,12 @@ export default function MiniApp({
   const [showAllTaskAssignees, setShowAllTaskAssignees] = useState(false);
   const [taskSow, setTaskSow] = useState('');
   const [taskPriority, setTaskPriority] = useState<Task['priority']>('normal');
+  const [taskReminders, setTaskReminders] = useState<any[]>([]);
+  const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
   const [completingTaskId, setCompletingTaskId] = useState<string | null>(null);
   const [completionHours, setCompletionHours] = useState('');
   const [completionMinutes, setCompletionMinutes] = useState('');
+  const [completionComment, setCompletionComment] = useState('');
   const [savingCompletion, setSavingCompletion] = useState(false);
   const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
   const [showCompletedTasks, setShowCompletedTasks] = useState(false);
@@ -297,6 +307,8 @@ export default function MiniApp({
   const [userDraft, setUserDraft] = useState({ realName: '', username: '', birthday: '', role: 'organizer' as User['role'], competencies: [] as string[], primaryCompetency: '' });
   const [newCompetency, setNewCompetency] = useState('');
   const [showAllCompetencies, setShowAllCompetencies] = useState(false);
+  const [teamError, setTeamError] = useState('');
+  const [savingUserId, setSavingUserId] = useState<string | null>(null);
   const [facultyUserDraft, setFacultyUserDraft] = useState({ realName: '', username: '', role: 'faculty_responsible' as User['role'], facultyId: '', competencies: [] as string[] });
   const [facultyTaskDraft, setFacultyTaskDraft] = useState({ facultyId: '', competency: '', title: '', description: '', deadline: '', assignedTo: [] as string[], reminders: [] as any[] });
   const [facultyTaskErrors, setFacultyTaskErrors] = useState<Record<string, boolean>>({});
@@ -507,6 +519,7 @@ export default function MiniApp({
   const updateAvailabilityWeekCount = async (weeks: number, notifyTeam = false) => {
     setSavingWeekCount(true);
     setSlotError('');
+    setSlotNotice('');
     try {
       const response = await fetch('/api/availability/weeks', {
         method: 'POST',
@@ -516,6 +529,9 @@ export default function MiniApp({
       const body = await response.json();
       if (!response.ok) throw new Error(body.error || 'Не удалось изменить количество недель');
       await onRefreshState();
+      setSlotNotice(notifyTeam
+        ? `Уведомление отправлено: ${body.notified || 0} получателей.`
+        : `Теперь команда заполняет ${body.weeks} недели вперёд.`);
     } catch (error: any) {
       setSlotError(error.message || 'Не удалось изменить количество недель');
     } finally {
@@ -615,12 +631,14 @@ export default function MiniApp({
     setMeetingTitle('Общее собрание');
     setMeetingDate('');
     setMeetingTime('18:00');
+    setMeetingDuration('1');
     setMeetingTopic('');
     setMeetingDescription('');
     setMeetingType('general');
     setMeetingCompetency('');
     setParticipants([]);
     setShowAllMeetingParticipants(false);
+    setMeetingError('');
   };
 
   const startMeetingEdit = (meeting: Meeting) => {
@@ -629,6 +647,7 @@ export default function MiniApp({
     setMeetingTitle(meeting.title);
     setMeetingDate(formatDateShort(meeting.date));
     setMeetingTime(meeting.time);
+    setMeetingDuration(String(meeting.duration || 1));
     setMeetingTopic(meeting.topic || '');
     setMeetingDescription(meeting.description || '');
     setMeetingType(meeting.competency ? 'competency' : meeting.type);
@@ -638,13 +657,26 @@ export default function MiniApp({
 
   const submitMeeting = async (event: React.FormEvent) => {
     event.preventDefault();
+    setMeetingError('');
+    if (!meetingTitle.trim()) {
+      setMeetingError('Укажи название собрания.');
+      return;
+    }
+    if (!meetingDate) {
+      setMeetingError('Выбери дату собрания.');
+      return;
+    }
+    if (meetingType !== 'general' && participants.length === 0) {
+      setMeetingError(meetingType === 'competency' ? 'В выбранном блоке пока нет участников.' : 'Выбери хотя бы одного участника.');
+      return;
+    }
     setSavingMeeting(true);
     const payload = {
       title: meetingTitle || 'Собрание',
       type: meetingType === 'competency' ? 'custom' : meetingType,
       date: meetingDate || nextDateForDay(0),
       time: meetingTime,
-      duration: 1,
+      duration: Number(meetingDuration) || 1,
       hostId: currentUser.id,
       participants: meetingType === 'general' ? 'all' : participants,
       topic: meetingTopic,
@@ -658,9 +690,12 @@ export default function MiniApp({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ meetingId: editingMeetingId, requesterId: currentUser.id, ...payload }),
       });
+      const body = await res.json();
       if (res.ok) {
         resetMeetingForm();
-        onRefreshState();
+        await onRefreshState();
+      } else {
+        setMeetingError(body.error || 'Не удалось сохранить собрание.');
       }
       setSavingMeeting(false);
       return;
@@ -669,6 +704,41 @@ export default function MiniApp({
     const ok = await onScheduleMeeting(payload);
     setSavingMeeting(false);
     if (ok) resetMeetingForm();
+    else setMeetingError('Не удалось назначить собрание. Проверь поля и соединение.');
+  };
+
+  const setMeetingAudience = (nextType: 'general' | 'custom' | 'competency') => {
+    setMeetingType(nextType);
+    setMeetingError('');
+    setShowAllMeetingParticipants(false);
+    if (nextType === 'general') {
+      setParticipants([]);
+      setMeetingCompetency('');
+    }
+    if (nextType === 'custom') {
+      setMeetingCompetency('');
+      setParticipants([]);
+    }
+  };
+
+  const setMeetingAttendance = async (meeting: Meeting, attending: boolean) => {
+    if (rsvpMeetingId) return;
+    setRsvpMeetingId(meeting.id);
+    setMeetingError('');
+    try {
+      const response = await fetch('/api/meeting/rsvp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ requesterId: currentUser.id, meetingId: meeting.id, attending }),
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || 'Не удалось обновить участие');
+      await onRefreshState();
+    } catch (error: any) {
+      setMeetingError(error.message || 'Не удалось обновить участие.');
+    } finally {
+      setRsvpMeetingId(null);
+    }
   };
 
   const deleteMeeting = async (meetingId: string) => {
@@ -691,18 +761,37 @@ export default function MiniApp({
     setShowAllTaskAssignees(false);
     setTaskSow('');
     setTaskPriority('normal');
+    setTaskReminders([]);
+    setEditingTaskId(null);
   };
 
   const openTaskForm = () => {
     if (!showTaskForm) setTaskError('');
+    if (showTaskForm) resetTaskForm();
     setShowTaskForm((value) => !value);
+  };
+
+  const startTaskEdit = (task: Task) => {
+    setEditingTaskId(task.id);
+    setTaskTitle(task.title);
+    setTaskDesc(task.description);
+    setTaskCompetency(task.competency || '');
+    setTaskDeadline(formatDateShort(task.deadline));
+    setTaskAssignedTo(taskAssigneeIds(task));
+    setTaskSow(task.sow || '');
+    setTaskPriority(task.priority || 'normal');
+    setTaskReminders(task.reminders?.map((reminder) => ({ ...reminder })) || []);
+    setTaskError('');
+    setShowTaskForm(true);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
   const submitTask = async (event: React.FormEvent) => {
     event.preventDefault();
     setTaskError('');
+    setTaskNotice('');
     setSavingTask(true);
-    const ok = await onCreateTask({
+    const payload = {
       title: taskTitle.trim() || 'Без названия',
       description: taskDesc.trim(),
       competency: taskCompetency.trim(),
@@ -712,7 +801,27 @@ export default function MiniApp({
       tips: [],
       priority: taskPriority,
       creatorId: currentUser.id,
-    });
+      reminders: taskReminders,
+    };
+    let ok = false;
+    if (editingTaskId) {
+      try {
+        const response = await fetch('/api/task/update', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ requesterId: currentUser.id, taskId: editingTaskId, ...payload }),
+        });
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.error || 'Не удалось сохранить задачу');
+        await onRefreshState();
+        setTaskNotice('Задача и исполнители обновлены.');
+        ok = true;
+      } catch (error: any) {
+        setTaskError(error.message || 'Не удалось сохранить задачу.');
+      }
+    } else {
+      ok = await onCreateTask(payload);
+    }
     setSavingTask(false);
     if (ok) {
       resetTaskForm();
@@ -724,6 +833,7 @@ export default function MiniApp({
     setCompletingTaskId(taskId);
     setCompletionHours('');
     setCompletionMinutes('');
+    setCompletionComment('');
   };
 
   const closeCompletionPrompt = () => {
@@ -731,6 +841,7 @@ export default function MiniApp({
     setCompletingTaskId(null);
     setCompletionHours('');
     setCompletionMinutes('');
+    setCompletionComment('');
   };
 
   const completeTaskWithTime = async (includeTime: boolean) => {
@@ -739,7 +850,11 @@ export default function MiniApp({
     const minutesValue = Math.max(0, Number.parseInt(completionMinutes || '0', 10) || 0);
     const totalMinutes = hoursValue * 60 + minutesValue;
     setSavingCompletion(true);
-    const ok = await onCompleteTask(completingTaskId, includeTime && totalMinutes > 0 ? totalMinutes : undefined);
+    const ok = await onCompleteTask(
+      completingTaskId,
+      includeTime && totalMinutes > 0 ? totalMinutes : undefined,
+      completionComment.trim() || undefined,
+    );
     setSavingCompletion(false);
     if (ok) closeCompletionPrompt();
   };
@@ -752,6 +867,42 @@ export default function MiniApp({
       return;
     }
     await onClaimTask(taskId);
+  };
+
+  const notifyTaskAssignees = async (taskId: string) => {
+    setTaskError('');
+    setTaskNotice('');
+    try {
+      const response = await fetch('/api/task/notify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ requesterId: currentUser.id, taskId }),
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || 'Не удалось отправить напоминание');
+      setTaskNotice(`Напоминание отправляется ${body.queued || 0} исполнителям.`);
+    } catch (error: any) {
+      setTaskError(error.message || 'Не удалось отправить напоминание.');
+    }
+  };
+
+  const saveTaskComment = async (taskId: string, assigneeId: string, side: 'executor' | 'coordinator', text: string) => {
+    setTaskError('');
+    try {
+      const response = await fetch('/api/task/comment', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ requesterId: currentUser.id, taskId, assigneeId, side, text }),
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || 'Не удалось сохранить комментарий');
+      await onRefreshState();
+      setTaskNotice('Комментарий сохранён.');
+      return true;
+    } catch (error: any) {
+      setTaskError(error.message || 'Не удалось сохранить комментарий.');
+      return false;
+    }
   };
 
   const clearTaskLog = async () => {
@@ -792,6 +943,7 @@ export default function MiniApp({
   };
 
   const startUserEdit = (user: User) => {
+    setTeamError('');
     setEditingUserId(user.id);
     setUserDraft({
       realName: user.realName,
@@ -804,17 +956,26 @@ export default function MiniApp({
   };
 
   const updateUser = async (userId: string) => {
+    if (savingUserId) return;
+    setSavingUserId(userId);
+    setTeamError('');
     const payload = isAdminPanel
       ? { requesterId: currentUser.id, userId, ...userDraft }
       : { requesterId: currentUser.id, userId, competencies: userDraft.competencies, primaryCompetency: userDraft.primaryCompetency };
-    const res = await fetch('/api/user/update', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    if (res.ok) {
+    try {
+      const res = await fetch('/api/user/update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error || 'Не удалось сохранить профиль');
+      await onRefreshState();
       setEditingUserId(null);
-      onRefreshState();
+    } catch (error: any) {
+      setTeamError(error.message || 'Не удалось сохранить профиль.');
+    } finally {
+      setSavingUserId(null);
     }
   };
 
@@ -1177,78 +1338,30 @@ export default function MiniApp({
                     Уведомить команду · {configuredWeekCount}
                   </button>
                 </div>
+                {slotNotice && <p role="status" className="mt-3 rounded-2xl bg-emerald-50 px-3 py-2 text-sm font-bold text-emerald-800">{slotNotice}</p>}
+                {slotError && <p role="alert" className="mt-3 rounded-2xl bg-amber-50 px-3 py-2 text-sm font-bold text-amber-800">{slotError}</p>}
               </div>
             )}
 
             {adminSection === 'meetings' && (
               <div className="space-y-4">
-                <div className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <h2 className="font-black">Общий календарь</h2>
-                      <p className="mt-1 text-xs font-semibold text-slate-500">Кто и когда свободен на неделе</p>
-                    </div>
-                    <button onClick={downloadAvailabilityCsv} className={miniButtonClass}>
-                      <DownloadSimple className="h-4 w-4" /> Скачать
-                    </button>
-                  </div>
-                  {calendarUsers.length > 3 && (
-                    <ListDisclosure expanded={showFullCalendar} onToggle={() => setShowFullCalendar((value) => !value)} total={calendarUsers.length} className="mt-3" />
-                  )}
-                  <div className="mt-4 overflow-x-auto rounded-2xl border border-slate-100">
-                    <table className="w-full min-w-[720px] border-collapse text-left text-xs">
-                      <thead className="bg-slate-50 text-slate-500">
-                        <tr>
-                          <th className="sticky left-0 z-10 bg-slate-50 px-3 py-2 font-black">Участник</th>
-                          {dayLabels.map((day, dayIndex) => (
-                            <th key={day.short} className="px-3 py-2 text-center font-black">{day.short} {formatDayMonth(dateForSlotDay(dayIndex))}</th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {visibleCalendarUsers.map((user) => (
-                          <tr key={user.id} className="border-t border-slate-100">
-                            <td className="sticky left-0 z-10 bg-white px-3 py-2">
-                              <div className="font-black">{user.realName}</div>
-                              <div className="font-bold text-[#0069E0]">{user.username}</div>
-                            </td>
-                            {dayLabels.map((_, dayIndex) => {
-                              const text = formatHours(alignedSlots(state.availabilities[user.id])?.[dayIndex] || []);
-                              const filled = text !== '—';
-                              return (
-                                <td key={dayIndex} className="px-2 py-2 align-top">
-                                  <div className={`min-h-10 rounded-xl px-2 py-1.5 text-center font-bold ${filled ? 'bg-blue-50 text-[#0069E0]' : 'bg-slate-50 text-[#718293]'}`}>{text}</div>
-                                </td>
-                              );
-                            })}
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-
                 {showMeetingForm && editingMeetingId && (
                   <form onSubmit={submitMeeting} className="space-y-3 rounded-3xl border border-blue-100 bg-white p-4 shadow-sm animate-in fade-in slide-in-from-top-2 duration-200">
                     <div className="flex items-center justify-between gap-2">
                       <h2 className="font-black">Редактировать собрание</h2>
                       <button type="button" onClick={resetMeetingForm} className={miniButtonClass}><X className="h-4 w-4" /> Отмена</button>
                     </div>
-                    <Segmented
-                      value={meetingType}
-                      onChange={(value) => {
-                        const nextType = value as 'general' | 'custom' | 'competency';
-                        setMeetingType(nextType);
-                        setShowAllMeetingParticipants(false);
-                        if (nextType === 'general') setParticipants([]);
-                        if (nextType === 'custom') { setMeetingCompetency(''); setParticipants([]); }
-                      }}
-                      options={[["general", "Вся команда"], ["custom", "Выбрать людей"], ["competency", "Выбрать блок"]]}
-                    />
+                    {meetingError && <div role="alert" className="rounded-2xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-bold text-rose-800">{meetingError}</div>}
+                    <MeetingAudiencePicker value={meetingType} onChange={setMeetingAudience} />
                     <Field label="Название"><input value={meetingTitle} onChange={(event) => setMeetingTitle(event.target.value)} className={inputClass} /></Field>
-                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
                       <Field label="Дата"><DatePickerField value={meetingDate} onChange={setMeetingDate} placeholder="Выбери дату" /></Field>
                       <Field label="Время"><input type="time" value={meetingTime} onChange={(event) => setMeetingTime(event.target.value)} className={inputClass} /></Field>
+                      <Field label="Длительность">
+                        <select value={meetingDuration} onChange={(event) => setMeetingDuration(event.target.value)} className={selectClass}>
+                          <option value="0.5">30 минут</option><option value="1">1 час</option><option value="1.5">1,5 часа</option><option value="2">2 часа</option>
+                        </select>
+                      </Field>
                     </div>
                     <Field label="Тема"><textarea value={meetingTopic} onChange={(event) => setMeetingTopic(event.target.value)} className={inputClass} rows={3} /></Field>
                     <Field label="Описание"><textarea value={meetingDescription} onChange={(event) => setMeetingDescription(event.target.value)} className={inputClass} rows={3} placeholder="Можно оставить пустым" /></Field>
@@ -1402,6 +1515,53 @@ export default function MiniApp({
 
         {activeTab === 'meetings' && (
           <section className="space-y-4">
+            {meetingError && !showMeetingForm && <div role="alert" className="rounded-2xl border border-rose-200 bg-rose-50 p-3 text-sm font-bold text-rose-800">{meetingError}</div>}
+            <div className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <h2 className="font-black">Общий календарь</h2>
+                  <p className="mt-1 text-xs font-semibold text-slate-500">Все свободные часы команды на текущей неделе</p>
+                </div>
+                <button type="button" onClick={downloadAvailabilityCsv} className={miniButtonClass}>
+                  <DownloadSimple className="h-4 w-4" /> Скачать
+                </button>
+              </div>
+              {calendarUsers.length > 3 && (
+                <ListDisclosure expanded={showFullCalendar} onToggle={() => setShowFullCalendar((value) => !value)} total={calendarUsers.length} className="mt-3" />
+              )}
+              <div className="mt-4 overflow-x-auto rounded-2xl border border-slate-100">
+                <table className="w-full min-w-[720px] border-collapse text-left text-xs">
+                  <thead className="bg-slate-50 text-slate-500">
+                    <tr>
+                      <th className="sticky left-0 z-10 bg-slate-50 px-3 py-2 font-black">Участник</th>
+                      {dayLabels.map((day, dayIndex) => (
+                        <th key={day.short} className="px-3 py-2 text-center font-black">{day.short} {formatDayMonth(dateForSlotDay(dayIndex))}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {visibleCalendarUsers.map((user) => (
+                      <tr key={user.id} className="border-t border-slate-100">
+                        <td className="sticky left-0 z-10 bg-white px-3 py-2">
+                          <div className="font-black">{user.realName}</div>
+                          <div className="font-bold text-[#0069E0]">{user.username}</div>
+                        </td>
+                        {dayLabels.map((_, dayIndex) => {
+                          const text = formatHours(alignedSlots(state.availabilities[user.id])?.[dayIndex] || []);
+                          const filled = text !== '—';
+                          return (
+                            <td key={dayIndex} className="px-2 py-2 align-top">
+                              <div className={`min-h-10 rounded-xl px-2 py-1.5 text-center font-bold ${filled ? 'bg-blue-50 text-[#0069E0]' : 'bg-slate-50 text-[#718293]'}`}>{text}</div>
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
             <div className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
               <h2 className="font-black">Календарь свободных дней</h2>
               <div className="mt-3 grid grid-cols-7 gap-1.5">
@@ -1559,29 +1719,22 @@ export default function MiniApp({
                   </button>
                 )}
               </div>
-              <Segmented
-                value={meetingType}
-                onChange={(value) => {
-                  const nextType = value as 'general' | 'custom' | 'competency';
-                  setMeetingType(nextType);
-                  setShowAllMeetingParticipants(false);
-                  if (nextType === 'general') setParticipants([]);
-                  if (nextType === 'custom') {
-                    setMeetingCompetency('');
-                    setParticipants([]);
-                  }
-                }}
-                options={[["general", "Вся команда"], ["custom", "Выбрать людей"], ["competency", "Выбрать блок"]]}
-              />
+              {meetingError && <div role="alert" className="rounded-2xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-bold text-rose-800">{meetingError}</div>}
+              <MeetingAudiencePicker value={meetingType} onChange={setMeetingAudience} />
               <Field label="Название">
                 <input value={meetingTitle} onChange={(e) => setMeetingTitle(e.target.value)} className={inputClass} />
               </Field>
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
                 <Field label="Дата">
                   <DatePickerField value={meetingDate} onChange={setMeetingDate} placeholder="Выбери дату" />
                 </Field>
                 <Field label="Время">
                   <input type="time" value={meetingTime} onChange={(e) => setMeetingTime(e.target.value)} className={inputClass} />
+                </Field>
+                <Field label="Длительность">
+                  <select value={meetingDuration} onChange={(event) => setMeetingDuration(event.target.value)} className={selectClass}>
+                    <option value="0.5">30 минут</option><option value="1">1 час</option><option value="1.5">1,5 часа</option><option value="2">2 часа</option>
+                  </select>
                 </Field>
               </div>
               <Field label="Тема">
@@ -1641,6 +1794,11 @@ export default function MiniApp({
                   const host = state.users.find((user) => user.id === meeting.hostId);
                   const canManage = meeting.hostId === currentUser.id;
                   const expanded = expandedMeetingId === meeting.id;
+                  const invited = meeting.participants === 'all' || meeting.participants.includes(currentUser.id) || meeting.hostId === currentUser.id;
+                  const attending = (meeting.attendeeIds || []).includes(currentUser.id);
+                  const attendeeNames = (meeting.attendeeIds || [])
+                    .map((id) => state.users.find((user) => user.id === id)?.realName)
+                    .filter(Boolean);
                   return (
                     <div
                       key={meeting.id}
@@ -1667,10 +1825,22 @@ export default function MiniApp({
                           {host?.username && <InfoRow label="Telegram" value={host.username} href={telegramLink(host.username)} />}
                           <InfoRow label="Дата" value={`${weekdayShortByDate(meeting.date)} ${formatDateShort(meeting.date)}`} />
                           <InfoRow label="Время" value={meeting.time} />
-                          <InfoRow label="Тип" value={meeting.type === 'general' ? 'Вся команда' : 'Выбранные люди'} />
+                          <InfoRow label="Длительность" value={taskDurationText(Math.round(Number(meeting.duration || 1) * 60))} />
+                          <InfoRow label="Формат" value={meeting.type === 'general' ? 'Общее — вся команда' : meeting.competency ? `По блоку «${meeting.competency}»` : 'По выбранным людям'} />
                           {meeting.competency && <InfoRow label="Блок" value={meeting.competency} />}
                           <InfoRow label="Тема" value={meeting.topic || 'Без темы'} />
                           {meeting.description && <InfoRow label="Описание" value={meeting.description} />}
+                          <InfoRow label="Придут" value={attendeeNames.length ? `${attendeeNames.length}: ${attendeeNames.join(', ')}` : 'пока никто не подтвердил'} />
+                          {!invited && !attending && <p className="rounded-2xl bg-blue-50 px-3 py-2 text-xs font-bold text-[#005BC4]">Тебя не добавили в исходный состав, но к этому собранию можно присоединиться.</p>}
+                          <button
+                            type="button"
+                            disabled={rsvpMeetingId === meeting.id}
+                            onClick={() => setMeetingAttendance(meeting, !attending)}
+                            className={`${miniButtonClass} w-full disabled:opacity-60 ${attending ? 'border-emerald-200 bg-emerald-50 text-emerald-800 hover:bg-emerald-100' : 'border-blue-100 bg-blue-50 text-[#005BC4] hover:bg-blue-100'}`}
+                          >
+                            <Check className="h-4 w-4" />
+                            {rsvpMeetingId === meeting.id ? 'Сохраняю...' : attending ? 'Я приду ✓' : invited ? 'Я приду' : 'Присоединиться и приду'}
+                          </button>
                           {canManage && (
                             <div className="flex gap-2 pt-2">
                               <button onClick={() => startMeetingEdit(meeting)} className={miniButtonClass}>
@@ -1695,12 +1865,18 @@ export default function MiniApp({
 
         {activeTab === 'tasks' && (
           <section className="space-y-4">
+            {taskError && <div role="alert" className="rounded-2xl border border-rose-200 bg-rose-50 p-3 text-sm font-bold text-rose-800">{taskError}</div>}
+            {taskNotice && <div role="status" className="rounded-2xl border border-emerald-200 bg-emerald-50 p-3 text-sm font-bold text-emerald-800">{taskNotice}</div>}
             <button onClick={openTaskForm} className={primaryButtonClass}>
               {showTaskForm ? <Minus className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
               {showTaskForm ? 'Скрыть форму' : 'Создать задачу'}
             </button>
             {showTaskForm && (
               <form onSubmit={submitTask} className="space-y-3 rounded-3xl border border-blue-100 bg-white p-4 shadow-sm animate-in fade-in slide-in-from-top-2 duration-200">
+                <div className="flex items-center justify-between gap-3">
+                  <h2 className="font-black">{editingTaskId ? 'Редактировать задачу' : 'Новая задача'}</h2>
+                  {editingTaskId && <button type="button" onClick={() => { resetTaskForm(); setShowTaskForm(false); }} className={miniButtonClass}><X className="h-4 w-4" /> Отмена</button>}
+                </div>
                 <Field label="Название">
                   <input value={taskTitle} onChange={(e) => setTaskTitle(e.target.value)} className={inputClass} />
                 </Field>
@@ -1761,20 +1937,43 @@ export default function MiniApp({
                 <Field label="ТЗ">
                   <textarea value={taskSow} onChange={(e) => setTaskSow(e.target.value)} className={inputClass} rows={3} />
                 </Field>
+                <Field label="Напоминания исполнителям">
+                  <div className="space-y-2">
+                    {taskReminders.map((reminder, index) => (
+                      <div key={reminder.id || index} className="grid grid-cols-1 gap-2 rounded-2xl border border-blue-100 bg-slate-50 p-2 sm:grid-cols-[1fr_72px_88px_auto]">
+                        <select value={reminder.type} onChange={(event) => setTaskReminders((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, type: event.target.value } : item))} className={selectClass}>
+                          <option value="before_deadline">За N до дедлайна</option>
+                          <option value="repeat">Каждые N</option>
+                        </select>
+                        <input type="number" min="1" value={reminder.value ?? ''} onChange={(event) => setTaskReminders((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, value: event.target.value === '' ? '' : Number(event.target.value) } : item))} className={inputClass} aria-label={`Интервал напоминания ${index + 1}`} />
+                        <select value={reminder.unit} onChange={(event) => setTaskReminders((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, unit: event.target.value } : item))} className={selectClass}>
+                          <option value="days">дней</option>
+                          <option value="hours">часов</option>
+                        </select>
+                        <button type="button" onClick={() => setTaskReminders((current) => current.filter((_, itemIndex) => itemIndex !== index))} className={miniButtonClass} aria-label={`Удалить напоминание ${index + 1}`}><X className="h-4 w-4" /></button>
+                      </div>
+                    ))}
+                    {taskReminders.length < 3 && (
+                      <button type="button" onClick={() => setTaskReminders((current) => [...current, { id: `draft_${Date.now()}`, type: 'before_deadline', value: 1, unit: 'days' }])} className={secondaryButtonClass}>
+                        <Bell className="h-4 w-4" /> Добавить напоминание
+                      </button>
+                    )}
+                    <p className="text-xs font-semibold text-slate-500">Они отправятся автоматически. После сохранения можно также нажать «Уведомить сейчас».</p>
+                  </div>
+                </Field>
                 <button disabled={savingTask} className={`${primaryButtonClass} disabled:opacity-70`}>
-                  {savingTask ? 'Сохраняю...' : 'Сохранить задачу'}
+                  {savingTask ? 'Сохраняю...' : editingTaskId ? 'Сохранить изменения' : 'Сохранить задачу'}
                 </button>
               </form>
             )}
-            {taskError && <div role="alert" className="rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm font-bold text-amber-800">{taskError}</div>}
-            <TaskList title="Мои задачи" tasks={myTasks} users={state.users} currentUser={currentUser} actionLabel="Готово" onAction={openCompletionPrompt} onRelease={onReleaseTask} />
-            <TaskList title="Открытые задачи" tasks={openTasks} users={state.users} currentUser={currentUser} actionLabel="Взять" onAction={claimTask} />
+            <TaskList title="Мои задачи" tasks={myTasks} users={state.users} currentUser={currentUser} actionLabel="Готово" onAction={openCompletionPrompt} onRelease={onReleaseTask} onEdit={startTaskEdit} onNotify={notifyTaskAssignees} onSaveComment={saveTaskComment} />
+            <TaskList title="Открытые задачи" tasks={openTasks} users={state.users} currentUser={currentUser} actionLabel="Взять" onAction={claimTask} onEdit={startTaskEdit} onNotify={notifyTaskAssignees} onSaveComment={saveTaskComment} />
             <button onClick={() => setShowCompletedTasks((value) => !value)} className={secondaryButtonClass}>
               {showCompletedTasks ? <Minus className="h-4 w-4" /> : <Check className="h-4 w-4" />}
               {showCompletedTasks ? 'Скрыть выполненные задачи' : 'Посмотреть выполненные задачи'}
             </button>
             {showCompletedTasks && (
-              <TaskList title="Последние выполненные" tasks={latestCompletedTasks} users={state.users} currentUser={currentUser} actionLabel="Готово" onAction={() => undefined} />
+              <TaskList title="Последние выполненные" tasks={latestCompletedTasks} users={state.users} currentUser={currentUser} actionLabel="Готово" onAction={() => undefined} onSaveComment={saveTaskComment} />
             )}
 
             <div className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
@@ -1802,6 +2001,7 @@ export default function MiniApp({
 
         {(activeTab === 'team' || (isAdminPanel && adminSection === 'team')) && (
           <section className="space-y-4">
+            {teamError && <div role="alert" className="rounded-2xl border border-rose-200 bg-rose-50 p-3 text-sm font-bold text-rose-800">{teamError}</div>}
             {isAdminPanel && (
               <button onClick={() => setShowAddUserForm((value) => !value)} className={primaryButtonClass}>
                 {showAddUserForm ? <Minus className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
@@ -2014,8 +2214,10 @@ export default function MiniApp({
                                 </div>
                               </Field>
                               <div className="flex gap-2">
-                                <button onClick={() => updateUser(user.id)} className={miniButtonClass}>OK</button>
-                                <button onClick={() => setEditingUserId(null)} className={miniButtonClass}>Отмена</button>
+                                <button type="button" disabled={savingUserId === user.id} onClick={(event) => { event.stopPropagation(); void updateUser(user.id); }} className={`${miniButtonClass} disabled:opacity-60`}>
+                                  {savingUserId === user.id ? 'Сохраняю...' : 'Сохранить'}
+                                </button>
+                                <button type="button" disabled={savingUserId === user.id} onClick={(event) => { event.stopPropagation(); setEditingUserId(null); }} className={miniButtonClass}>Отмена</button>
                               </div>
                             </div>
                           )}
@@ -2031,9 +2233,7 @@ export default function MiniApp({
 
         {(activeTab === 'faculties' || (isAdminPanel && adminSection === 'faculties')) && (
           <section className="space-y-4">
-            {!isAdminPanel ? (
-              <EmptyState text="Раздел доступен админу" />
-            ) : (
+            {isAdminPanel && (
               <>
                 <div className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
                   <div className="flex items-center justify-between gap-3">
@@ -2099,7 +2299,11 @@ export default function MiniApp({
                     <button className={`${primaryButtonClass} sm:col-span-2`}>Добавить</button>
                   </form>
                 </div>
+              </>
+            )}
 
+            {activeTab === 'faculties' && (
+              <>
                 <div className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
                   <button type="button" onClick={() => setShowFacultyPeople((value) => !value)} className="flex w-full items-center justify-between gap-3 text-left">
                     <span className="font-black">Составы ответственных</span>
@@ -2137,13 +2341,6 @@ export default function MiniApp({
                                         </div>
                                         <div className="flex flex-wrap justify-end gap-2">
                                           <span className="rounded-full bg-blue-50 px-2.5 py-1 text-xs font-black text-[#0069E0]">{user.role === 'faculty_helper' ? user.competencies?.[0] || 'Роль не выбрана' : 'Ответственный'}</span>
-                                          <button onClick={() => startFacultyUserEdit(user)} className={miniButtonClass}>
-                                            <PencilSimple className="h-4 w-4" />
-                                            Редактировать
-                                          </button>
-                                          <button onClick={() => deleteFacultyUser(user.id)} className={`${miniButtonClass} border-rose-100 bg-rose-50 text-rose-600`}>
-                                            <Trash className="h-4 w-4" />
-                                          </button>
                                         </div>
                                       </div>
                                       {user.competencies?.length ? (
@@ -2184,8 +2381,8 @@ export default function MiniApp({
                                         </Field>
                                       </div>
                                       <div className="flex gap-2">
-                                        <button onClick={() => updateFacultyUser(user.id)} className={miniButtonClass}>OK</button>
-                                        <button onClick={() => setEditingFacultyUserId(null)} className={miniButtonClass}>Отмена</button>
+                                        <button type="button" onClick={() => updateFacultyUser(user.id)} className={miniButtonClass}>Сохранить</button>
+                                        <button type="button" onClick={() => setEditingFacultyUserId(null)} className={miniButtonClass}>Отмена</button>
                                       </div>
                                     </div>
                                   )}
@@ -2460,6 +2657,18 @@ export default function MiniApp({
               </Field>
             </div>
             <p className="mt-2 text-xs font-semibold text-slate-500">Минуты можно указать общим числом — например, 75 минут сохранятся как 1 ч 15 мин.</p>
+            <div className="mt-4">
+              <Field label="Комментарий по результату">
+                <textarea
+                  value={completionComment}
+                  onChange={(event) => setCompletionComment(event.target.value)}
+                  className={inputClass}
+                  rows={3}
+                  placeholder="Что заняло больше времени, что получилось и что важно знать автору"
+                />
+              </Field>
+              <p className="mt-2 text-xs font-semibold text-slate-500">Комментарий необязателен, но останется в истории задачи.</p>
+            </div>
             <div className="mt-5 space-y-2">
               <button type="button" disabled={savingCompletion} onClick={() => completeTaskWithTime(true)} className={`${primaryButtonClass} disabled:opacity-60`}>
                 {savingCompletion ? 'Сохраняю...' : 'Сохранить и завершить'}
@@ -2566,6 +2775,33 @@ function Segmented({ value, onChange, options }: { value: string; onChange: (val
   );
 }
 
+function MeetingAudiencePicker({ value, onChange }: { value: 'general' | 'custom' | 'competency'; onChange: (value: 'general' | 'custom' | 'competency') => void }) {
+  const options = [
+    { id: 'general' as const, title: 'Общее', description: 'Приглашена вся команда' },
+    { id: 'competency' as const, title: 'По блоку', description: 'Люди выбранного блока' },
+    { id: 'custom' as const, title: 'По людям', description: 'Состав выбирается вручную' },
+  ];
+  return (
+    <fieldset>
+      <legend className="mb-2 text-xs font-black uppercase tracking-wide text-slate-500">Кого приглашаем</legend>
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+        {options.map((option) => (
+          <button
+            key={option.id}
+            type="button"
+            aria-pressed={value === option.id}
+            onClick={() => onChange(option.id)}
+            className={`rounded-2xl border px-3 py-3 text-left transition ${pressClass} ${value === option.id ? 'border-[#0069E0] bg-blue-50 text-[#005BC4]' : 'border-slate-200 bg-white text-slate-700 hover:border-blue-200 hover:text-[#005BC4]'}`}
+          >
+            <span className="block text-sm font-black">{option.title}</span>
+            <span className="mt-1 block text-xs font-semibold opacity-75">{option.description}</span>
+          </button>
+        ))}
+      </div>
+    </fieldset>
+  );
+}
+
 function TaskList({
   title,
   tasks,
@@ -2574,6 +2810,9 @@ function TaskList({
   actionLabel,
   onAction,
   onRelease,
+  onEdit,
+  onNotify,
+  onSaveComment,
 }: {
   title: string;
   tasks: Task[];
@@ -2582,9 +2821,14 @@ function TaskList({
   actionLabel: string;
   onAction: (taskId: string) => void;
   onRelease?: (taskId: string) => void;
+  onEdit?: (task: Task) => void;
+  onNotify?: (taskId: string) => void;
+  onSaveComment?: (taskId: string, assigneeId: string, side: 'executor' | 'coordinator', text: string) => Promise<boolean>;
 }) {
   const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
   const [showAll, setShowAll] = useState(false);
+  const [noteDrafts, setNoteDrafts] = useState<Record<string, string>>({});
+  const [savingNoteKey, setSavingNoteKey] = useState('');
   const visibleTasks = showAll ? tasks : tasks.slice(0, 3);
 
   return (
@@ -2603,6 +2847,7 @@ function TaskList({
           const creator = users.find((user) => user.id === task.creatorId);
           const executors = taskAssigneeIds(task).map((id) => users.find((user) => user.id === id)).filter(Boolean) as User[];
           const isMine = taskAssigneeIds(task).includes(currentUser.id);
+          const canCoordinate = currentUser.role === 'admin' || task.creatorId === currentUser.id;
           return (
           <div key={task.id} className={`rounded-3xl border border-blue-100 bg-white p-4 shadow-sm ${pressClass}`} onClick={() => setExpandedTaskId(expanded ? null : task.id)}>
             <div className="flex items-start justify-between gap-3">
@@ -2636,6 +2881,54 @@ function TaskList({
                 <InfoRow label="Блок" value={task.competency || 'Без блока'} />
                 <InfoRow label="Статус" value={task.status === 'open' ? 'Открытая' : task.status === 'completed' ? 'Готово' : 'В работе'} />
                 <InfoRow label="Исполнители" value={executors.length ? executors.map((user) => user.realName).join(', ') : 'пока никто'} />
+                {executors.length > 0 && (
+                  <div className="space-y-2 pt-1">
+                    <div className="text-xs font-black uppercase tracking-wide text-slate-500">Что делает каждый исполнитель</div>
+                    {executors.map((executor) => {
+                      const note = task.assigneeNotes?.[executor.id] || {};
+                      const completionComment = task.completionComments?.[executor.id] || '';
+                      const side = executor.id === currentUser.id ? 'executor' as const : canCoordinate ? 'coordinator' as const : null;
+                      const draftKey = `${task.id}:${executor.id}:${side || 'view'}`;
+                      const storedText = side === 'executor' ? note.executor || '' : note.coordinator || '';
+                      return (
+                        <details key={executor.id} className="rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2">
+                          <summary className="cursor-pointer list-none font-black text-slate-800">
+                            {executor.realName}
+                            <span className="ml-2 text-xs font-semibold text-slate-500">{note.executor || note.coordinator || completionComment ? 'есть комментарии' : 'без комментариев'}</span>
+                          </summary>
+                          <div className="mt-3 space-y-2 text-xs">
+                            <InfoRow label="От исполнителя" value={note.executor || 'пока не написал'} />
+                            <InfoRow label="От координатора" value={note.coordinator || 'пока не написал'} />
+                            {completionComment && <InfoRow label="При завершении" value={completionComment} />}
+                            {side && onSaveComment && (
+                              <div className="space-y-2 pt-1">
+                                <textarea
+                                  value={noteDrafts[draftKey] ?? storedText}
+                                  onChange={(event) => setNoteDrafts((current) => ({ ...current, [draftKey]: event.target.value }))}
+                                  className={inputClass}
+                                  rows={2}
+                                  placeholder={side === 'executor' ? 'Напиши, что сейчас делаешь или что мешает' : 'Уточнение или обратная связь исполнителю'}
+                                />
+                                <button
+                                  type="button"
+                                  disabled={savingNoteKey === draftKey}
+                                  onClick={async () => {
+                                    setSavingNoteKey(draftKey);
+                                    await onSaveComment(task.id, executor.id, side, noteDrafts[draftKey] ?? storedText);
+                                    setSavingNoteKey('');
+                                  }}
+                                  className={`${miniButtonClass} disabled:opacity-60`}
+                                >
+                                  <ChatCircleText className="h-4 w-4" /> {savingNoteKey === draftKey ? 'Сохраняю...' : 'Сохранить комментарий'}
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        </details>
+                      );
+                    })}
+                  </div>
+                )}
                 <InfoRow label="Дата назначения" value={formatDateTimeShort(task.createdAt)} />
                 {task.completedAt && <InfoRow label="Дата выполнения" value={formatDateTimeShort(task.completedAt)} />}
                 <InfoRow label="Дедлайн" value={formatDateShort(task.deadline)} />
@@ -2647,6 +2940,12 @@ function TaskList({
                     {task.tips.map((tip, index) => (
                       <div key={index}>• {tip}</div>
                     ))}
+                  </div>
+                )}
+                {canCoordinate && task.status !== 'completed' && (
+                  <div className="flex flex-wrap gap-2 pt-2">
+                    {onEdit && <button type="button" onClick={() => onEdit(task)} className={miniButtonClass}><PencilSimple className="h-4 w-4" /> Редактировать</button>}
+                    {onNotify && <button type="button" onClick={() => onNotify(task.id)} className={miniButtonClass}><Bell className="h-4 w-4" /> Уведомить сейчас</button>}
                   </div>
                 )}
                 {isMine && task.status === 'assigned' && onRelease && (

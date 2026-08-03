@@ -163,8 +163,15 @@ export default function App() {
     }
   };
 
-  const handleClaimTask = async (taskId: string) => {
-    if (!currentUserId) return;
+  const handleClaimTask = async (taskId: string): Promise<boolean> => {
+    if (!currentUserId) return false;
+
+    setState((current) => current ? {
+      ...current,
+      tasks: current.tasks.map((task) => task.id === taskId
+        ? { ...task, assignedTo: currentUserId, status: 'assigned' as const }
+        : task),
+    } : current);
 
     try {
       const res = await fetch('/api/task/claim', {
@@ -174,23 +181,27 @@ export default function App() {
       });
       const data = await res.json();
       if (data.success) {
-        await fetchState();
         triggerToast('Вы взяли задачу в работу', 'success');
+        void fetchState();
+        return true;
       } else {
         await fetchState();
         triggerToast(data.error || 'Задача уже занята', 'warning');
       }
     } catch (err) {
       console.error(err);
+      await fetchState();
+      triggerToast('Не удалось взять задачу — проверьте соединение', 'warning');
     }
+    return false;
   };
 
-  const handleCompleteTask = async (taskId: string, timeSpentMinutes?: number): Promise<boolean> => {
+  const handleCompleteTask = async (taskId: string, timeSpentMinutes?: number, completionComment?: string): Promise<boolean> => {
     try {
       const res = await fetch('/api/task/status', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ taskId, status: 'completed', requesterId: currentUserId, timeSpentMinutes }),
+        body: JSON.stringify({ taskId, status: 'completed', requesterId: currentUserId, timeSpentMinutes, completionComment }),
       });
       const data = await res.json();
       if (data.success) {

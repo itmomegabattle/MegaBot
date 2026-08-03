@@ -35,6 +35,7 @@ export interface Meeting {
   duration: number;
   hostId: string;
   participants: string[] | 'all';
+  attendeeIds?: string[];
   competency?: string;
   topic?: string;
   description?: string;
@@ -42,6 +43,12 @@ export interface Meeting {
 }
 
 export type TaskStatus = 'open' | 'assigned' | 'completed' | 'waiting' | 'in_progress';
+
+export interface TaskAssigneeNote {
+  executor?: string;
+  coordinator?: string;
+  updatedAt?: string;
+}
 
 export interface TaskReminder {
   id: string;
@@ -69,6 +76,8 @@ export interface Task {
   timeSpentMinutes?: number;
   facultyId?: string;
   reminders?: TaskReminder[];
+  assigneeNotes?: Record<string, TaskAssigneeNote>;
+  completionComments?: Record<string, string>;
 }
 
 export interface Faculty {

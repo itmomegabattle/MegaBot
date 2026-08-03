@@ -58,6 +58,9 @@ const PORT = Number(process.env.PORT || 3000);
 const DB_FILE = process.env.DB_FILE
   ? path.resolve(process.env.DB_FILE)
   : path.join(process.cwd(), 'database.json');
+const CHAT_PANEL_FILE = process.env.CHAT_PANEL_FILE
+  ? path.resolve(process.env.CHAT_PANEL_FILE)
+  : `${DB_FILE}.chat-panels.json`;
 
 // Empty initial data. Real users are created through Telegram or added by admins.
 const INITIAL_USERS: User[] = [];
@@ -226,7 +229,12 @@ function formatShortDate(value?: string) {
 }
 
 function birthdayParts(value?: string) {
-  const match = String(value || '').match(/^(\d{2})\.(\d{2})(?:\.(\d{2}|\d{4}))?$/);
+  const rawValue = String(value || '').trim();
+  const isoMatch = rawValue.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  const normalizedValue = isoMatch
+    ? `${isoMatch[3]}.${isoMatch[2]}.${isoMatch[1]}`
+    : rawValue;
+  const match = normalizedValue.match(/^(\d{2})\.(\d{2})(?:\.(\d{2}|\d{4}))?$/);
   if (!match) return null;
   const rawYear = match[3];
   const year = rawYear
@@ -331,12 +339,27 @@ function taskDetailsText(task: Task, state: SimulationState) {
       ? executors.map(userMention).join(', ')
       : 'не указан';
 
-  return `*${task.title}*\n\n${task.description}\n\n*Блок:* ${task.competency || 'не указан'}\n*Приоритет:* ${taskPriorityLabel(task.priority)}\n*Автор:* ${userMention(creator)}\n*Срок:* ${formatShortDate(task.deadline)}\n*Исполнитель:* ${executorText}${task.timeSpentMinutes ? `\n*Затрачено:* ${taskDurationLabel(task.timeSpentMinutes)}` : ''}${task.sow ? `\n\n*ТЗ:* ${task.sow}` : ''}${task.tips?.length ? `\n\n*Подсказки:*\n${task.tips.map((tip) => `• ${tip}`).join('\n')}` : ''}`;
+  const progressNotes = assignedIds(task)
+    .map((id) => {
+      const assignee = state.users.find((user) => user.id === id);
+      const note = task.assigneeNotes?.[id];
+      if (!note?.executor && !note?.coordinator) return '';
+      return `• ${assignee?.realName || 'Исполнитель'}${note.executor ? `: ${note.executor}` : ''}${note.coordinator ? `\n  Координатор: ${note.coordinator}` : ''}`;
+    })
+    .filter(Boolean);
+  const completionNotes = Object.entries(task.completionComments || {})
+    .filter(([, comment]) => String(comment || '').trim())
+    .map(([id, comment]) => `• ${state.users.find((user) => user.id === id)?.realName || 'Исполнитель'}: ${comment}`);
+  return `*${task.title}*\n\n${task.description}\n\n*Блок:* ${task.competency || 'не указан'}\n*Приоритет:* ${taskPriorityLabel(task.priority)}\n*Автор:* ${userMention(creator)}\n*Срок:* ${formatShortDate(task.deadline)}\n*Исполнитель:* ${executorText}${task.timeSpentMinutes ? `\n*Затрачено:* ${taskDurationLabel(task.timeSpentMinutes)}` : ''}${task.sow ? `\n\n*ТЗ:* ${task.sow}` : ''}${progressNotes.length ? `\n\n*Комментарии по работе:*\n${progressNotes.join('\n')}` : ''}${completionNotes.length ? `\n\n*Комментарий при завершении:*\n${completionNotes.join('\n')}` : ''}${task.tips?.length ? `\n\n*Подсказки:*\n${task.tips.map((tip) => `• ${tip}`).join('\n')}` : ''}`;
 }
 
 function meetingDetailsText(meeting: Meeting, state: SimulationState) {
   const host = state.users.find((user) => user.id === meeting.hostId);
-  return `*${meeting.title}*\n\n*Дата:* ${formatShortDate(meeting.date)}\n*Время:* ${meeting.time}\n*Организатор:* ${userMention(host)}${meeting.competency ? `\n*Блок:* ${meeting.competency}` : ''}${meeting.topic ? `\n*Тема:* ${meeting.topic}` : ''}${meeting.description ? `\n*Описание:* ${meeting.description}` : ''}`;
+  const attendeeNames = (meeting.attendeeIds || [])
+    .map((id) => state.users.find((user) => user.id === id)?.realName)
+    .filter(Boolean);
+  const durationMinutes = Math.round(Number(meeting.duration || 1) * 60);
+  return `*${meeting.title}*\n\n*Дата:* ${formatShortDate(meeting.date)}\n*Время:* ${meeting.time}\n*Длительность:* ${taskDurationLabel(durationMinutes)}\n*Организатор:* ${userMention(host)}${meeting.competency ? `\n*Блок:* ${meeting.competency}` : ''}${meeting.topic ? `\n*Тема:* ${meeting.topic}` : ''}${meeting.description ? `\n*Описание:* ${meeting.description}` : ''}\n*Придут:* ${attendeeNames.length}${attendeeNames.length ? ` — ${attendeeNames.join(', ')}` : ''}`;
 }
 
 function roleLabel(role: User['role']) {
@@ -390,7 +413,6 @@ function meetingsSummaryText(user: User, state: SimulationState) {
   const meetings = state.meetings
     .filter((meeting) => (
       meeting.status === 'scheduled'
-      && (meeting.participants === 'all' || meeting.participants.includes(user.id) || meeting.hostId === user.id)
       && meetingDateTime(meeting) >= Date.now()
     ))
     .slice()
@@ -555,6 +577,7 @@ function loadDatabase(): SimulationState {
   state.meetings.forEach((meeting: any) => {
     if (meeting.competency === undefined) meeting.competency = '';
     if (meeting.description === undefined) meeting.description = '';
+    if (!Array.isArray(meeting.attendeeIds)) meeting.attendeeIds = [];
   });
   state.tasks.forEach((task: any) => {
     if (task.creatorId === undefined) task.creatorId = '';
@@ -571,6 +594,8 @@ function loadDatabase(): SimulationState {
     }
     if (task.facultyId === undefined) task.facultyId = '';
     if (!Array.isArray(task.reminders)) task.reminders = [];
+    if (!task.assigneeNotes || typeof task.assigneeNotes !== 'object') task.assigneeNotes = {};
+    if (!task.completionComments || typeof task.completionComments !== 'object') task.completionComments = {};
   });
   Object.values(state.availabilities).forEach((availability: any) => {
     if (availability.weekStart === undefined) availability.weekStart = '';
@@ -586,6 +611,21 @@ function saveDatabase(state: SimulationState) {
   } catch (error) {
     console.error('Error writing database file:', error);
   }
+}
+
+function normalizeTaskReminders(value: unknown): TaskReminder[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((item: any) => Number(item?.value) > 0)
+    .slice(0, 3)
+    .map((item: any, index) => ({
+      id: String(item.id || `rem_${Date.now()}_${index}`),
+      type: item.type === 'repeat' ? 'repeat' : 'before_deadline',
+      value: Math.max(1, Number(item.value) || 1),
+      unit: item.unit === 'hours' ? 'hours' : 'days',
+      sentAt: item.sentAt,
+      lastSentAt: item.lastSentAt,
+    }));
 }
 
 function pruneExpiredAvailabilityWeeks() {
@@ -658,7 +698,11 @@ async function startServer() {
       '/meeting': 'hostId',
       '/meeting/update': 'requesterId',
       '/meeting/delete': 'requesterId',
+      '/meeting/rsvp': 'requesterId',
       '/task/create': 'creatorId',
+      '/task/update': 'requesterId',
+      '/task/comment': 'requesterId',
+      '/task/notify': 'requesterId',
       '/task/claim': 'userId',
       '/task/release': 'userId',
       '/task/status': 'requesterId',
@@ -704,8 +748,32 @@ async function startServer() {
     taskCompetency?: string;
     taskPriority?: Task['priority'];
     completionTaskId?: string;
+    completionTimeMinutes?: number;
   }>();
-  const chatPanelMessageIds = new Map<string, number>();
+  const loadChatPanelMessageIds = () => {
+    try {
+      if (!fs.existsSync(CHAT_PANEL_FILE)) return new Map<string, number>();
+      const saved = JSON.parse(fs.readFileSync(CHAT_PANEL_FILE, 'utf8')) as Record<string, number>;
+      return new Map(Object.entries(saved).filter(([, value]) => Number.isInteger(value)));
+    } catch (error) {
+      console.error('Error reading chat panel state:', error);
+      return new Map<string, number>();
+    }
+  };
+  const chatPanelMessageIds = loadChatPanelMessageIds();
+  const persistChatPanelMessageIds = () => {
+    try {
+      fs.writeFileSync(CHAT_PANEL_FILE, JSON.stringify(Object.fromEntries(chatPanelMessageIds), null, 2), 'utf8');
+    } catch (error) {
+      console.error('Error writing chat panel state:', error);
+    }
+  };
+  const rememberChatPanelMessage = (chatId: string | number, messageId?: number) => {
+    const chatKey = String(chatId);
+    if (messageId) chatPanelMessageIds.set(chatKey, messageId);
+    else chatPanelMessageIds.delete(chatKey);
+    persistChatPanelMessageIds();
+  };
   const groupCheckins = new Map<string, { title: string; userIds: Set<string> }>();
 
   // API Routes
@@ -854,6 +922,7 @@ async function startServer() {
           reply_markup: inlineKeyboard ? { inline_keyboard: inlineKeyboard } : undefined,
         }),
       });
+      if (response.ok) rememberChatPanelMessage(chatId, messageId);
       return response.ok;
     } catch {
       return false;
@@ -867,8 +936,10 @@ async function startServer() {
     try {
       const chatKey = String(chatId);
       const previousPanelId = chatPanelMessageIds.get(chatKey);
-      if (previousPanelId) await deleteTelegramMessage(chatId, previousPanelId);
-      const response = await telegramFetch(`${tgApiBase}/bot${botToken}/sendMessage`, {
+      const deletePrevious = previousPanelId
+        ? deleteTelegramMessage(chatId, previousPanelId)
+        : Promise.resolve(true);
+      const [response] = await Promise.all([telegramFetch(`${tgApiBase}/bot${botToken}/sendMessage`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -877,13 +948,13 @@ async function startServer() {
           parse_mode: 'HTML',
           reply_markup: buildKeyboard(rows, includeWebApp, user),
         }),
-      });
+      }), deletePrevious]);
       if (!response.ok) {
         console.error('Telegram keyboard send failed:', response.status, await response.text());
         return;
       }
       const data = await response.json() as { result?: { message_id?: number } };
-      if (data.result?.message_id) chatPanelMessageIds.set(chatKey, data.result.message_id);
+      if (data.result?.message_id) rememberChatPanelMessage(chatId, data.result.message_id);
     } catch (err) {
       console.error('Telegram keyboard send failed:', err);
     }
@@ -899,9 +970,11 @@ async function startServer() {
     const tgApiBase = process.env.TELEGRAM_API_BASE || 'https://api.telegram.org';
     const chatKey = String(chatId);
     const previousPanelId = chatPanelMessageIds.get(chatKey);
-    if (previousPanelId) await deleteTelegramMessage(chatId, previousPanelId);
     try {
-      const response = await telegramFetch(`${tgApiBase}/bot${botToken}/sendMessage`, {
+      const deletePrevious = previousPanelId
+        ? deleteTelegramMessage(chatId, previousPanelId)
+        : Promise.resolve(true);
+      const [response] = await Promise.all([telegramFetch(`${tgApiBase}/bot${botToken}/sendMessage`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -910,10 +983,10 @@ async function startServer() {
           parse_mode: 'HTML',
           reply_markup: inlineKeyboard.length ? { inline_keyboard: inlineKeyboard } : undefined,
         }),
-      });
+      }), deletePrevious]);
       if (!response.ok) return;
       const data = await response.json() as { result?: { message_id?: number } };
-      if (data.result?.message_id) chatPanelMessageIds.set(chatKey, data.result.message_id);
+      if (data.result?.message_id) rememberChatPanelMessage(chatId, data.result.message_id);
     } catch (err) {
       console.error('Telegram panel send failed:', err);
     }
@@ -1036,6 +1109,7 @@ async function startServer() {
     recipientIds: Iterable<string>,
     text: string,
     notificationPrefix: string,
+    buttons: { text: string; action: string }[] = [{ text: 'Открыть встречи', action: 'open_tma' }],
   ) {
     const sendJobs: Promise<boolean>[] = [];
     for (const userId of recipientIds) {
@@ -1048,10 +1122,10 @@ async function startServer() {
         sender: 'bot',
         text,
         timestamp: new Date().toISOString(),
-        buttons: [{ text: 'Открыть встречи', action: 'open_tma' }],
+        buttons,
       });
       if (target.telegramId) {
-        sendJobs.push(sendTelegramMessage(target.telegramId, text, [{ text: 'Открыть встречи', action: 'open_tma' }], false, target));
+        sendJobs.push(sendTelegramMessage(target.telegramId, text, buttons, false, target));
       }
     }
     return Promise.allSettled(sendJobs);
@@ -1078,6 +1152,7 @@ async function startServer() {
       duration: data.duration || 1,
       hostId: data.hostId,
       participants: data.participants,
+      attendeeIds: [data.hostId],
       topic: data.topic || '',
       description: data.description || '',
       status: 'scheduled',
@@ -1086,9 +1161,33 @@ async function startServer() {
 
     state.meetings.push(meeting);
     const text = `Новая встреча запланирована!\n\n${meetingDetailsText(meeting, state)}\n\nПожалуйста, освободите это время.`;
-    await notifyMeetingRecipients(state, meetingRecipientIds(state, data.participants, data.hostId), text, 'meeting_created');
+    await notifyMeetingRecipients(
+      state,
+      meetingRecipientIds(state, data.participants, data.hostId),
+      text,
+      'meeting_created',
+      [
+        { text: 'Я приду', action: `meeting_rsvp:${meeting.id}` },
+        { text: 'Открыть встречи', action: 'open_tma' },
+      ],
+    );
 
     return meeting;
+  }
+
+  function updateMeetingAttendance(meeting: Meeting, userId: string, attending: boolean) {
+    const attendees = new Set(meeting.attendeeIds || []);
+    const wasAttending = attendees.has(userId);
+    if (attending) {
+      attendees.add(userId);
+      if (meeting.participants !== 'all' && !meeting.participants.includes(userId)) {
+        meeting.participants = [...meeting.participants, userId];
+      }
+    } else {
+      attendees.delete(userId);
+    }
+    meeting.attendeeIds = [...attendees];
+    return { changed: wasAttending !== attending, attending };
   }
 
   async function sendTelegramMessage(chatId: string | number, text: string, buttons?: { text: string; action: string }[], keyboardOnly = false, recipient?: User): Promise<boolean> {
@@ -1161,8 +1260,9 @@ async function startServer() {
 
   function slotDayPanel(user: User, state: SimulationState, dayIndex: number, pendingSlots: Record<number, number[]>) {
     const dayNames = ['Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота', 'Воскресенье'];
+    const slotHours = [16, 17, 18, 19, 20, 21, 22, 23];
     const selected = pendingSlots[dayIndex] || [];
-    const keyboard = [16, 17, 18, 19, 20, 21, 22, 23].reduce<{ text: string; callback_data: string }[][]>((rows, hour, index) => {
+    const keyboard = slotHours.reduce<{ text: string; callback_data: string }[][]>((rows, hour, index) => {
       if (index % 2 === 0) rows.push([]);
       rows[rows.length - 1].push({
         text: `${selected.includes(hour) ? '✓ ' : ''}${hour}:00`,
@@ -1170,8 +1270,12 @@ async function startServer() {
       });
       return rows;
     }, []);
+    keyboard.push([{
+      text: selected.length === slotHours.length ? 'Снять весь день' : 'Выбрать весь день',
+      callback_data: `slot_toggle_day:${dayIndex}`,
+    }]);
     keyboard.push([
-      { text: 'Сохранить неделю', callback_data: 'slot_save' },
+      { text: 'Сохранить', callback_data: 'slot_save' },
       { text: 'К дням', callback_data: 'nav_slots' },
     ]);
     return {
@@ -1204,7 +1308,7 @@ async function startServer() {
         text: `${(availability[offset + 4] || []).length ? '✓ ' : ''}${day}`,
         callback_data: `slots_day:${offset + 4}`,
       })),
-      [{ text: 'Сохранить как есть', callback_data: 'slot_save' }],
+      [{ text: 'Сохранить', callback_data: 'slot_save' }],
     ];
     await sendInlinePanel(chatId, slotsSummaryText(user, state, availability), keyboard);
   }
@@ -1248,6 +1352,27 @@ async function startServer() {
       ['Задачи факультетов'],
       ['Назад'],
     ], false, user);
+  }
+
+  async function completeTaskFromChat(state: SimulationState, task: Task, user: User, timeSpentMinutes?: number, completionComment = '') {
+    task.status = 'completed';
+    task.completedAt = new Date().toISOString();
+    task.timeSpentMinutes = timeSpentMinutes;
+    task.completionComments = task.completionComments || {};
+    const cleanComment = completionComment.trim();
+    if (cleanComment) task.completionComments[user.id] = cleanComment;
+    else delete task.completionComments[user.id];
+    saveDatabase(state);
+    const sendJobs = state.users
+      .filter((member) => member.role === 'admin' && member.telegramId && member.id !== user.id)
+      .map((admin) => sendTelegramMessage(
+        admin.telegramId!,
+        `Задача выполнена!\n\n${task.title}\nИсполнитель: ${userMention(user)}${timeSpentMinutes ? `\nЗатрачено: ${taskDurationLabel(timeSpentMinutes)}` : ''}${cleanComment ? `\nКомментарий: ${cleanComment}` : ''}`,
+        undefined,
+        false,
+        admin,
+      ));
+    await Promise.allSettled(sendJobs);
   }
 
   async function sendDueBirthdayReminders() {
@@ -1534,6 +1659,25 @@ async function startServer() {
         return res.json({ ok: true });
       }
 
+      if (action.startsWith('slot_toggle_day:')) {
+        const dayIndex = Number(action.split(':')[1]);
+        if (!Number.isInteger(dayIndex) || dayIndex < 0 || dayIndex > 6) {
+          await answerCallback(callback.id, 'Неизвестный день');
+          return res.json({ ok: true });
+        }
+        const chatKey = String(chatId);
+        const session = chatSessions.get(chatKey);
+        const pendingSlots = session?.pendingSlots || { ...alignedAvailabilitySlots(state.availabilities[user.id]) };
+        const fullDay = [16, 17, 18, 19, 20, 21, 22, 23];
+        const wasFull = (pendingSlots[dayIndex] || []).length === fullDay.length;
+        pendingSlots[dayIndex] = wasFull ? [] : fullDay;
+        chatSessions.set(chatKey, { flow: 'slots_edit', slotDay: dayIndex, pendingSlots });
+        const panel = slotDayPanel(user, state, dayIndex, pendingSlots);
+        await answerCallback(callback.id, wasFull ? 'День очищен' : 'Выбран весь день');
+        await editTelegramPanel(chatId, callback.message.message_id, panel.text, panel.keyboard);
+        return res.json({ ok: true });
+      }
+
       if (action === 'slot_save') {
         const chatKey = String(chatId);
         const pendingSlots = chatSessions.get(chatKey)?.pendingSlots
@@ -1571,6 +1715,25 @@ async function startServer() {
           `*${poll.title}*\n\nОтметились: ${participants.length}\n${participants.map((name) => `• ${name}`).join('\n') || 'Пока никто'}`,
           [[{ text: `Я здесь · ${participants.length}`, callback_data: 'group_checkin' }]],
         );
+        return res.json({ ok: true });
+      }
+
+      if (action.startsWith('meeting_rsvp:')) {
+        const meetingId = action.split(':')[1];
+        const meeting = state.meetings.find((item) => item.id === meetingId && item.status === 'scheduled');
+        if (!meeting) {
+          await answerCallback(callback.id, 'Собрание больше неактуально');
+          return res.json({ ok: true });
+        }
+        const result = updateMeetingAttendance(meeting, user.id, true);
+        saveDatabase(state);
+        await answerCallback(callback.id, result.changed ? 'Отлично, записал: вы придёте' : 'Вы уже отметили, что придёте');
+        if (result.changed && meeting.hostId !== user.id) {
+          const host = state.users.find((member) => member.id === meeting.hostId);
+          if (host?.telegramId) {
+            void sendTelegramMessage(host.telegramId, `${userMention(user)} присоединится к собранию «${meeting.title}».`, undefined, false, host);
+          }
+        }
         return res.json({ ok: true });
       }
 
@@ -1829,7 +1992,9 @@ async function startServer() {
       if (isEnvAdmin(fromUser.id, fromUser.username) && user.role !== 'admin') {
         user.role = 'admin';
       }
-      await configureChatMenuButton(chatId, user);
+      if (text.toLowerCase().startsWith('/start') || isRegistrationPrompt(text)) {
+        await configureChatMenuButton(chatId, user);
+      }
 
       if (!state.messages[user.id]) state.messages[user.id] = [];
       state.messages[user.id].push({
@@ -1973,14 +2138,14 @@ async function startServer() {
           await sendTelegramKeyboard(chatId, 'Задача больше недоступна.', [['Назад']], false, user);
           return res.json({ ok: true });
         }
-        task.status = 'completed';
-        task.completedAt = new Date().toISOString();
-        task.timeSpentMinutes = presetMinutes[normalizedText];
-        saveDatabase(state);
-        for (const admin of state.users.filter((member) => member.role === 'admin' && member.telegramId && member.id !== user.id)) {
-          await sendTelegramMessage(admin.telegramId!, `Задача выполнена!\n\n${task.title}\nИсполнитель: ${userMention(user)}${task.timeSpentMinutes ? `\nЗатрачено: ${taskDurationLabel(task.timeSpentMinutes)}` : ''}`);
-        }
-        await showTasksPanel(chatId, user, state);
+        chatSessions.set(chatKey, { ...session, flow: 'task_complete_comment', completionTimeMinutes: presetMinutes[normalizedText] });
+        await sendTelegramKeyboard(
+          chatId,
+          `Оставь короткий комментарий по задаче *«${task.title}»*: что получилось, что тормозило или что важно знать автору.`,
+          [['Без комментария'], ['Назад']],
+          false,
+          user,
+        );
         return res.json({ ok: true });
       }
 
@@ -1995,13 +2160,26 @@ async function startServer() {
           await sendTelegramKeyboard(chatId, 'Задача больше недоступна.', [['Назад']], false, user);
           return res.json({ ok: true });
         }
-        task.status = 'completed';
-        task.completedAt = new Date().toISOString();
-        task.timeSpentMinutes = minutes;
-        saveDatabase(state);
-        for (const admin of state.users.filter((member) => member.role === 'admin' && member.telegramId && member.id !== user.id)) {
-          await sendTelegramMessage(admin.telegramId!, `Задача выполнена!\n\n${task.title}\nИсполнитель: ${userMention(user)}\nЗатрачено: ${taskDurationLabel(minutes)}`);
+        chatSessions.set(chatKey, { ...session, flow: 'task_complete_comment', completionTimeMinutes: minutes });
+        await sendTelegramKeyboard(
+          chatId,
+          `Оставь короткий комментарий по задаче *«${task.title}»*: что получилось, что тормозило или что важно знать автору.`,
+          [['Без комментария'], ['Назад']],
+          false,
+          user,
+        );
+        return res.json({ ok: true });
+      }
+
+      if (session?.flow === 'task_complete_comment' && normalizedText !== 'назад') {
+        const task = state.tasks.find((item) => item.id === session.completionTaskId && assignedIds(item).includes(user.id));
+        if (!task) {
+          await sendTelegramKeyboard(chatId, 'Задача больше недоступна.', [['Назад']], false, user);
+          return res.json({ ok: true });
         }
+        const completionComment = normalizedText === 'без комментария' ? '' : text.trim();
+        await completeTaskFromChat(state, task, user, session.completionTimeMinutes, completionComment);
+        chatSessions.delete(chatKey);
         await showTasksPanel(chatId, user, state);
         return res.json({ ok: true });
       }
@@ -2575,12 +2753,29 @@ async function startServer() {
       return res.status(404).json({ error: 'Пользователь не найден' });
     }
 
-    if (realName) user.realName = realName;
-    if (username) user.username = username.startsWith('@') ? username : '@' + username;
-    if (role) user.role = role;
+    const cleanRealName = String(realName || '').trim();
+    if (realName !== undefined && !cleanRealName) {
+      return res.status(400).json({ error: 'Имя не должно быть пустым' });
+    }
+    if (cleanRealName) user.realName = cleanRealName;
+    if (username !== undefined) {
+      const cleanUsername = String(username || '').trim();
+      const sanitizedUsername = cleanUsername.startsWith('@') ? cleanUsername : `@${cleanUsername}`;
+      if (!/^@[a-zA-Z0-9_]{5,}$/.test(sanitizedUsername) && sanitizedUsername.toLowerCase() !== user.username.toLowerCase()) {
+        return res.status(400).json({ error: 'Проверь Telegram username: нужен формат @username' });
+      }
+      const usernameTaken = state.users.some((member) => member.id !== user.id && member.username.toLowerCase() === sanitizedUsername.toLowerCase());
+      if (usernameTaken) return res.status(400).json({ error: 'Такой Telegram username уже используется' });
+      user.username = sanitizedUsername;
+    }
+    if (role !== undefined) {
+      if (role !== 'admin' && role !== 'organizer') return res.status(400).json({ error: 'Неизвестная роль участника' });
+      user.role = role;
+    }
     if (birthday !== undefined) {
-      if (birthday && !birthdayParts(birthday)?.year) {
-        return res.status(400).json({ error: 'Укажи дату рождения полностью: ДД.ММ.ГГГГ' });
+      const parsedBirthday = birthdayParts(birthday);
+      if (birthday && !parsedBirthday) {
+        return res.status(400).json({ error: 'Проверь дату рождения' });
       }
       user.birthday = birthday;
     }
@@ -2885,10 +3080,23 @@ async function startServer() {
     }
     let notified = 0;
     if (notifyTeam) {
-      const text = `Пожалуйста, заполните свободные слоты сразу на ${weekCount} ${weekCount === 2 ? 'недели' : 'недели'} вперёд в Mini App.`;
-      const recipients = state.users.filter((user) => !isFacultyUser(user) && user.telegramId && user.id !== requesterId);
+      const weekWord = weekCount >= 5 ? 'недель' : 'недели';
+      const text = `Пожалуйста, заполните свободные слоты сразу на ${weekCount} ${weekWord} вперёд в Mini App.`;
+      const recipients = state.users.filter((user) => !isFacultyUser(user) && user.registered && user.telegramId);
+      recipients.forEach((user) => {
+        if (!state.messages[user.id]) state.messages[user.id] = [];
+        state.messages[user.id].push({
+          id: `availability_horizon_${Date.now()}_${user.id}`,
+          userId: user.id,
+          sender: 'bot',
+          text,
+          timestamp: new Date().toISOString(),
+          buttons: [{ text: 'Заполнить слоты', action: 'open_tma' }],
+        });
+      });
+      saveDatabase(state);
       const results = await Promise.allSettled(recipients.map((user) => sendTelegramMessage(user.telegramId!, text, [{ text: 'Заполнить слоты', action: 'open_tma' }], false, user)));
-      notified = results.filter((result) => result.status === 'fulfilled').length;
+      notified = results.filter((result) => result.status === 'fulfilled' && result.value).length;
     }
     return res.json({ success: true, weeks: weekCount, notified, googleSheets: googleSheetsWeeks });
   });
@@ -2934,11 +3142,17 @@ async function startServer() {
     if (!isRegisteredUser(state, hostId)) {
       return res.status(403).json({ error: 'Сначала нужно зарегистрироваться в чате с ботом' });
     }
+    if (!String(title || '').trim()) return res.status(400).json({ error: 'Укажи название собрания' });
+    if (!parseShortDate(String(date || ''))) return res.status(400).json({ error: 'Укажи корректную дату собрания' });
+    if (!/^\d{1,2}:\d{2}$/.test(String(time || ''))) return res.status(400).json({ error: 'Укажи время собрания' });
 
     const cleanParticipants = participants === 'all'
       ? 'all'
       : [...new Set(Array.isArray(participants) ? participants : [])]
           .filter((id) => state.users.some((user) => user.id === id && !isFacultyUser(user)));
+    if (type !== 'general' && cleanParticipants !== 'all' && cleanParticipants.length === 0) {
+      return res.status(400).json({ error: 'Выбери хотя бы одного участника собрания' });
+    }
     const newMeeting = await createMeetingAndNotify(state, {
       title,
       type,
@@ -3016,9 +3230,28 @@ async function startServer() {
     res.json({ success: true, meeting });
   });
 
+  app.post('/api/meeting/rsvp', (req, res) => {
+    const { requesterId, meetingId, attending = true } = req.body || {};
+    const state = loadDatabase();
+    const requester = state.users.find((user) => user.id === requesterId && user.registered && !isFacultyUser(user));
+    if (!requester) return res.status(403).json({ error: 'Нет доступа к собранию' });
+    const meeting = state.meetings.find((item) => item.id === meetingId && item.status === 'scheduled');
+    if (!meeting) return res.status(404).json({ error: 'Собрание не найдено' });
+
+    const result = updateMeetingAttendance(meeting, requester.id, Boolean(attending));
+    saveDatabase(state);
+    if (result.changed && result.attending && meeting.hostId !== requester.id) {
+      const host = state.users.find((user) => user.id === meeting.hostId);
+      if (host?.telegramId) {
+        void sendTelegramMessage(host.telegramId, `${userMention(requester)} присоединится к собранию «${meeting.title}».`, undefined, false, host);
+      }
+    }
+    return res.json({ success: true, meeting, attending: result.attending });
+  });
+
   // Create a new task
   app.post('/api/task/create', async (req, res) => {
-    const { title, description, deadline, assignedTo, sow, tips, priority, creatorId, competency } = req.body;
+    const { title, description, deadline, assignedTo, sow, tips, priority, creatorId, competency, reminders } = req.body;
     const state = loadDatabase();
 
     if (!isRegisteredUser(state, creatorId)) {
@@ -3044,6 +3277,9 @@ async function startServer() {
       priority: cleanPriority,
       createdAt: now,
       completedAt: '',
+      reminders: normalizeTaskReminders(reminders),
+      assigneeNotes: {},
+      completionComments: {},
     };
 
     state.tasks.push(newTask);
@@ -3099,6 +3335,110 @@ async function startServer() {
     res.json({ success: true, task: newTask });
   });
 
+  app.post('/api/task/update', async (req, res) => {
+    const { requesterId, taskId, title, description, deadline, assignedTo, sow, priority, competency, reminders } = req.body || {};
+    const state = loadDatabase();
+    const task = state.tasks.find((item) => item.id === taskId);
+    if (!task) return res.status(404).json({ error: 'Задача не найдена' });
+    if (task.creatorId !== requesterId && !isAdminUser(state, requesterId)) {
+      return res.status(403).json({ error: 'Редактировать задачу может автор или администратор' });
+    }
+
+    const previousAssignees = new Set(assignedIds(task));
+    if (title !== undefined) task.title = String(title || '').trim() || 'Без названия';
+    if (description !== undefined) task.description = String(description || '').trim();
+    if (deadline !== undefined) task.deadline = String(deadline || '').trim();
+    if (competency !== undefined) task.competency = String(competency || '').trim();
+    if (sow !== undefined) task.sow = String(sow || '').trim();
+    if (priority !== undefined && ['normal', 'important', 'critical'].includes(priority)) task.priority = priority;
+    if (reminders !== undefined) task.reminders = normalizeTaskReminders(reminders);
+    if (assignedTo !== undefined) {
+      const cleanAssignees = [...new Set(Array.isArray(assignedTo) ? assignedTo : assignedTo ? [assignedTo] : [])]
+        .filter((id) => state.users.some((user) => user.id === id && !isFacultyUser(user)));
+      task.assignedTo = cleanAssignees.length ? cleanAssignees : null;
+      if (task.status !== 'completed') task.status = cleanAssignees.length ? 'assigned' : 'open';
+    }
+
+    const currentAssignees = new Set(assignedIds(task));
+    const notificationTargets = new Set([...previousAssignees, ...currentAssignees]);
+    const sendJobs: Promise<boolean>[] = [];
+    for (const id of notificationTargets) {
+      const target = state.users.find((user) => user.id === id);
+      if (!target) continue;
+      const text = currentAssignees.has(id)
+        ? `Задача обновлена.\n\n${taskDetailsText(task, state)}`
+        : `Назначение снято.\n\nВы больше не исполнитель задачи «${task.title}».`;
+      if (!state.messages[target.id]) state.messages[target.id] = [];
+      state.messages[target.id].push({
+        id: `task_updated_${Date.now()}_${target.id}`,
+        userId: target.id,
+        sender: 'bot',
+        text,
+        timestamp: new Date().toISOString(),
+        buttons: currentAssignees.has(id) ? [{ text: 'Открыть задачи', action: 'open_tasks' }] : undefined,
+      });
+      if (target.telegramId) sendJobs.push(sendTelegramMessage(target.telegramId, text, currentAssignees.has(id) ? [{ text: 'Открыть задачи', action: 'open_tasks' }] : undefined, false, target));
+    }
+    saveDatabase(state);
+    await Promise.allSettled(sendJobs);
+    res.json({ success: true, task });
+  });
+
+  app.post('/api/task/comment', (req, res) => {
+    const { requesterId, taskId, assigneeId, side, text } = req.body || {};
+    const state = loadDatabase();
+    const task = state.tasks.find((item) => item.id === taskId);
+    const requester = state.users.find((user) => user.id === requesterId && user.registered);
+    if (!task || !requester) return res.status(404).json({ error: 'Задача или пользователь не найдены' });
+    if (!assignedIds(task).includes(assigneeId)) return res.status(400).json({ error: 'Исполнитель не назначен на эту задачу' });
+    const isCoordinator = task.creatorId === requester.id || requester.role === 'admin';
+    const isExecutor = assigneeId === requester.id;
+    if ((side === 'coordinator' && !isCoordinator) || (side === 'executor' && !isExecutor)) {
+      return res.status(403).json({ error: 'Нет доступа к этому комментарию' });
+    }
+    if (side !== 'coordinator' && side !== 'executor') return res.status(400).json({ error: 'Неизвестный тип комментария' });
+    task.assigneeNotes = task.assigneeNotes || {};
+    task.assigneeNotes[assigneeId] = {
+      ...(task.assigneeNotes[assigneeId] || {}),
+      [side]: String(text || '').trim(),
+      updatedAt: new Date().toISOString(),
+    };
+    saveDatabase(state);
+    return res.json({ success: true, task });
+  });
+
+  app.post('/api/task/notify', async (req, res) => {
+    const { requesterId, taskId } = req.body || {};
+    const state = loadDatabase();
+    const task = state.tasks.find((item) => item.id === taskId);
+    if (!task) return res.status(404).json({ error: 'Задача не найдена' });
+    if (task.creatorId !== requesterId && !isAdminUser(state, requesterId)) {
+      return res.status(403).json({ error: 'Отправить напоминание может автор или администратор' });
+    }
+    const recipientIds = assignedIds(task);
+    if (!recipientIds.length) return res.status(400).json({ error: 'Сначала назначь исполнителей' });
+    const text = `Напоминание по задаче:\n\n${taskDetailsText(task, state)}`;
+    const sendJobs: Promise<boolean>[] = [];
+    for (const id of recipientIds) {
+      const target = state.users.find((user) => user.id === id);
+      if (!target) continue;
+      if (!state.messages[target.id]) state.messages[target.id] = [];
+      state.messages[target.id].push({
+        id: `task_manual_reminder_${Date.now()}_${target.id}`,
+        userId: target.id,
+        sender: 'bot',
+        text,
+        timestamp: new Date().toISOString(),
+        buttons: [{ text: 'Открыть задачи', action: 'open_tasks' }],
+      });
+      if (target.telegramId) sendJobs.push(sendTelegramMessage(target.telegramId, text, [{ text: 'Открыть задачи', action: 'open_tasks' }], false, target));
+    }
+    saveDatabase(state);
+    const delivery = await Promise.allSettled(sendJobs);
+    const delivered = delivery.filter((result) => result.status === 'fulfilled' && result.value).length;
+    res.json({ success: true, queued: sendJobs.length, delivered });
+  });
+
   // Claim a public task
   app.post('/api/task/claim', async (req, res) => {
     const { taskId, userId } = req.body;
@@ -3117,6 +3457,7 @@ async function startServer() {
 
     task.assignedTo = userId;
     task.status = 'assigned';
+    const claimSendJobs: Promise<boolean>[] = [];
 
     // Notify everyone who took the task
     if (!state.messages[userId]) state.messages[userId] = [];
@@ -3128,13 +3469,13 @@ async function startServer() {
       timestamp: new Date().toISOString()
     });
     if (user.telegramId) {
-      await sendTelegramMessage(
+      claimSendJobs.push(sendTelegramMessage(
         user.telegramId,
         `Ты взял задачу в работу:\n\n${taskDetailsText(task, state)}`,
         [{ text: 'Открыть задачи', action: 'open_tasks' }],
         false,
         user,
-      );
+      ));
     }
 
     const creator = state.users.find(u => u.id === task.creatorId);
@@ -3149,7 +3490,7 @@ async function startServer() {
         timestamp: new Date().toISOString()
       });
       if (creator.telegramId) {
-        await sendTelegramMessage(creator.telegramId, text);
+        claimSendJobs.push(sendTelegramMessage(creator.telegramId, text, undefined, false, creator));
       }
     }
     for (const admin of state.users.filter(u => u.role === 'admin' && u.id !== userId && u.id !== creator?.id)) {
@@ -3161,10 +3502,11 @@ async function startServer() {
         text,
         timestamp: new Date().toISOString()
       });
-      if (admin.telegramId) await sendTelegramMessage(admin.telegramId, text);
+      if (admin.telegramId) claimSendJobs.push(sendTelegramMessage(admin.telegramId, text, undefined, false, admin));
     }
 
     saveDatabase(state);
+    await Promise.allSettled(claimSendJobs);
     res.json({ success: true, task });
   });
 
@@ -3202,7 +3544,7 @@ async function startServer() {
 
   // Update task status (complete)
   app.post('/api/task/status', async (req, res) => {
-    const { taskId, status, requesterId, timeSpentMinutes } = req.body;
+    const { taskId, status, requesterId, timeSpentMinutes, completionComment } = req.body;
     const state = loadDatabase();
 
     const task = state.tasks.find(t => t.id === taskId);
@@ -3224,6 +3566,10 @@ async function startServer() {
     if (status === 'completed') {
       task.completedAt = new Date().toISOString();
       task.timeSpentMinutes = timeSpentMinutes === undefined ? undefined : Math.round(parsedTimeSpent);
+      task.completionComments = task.completionComments || {};
+      const cleanComment = String(completionComment || '').trim();
+      if (cleanComment) task.completionComments[requester.id] = cleanComment;
+      else delete task.completionComments[requester.id];
     }
     if (status !== 'completed') {
       task.completedAt = '';
@@ -3238,7 +3584,7 @@ async function startServer() {
         .join(', ') || 'Участник';
       const sendJobs: Promise<boolean>[] = [];
       state.users.filter(u => u.role === 'admin').forEach(admin => {
-        const text = `Задача выполнена!\nБлок: ${task.competency || 'не указан'}\nИсполнитель: ${workerName}\nЗадача: "${task.title}"${task.timeSpentMinutes ? `\nЗатрачено: ${taskDurationLabel(task.timeSpentMinutes)}` : ''}`;
+        const text = `Задача выполнена!\nБлок: ${task.competency || 'не указан'}\nИсполнитель: ${workerName}\nЗадача: "${task.title}"${task.timeSpentMinutes ? `\nЗатрачено: ${taskDurationLabel(task.timeSpentMinutes)}` : ''}${String(completionComment || '').trim() ? `\nКомментарий: ${String(completionComment).trim()}` : ''}`;
         if (!state.messages[admin.id]) state.messages[admin.id] = [];
         state.messages[admin.id].push({
           id: 'task_comp_admin_' + Date.now() + '_' + admin.id,

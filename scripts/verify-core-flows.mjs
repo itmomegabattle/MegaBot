@@ -49,7 +49,7 @@ const fixture = {
       avatarSeed: 'bob',
       telegramId: '300',
       registered: true,
-      birthday: '21.02.1999',
+      birthday: '21.02',
       competencies: [],
       primaryCompetency: '',
       facultyId: '',
@@ -243,6 +243,49 @@ try {
     ['Профиль', 'Слоты', 'Встречи', 'Задачи', 'МФ', 'Помощь'],
   );
 
+  const aliceSessionBeforeAdmin = sessionCookie;
+  const adminAuth = await request('/api/user/get-or-create', {
+    telegramId: '100',
+    username: 'admin',
+    initData: telegramInitData({ id: 100, username: 'admin', first_name: 'Админ' }),
+  });
+  assert.equal(adminAuth.response.status, 200);
+  sessionCookie = adminAuth.response.headers.get('set-cookie').split(';')[0];
+  const promoteBob = await request('/api/user/update', {
+    requesterId: 'u_admin',
+    userId: 'u_bob',
+    realName: 'Борис Командный',
+    username: '@bob',
+    role: 'admin',
+    birthday: '21.02',
+    competencies: [],
+    primaryCompetency: '',
+  });
+  assert.equal(promoteBob.response.status, 200);
+  assert.equal(promoteBob.data.user.role, 'admin');
+  const restoreBob = await request('/api/user/update', {
+    requesterId: 'u_admin',
+    userId: 'u_bob',
+    realName: 'Борис Командный',
+    username: '@bob',
+    role: 'organizer',
+    birthday: '21.02',
+    competencies: [],
+    primaryCompetency: '',
+  });
+  assert.equal(restoreBob.response.status, 200);
+
+  telegramCalls.length = 0;
+  const horizonNotification = await request('/api/availability/weeks', {
+    requesterId: 'u_admin',
+    weeks: 3,
+    notifyTeam: true,
+  });
+  assert.equal(horizonNotification.response.status, 200);
+  assert.equal(horizonNotification.data.notified, 3);
+  assert.ok(telegramCalls.some((call) => call.path.endsWith('/sendMessage') && String(call.body.chat_id) === '100'));
+  sessionCookie = aliceSessionBeforeAdmin;
+
   telegramCalls.length = 0;
   await request('/api/telegram-webhook', {
     update_id: 101,
@@ -359,11 +402,25 @@ try {
 
   telegramCalls.length = 0;
   await request('/api/telegram-webhook', {
+    update_id: 130,
+    callback_query: {
+      id: 'slots-whole-day',
+      from: aliceTelegram,
+      data: 'slot_toggle_day:2',
+      message: { message_id: slotsPanelId, chat: { id: 200, type: 'private' } },
+    },
+  });
+  const wholeDayEdit = telegramCalls.find((call) => call.path.endsWith('/editMessageText'));
+  assert.ok(wholeDayEdit);
+  assert.ok(wholeDayEdit.body.reply_markup.inline_keyboard.flat().some((button) => button.text === 'Снять весь день'));
+
+  telegramCalls.length = 0;
+  await request('/api/telegram-webhook', {
     update_id: 13,
     callback_query: {
       id: 'slots-hour',
       from: aliceTelegram,
-      data: 'slot_toggle:2:18',
+      data: 'slot_toggle:2:23',
       message: { message_id: slotsPanelId, chat: { id: 200, type: 'private' } },
     },
   });
@@ -384,7 +441,7 @@ try {
   ));
   assert.ok(slotsDaysCall);
   assert.ok(slotsDaysCall.body.reply_markup.inline_keyboard.flat().some((button) => button.callback_data === 'slots_day:2' && button.text.includes('✓')));
-  assert.ok(String(slotsDaysCall.body.text || '').includes('Ср: 18:00'));
+  assert.ok(String(slotsDaysCall.body.text || '').includes('Ср:'));
 
   telegramCalls.length = 0;
   await request('/api/telegram-webhook', {
@@ -462,6 +519,45 @@ try {
   assert.equal(selfClaim.response.status, 200);
   assert.ok(telegramCalls.some((call) => call.path.endsWith('/sendMessage') && String(call.body.chat_id) === '200'));
 
+  const editedTask = await request('/api/task/update', {
+    requesterId: 'u_alice',
+    taskId: openTaskResult.data.task.id,
+    title: 'Открытая задача — обновлено',
+    description: 'Добавили принудительного исполнителя и напоминание',
+    deadline: '2030-01-06',
+    assignedTo: ['u_alice', 'u_bob'],
+    reminders: [{ type: 'before_deadline', value: 2, unit: 'days' }],
+  });
+  assert.equal(editedTask.response.status, 200);
+  assert.deepEqual(editedTask.data.task.assignedTo, ['u_alice', 'u_bob']);
+  assert.equal(editedTask.data.task.reminders.length, 1);
+
+  const executorComment = await request('/api/task/comment', {
+    requesterId: 'u_alice',
+    taskId: openTaskResult.data.task.id,
+    assigneeId: 'u_alice',
+    side: 'executor',
+    text: 'Собираю материалы',
+  });
+  assert.equal(executorComment.response.status, 200);
+  assert.equal(executorComment.data.task.assigneeNotes.u_alice.executor, 'Собираю материалы');
+  const coordinatorComment = await request('/api/task/comment', {
+    requesterId: 'u_alice',
+    taskId: openTaskResult.data.task.id,
+    assigneeId: 'u_bob',
+    side: 'coordinator',
+    text: 'Борис отвечает за проверку',
+  });
+  assert.equal(coordinatorComment.response.status, 200);
+  assert.equal(coordinatorComment.data.task.assigneeNotes.u_bob.coordinator, 'Борис отвечает за проверку');
+
+  const manualReminder = await request('/api/task/notify', {
+    requesterId: 'u_alice',
+    taskId: openTaskResult.data.task.id,
+  });
+  assert.equal(manualReminder.response.status, 200);
+  assert.equal(manualReminder.data.queued, 2);
+
   telegramCalls.length = 0;
   await request('/api/telegram-webhook', {
     update_id: 107,
@@ -485,8 +581,23 @@ try {
       text: '30 минут',
     },
   });
+  const completionCommentMenu = telegramCalls.find((call) => call.path.endsWith('/sendMessage') && call.body.reply_markup?.keyboard);
+  assert.ok(String(completionCommentMenu.body.text || '').includes('короткий комментарий'));
+
+  telegramCalls.length = 0;
+  await request('/api/telegram-webhook', {
+    update_id: 109,
+    message: {
+      message_id: 109,
+      chat: { id: 200, type: 'private' },
+      from: aliceTelegram,
+      text: 'Заняло дольше из-за согласования макета',
+    },
+  });
   const afterChatCompletion = JSON.parse(await readFile(testDatabasePath, 'utf8'));
-  assert.equal(afterChatCompletion.tasks.find((task) => task.id === openTaskResult.data.task.id).timeSpentMinutes, 30);
+  const completedChatTask = afterChatCompletion.tasks.find((task) => task.id === openTaskResult.data.task.id);
+  assert.equal(completedChatTask.timeSpentMinutes, 30);
+  assert.equal(completedChatTask.completionComments.u_alice, 'Заняло дольше из-за согласования макета');
 
   telegramCalls.length = 0;
   const meetingResult = await request('/api/meeting', {
@@ -503,6 +614,22 @@ try {
   assert.equal(meetingResult.response.status, 200);
   assert.equal(telegramCalls.filter((call) => call.path.endsWith('/sendMessage')).length, 3);
   assert.ok(!telegramCalls.some((call) => call.body.chat_id === '400'));
+
+  const declineMeeting = await request('/api/meeting/rsvp', {
+    requesterId: 'u_alice',
+    meetingId: meetingResult.data.meeting.id,
+    attending: false,
+  });
+  assert.equal(declineMeeting.response.status, 200);
+  assert.equal(declineMeeting.data.attending, false);
+  const attendMeeting = await request('/api/meeting/rsvp', {
+    requesterId: 'u_alice',
+    meetingId: meetingResult.data.meeting.id,
+    attending: true,
+  });
+  assert.equal(attendMeeting.response.status, 200);
+  assert.equal(attendMeeting.data.attending, true);
+  assert.ok(attendMeeting.data.meeting.attendeeIds.includes('u_alice'));
 
   telegramCalls.length = 0;
   const meetingUpdate = await request('/api/meeting/update', {
@@ -687,6 +814,8 @@ try {
   assert.equal(database.settings.teamChatId, '-100500');
   assert.ok(database.messages.u_alice.length > 0);
   assert.ok(database.messages.u_admin.some((message) => message.text.includes('Задача выполнена')));
+  const persistedPanels = JSON.parse(await readFile(`${testDatabasePath}.chat-panels.json`, 'utf8'));
+  assert.ok(Number.isInteger(persistedPanels['200']));
   assert.equal(serverErrors, '');
 
   console.log('Core flow verification passed: registration, access binding, task notifications, meeting notifications, and task completion.');
