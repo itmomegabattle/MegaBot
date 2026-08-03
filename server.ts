@@ -62,6 +62,33 @@ const CHAT_PANEL_FILE = process.env.CHAT_PANEL_FILE
   ? path.resolve(process.env.CHAT_PANEL_FILE)
   : `${DB_FILE}.chat-panels.json`;
 
+const PRODUCTION_WEBAPP_URL = 'https://megaorgiabot.ru';
+const TEMPORARY_TUNNEL_HOST = /(?:^|\.)(?:loca\.lt|localtunnel\.me|lhr\.life|ngrok(?:-free)?\.(?:app|io)|trycloudflare\.com)$/i;
+let resolvedWebAppUrl: string | undefined;
+
+function configuredWebAppUrl() {
+  if (resolvedWebAppUrl !== undefined) return resolvedWebAppUrl;
+  const configured = String(process.env.WEBAPP_URL || '').trim().replace(/\/$/, '');
+  if (!configured) {
+    resolvedWebAppUrl = process.env.NODE_ENV === 'production' ? PRODUCTION_WEBAPP_URL : '';
+    return resolvedWebAppUrl;
+  }
+  try {
+    const url = new URL(configured);
+    if (process.env.NODE_ENV === 'production' && TEMPORARY_TUNNEL_HOST.test(url.hostname)) {
+      console.warn(`Temporary WEBAPP_URL ${url.hostname} is not allowed in production; using ${PRODUCTION_WEBAPP_URL}.`);
+      resolvedWebAppUrl = PRODUCTION_WEBAPP_URL;
+      return resolvedWebAppUrl;
+    }
+  } catch {
+    console.warn('WEBAPP_URL is invalid; Mini App button was disabled.');
+    resolvedWebAppUrl = '';
+    return resolvedWebAppUrl;
+  }
+  resolvedWebAppUrl = configured;
+  return resolvedWebAppUrl;
+}
+
 // Empty initial data. Real users are created through Telegram or added by admins.
 const INITIAL_USERS: User[] = [];
 const INITIAL_AVAILABILITIES: Record<string, Availability> = {};
@@ -666,7 +693,7 @@ async function startServer() {
       service: 'megabot',
       uptimeSeconds: Math.floor(process.uptime()),
       telegramConfigured: Boolean(process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN),
-      webAppConfigured: Boolean(process.env.WEBAPP_URL),
+      webAppConfigured: Boolean(configuredWebAppUrl()),
       googleSheetsConfigured: Boolean(sheetsConfig),
     });
   });
@@ -750,29 +777,75 @@ async function startServer() {
     completionTaskId?: string;
     completionTimeMinutes?: number;
   }>();
-  const loadChatPanelMessageIds = () => {
+  type StoredChatUiState = {
+    version: 2;
+    panels: Record<string, { current?: number; known: number[] }>;
+    slotDrafts: Record<string, {
+      userId: string;
+      weekStart: string;
+      slots: Record<number, number[]>;
+    }>;
+  };
+  const loadChatUiState = (): StoredChatUiState => {
     try {
-      if (!fs.existsSync(CHAT_PANEL_FILE)) return new Map<string, number>();
-      const saved = JSON.parse(fs.readFileSync(CHAT_PANEL_FILE, 'utf8')) as Record<string, number>;
-      return new Map(Object.entries(saved).filter(([, value]) => Number.isInteger(value)));
+      if (!fs.existsSync(CHAT_PANEL_FILE)) return { version: 2, panels: {}, slotDrafts: {} };
+      const saved = JSON.parse(fs.readFileSync(CHAT_PANEL_FILE, 'utf8')) as StoredChatUiState | Record<string, number>;
+      if ((saved as StoredChatUiState).version === 2 && (saved as StoredChatUiState).panels) {
+        return saved as StoredChatUiState;
+      }
+      const panels = Object.fromEntries(
+        Object.entries(saved)
+          .filter(([, value]) => Number.isInteger(value))
+          .map(([chatId, value]) => [chatId, { current: value, known: [value as number] }]),
+      );
+      return { version: 2, panels, slotDrafts: {} };
     } catch (error) {
       console.error('Error reading chat panel state:', error);
-      return new Map<string, number>();
+      return { version: 2, panels: {}, slotDrafts: {} };
     }
   };
-  const chatPanelMessageIds = loadChatPanelMessageIds();
+  const chatUiState = loadChatUiState();
+  const chatPanelMessageIds = new Map(
+    Object.entries(chatUiState.panels)
+      .filter(([, panel]) => Number.isInteger(panel.current))
+      .map(([chatId, panel]) => [chatId, panel.current!]),
+  );
+  const chatPanelKnownIds = new Map(
+    Object.entries(chatUiState.panels)
+      .map(([chatId, panel]) => [chatId, new Set(panel.known.filter(Number.isInteger))]),
+  );
+  const chatSlotDrafts = new Map(Object.entries(chatUiState.slotDrafts || {}));
   const persistChatPanelMessageIds = () => {
     try {
-      fs.writeFileSync(CHAT_PANEL_FILE, JSON.stringify(Object.fromEntries(chatPanelMessageIds), null, 2), 'utf8');
+      const panels = Object.fromEntries([...chatPanelKnownIds.entries()].map(([chatId, known]) => [chatId, {
+        current: chatPanelMessageIds.get(chatId),
+        known: [...known],
+      }]));
+      fs.writeFileSync(CHAT_PANEL_FILE, JSON.stringify({
+        version: 2,
+        panels,
+        slotDrafts: Object.fromEntries(chatSlotDrafts),
+      }, null, 2), 'utf8');
     } catch (error) {
       console.error('Error writing chat panel state:', error);
     }
   };
   const rememberChatPanelMessage = (chatId: string | number, messageId?: number) => {
     const chatKey = String(chatId);
-    if (messageId) chatPanelMessageIds.set(chatKey, messageId);
-    else chatPanelMessageIds.delete(chatKey);
+    if (messageId) {
+      chatPanelMessageIds.set(chatKey, messageId);
+      const known = chatPanelKnownIds.get(chatKey) || new Set<number>();
+      known.add(messageId);
+      chatPanelKnownIds.set(chatKey, known);
+    } else chatPanelMessageIds.delete(chatKey);
     persistChatPanelMessageIds();
+  };
+  const forgetChatPanelMessage = (chatId: string | number, messageId: number) => {
+    const chatKey = String(chatId);
+    const known = chatPanelKnownIds.get(chatKey);
+    known?.delete(messageId);
+    if (known && known.size === 0) chatPanelKnownIds.delete(chatKey);
+    if (chatPanelMessageIds.get(chatKey) === messageId) chatPanelMessageIds.delete(chatKey);
   };
   const groupCheckins = new Map<string, { title: string; userIds: Set<string> }>();
 
@@ -901,6 +974,18 @@ async function startServer() {
     }
   }
 
+  async function deleteOldChatPanels(chatId: string | number, currentMessageId: number) {
+    const chatKey = String(chatId);
+    const oldMessageIds = [...(chatPanelKnownIds.get(chatKey) || [])]
+      .filter((messageId) => messageId !== currentMessageId);
+    if (!oldMessageIds.length) return;
+    await Promise.all(oldMessageIds.map(async (messageId) => {
+      await deleteTelegramMessage(chatId, messageId);
+      forgetChatPanelMessage(chatId, messageId);
+    }));
+    persistChatPanelMessageIds();
+  }
+
   async function editTelegramPanel(
     chatId: string | number,
     messageId: number,
@@ -934,12 +1019,7 @@ async function startServer() {
     if (!botToken) return;
     const tgApiBase = process.env.TELEGRAM_API_BASE || 'https://api.telegram.org';
     try {
-      const chatKey = String(chatId);
-      const previousPanelId = chatPanelMessageIds.get(chatKey);
-      const deletePrevious = previousPanelId
-        ? deleteTelegramMessage(chatId, previousPanelId)
-        : Promise.resolve(true);
-      const [response] = await Promise.all([telegramFetch(`${tgApiBase}/bot${botToken}/sendMessage`, {
+      const response = await telegramFetch(`${tgApiBase}/bot${botToken}/sendMessage`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -948,13 +1028,16 @@ async function startServer() {
           parse_mode: 'HTML',
           reply_markup: buildKeyboard(rows, includeWebApp, user),
         }),
-      }), deletePrevious]);
+      });
       if (!response.ok) {
         console.error('Telegram keyboard send failed:', response.status, await response.text());
         return;
       }
       const data = await response.json() as { result?: { message_id?: number } };
-      if (data.result?.message_id) rememberChatPanelMessage(chatId, data.result.message_id);
+      if (data.result?.message_id) {
+        rememberChatPanelMessage(chatId, data.result.message_id);
+        await deleteOldChatPanels(chatId, data.result.message_id);
+      }
     } catch (err) {
       console.error('Telegram keyboard send failed:', err);
     }
@@ -968,13 +1051,8 @@ async function startServer() {
     const botToken = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
     if (!botToken) return;
     const tgApiBase = process.env.TELEGRAM_API_BASE || 'https://api.telegram.org';
-    const chatKey = String(chatId);
-    const previousPanelId = chatPanelMessageIds.get(chatKey);
     try {
-      const deletePrevious = previousPanelId
-        ? deleteTelegramMessage(chatId, previousPanelId)
-        : Promise.resolve(true);
-      const [response] = await Promise.all([telegramFetch(`${tgApiBase}/bot${botToken}/sendMessage`, {
+      const response = await telegramFetch(`${tgApiBase}/bot${botToken}/sendMessage`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -983,10 +1061,13 @@ async function startServer() {
           parse_mode: 'HTML',
           reply_markup: inlineKeyboard.length ? { inline_keyboard: inlineKeyboard } : undefined,
         }),
-      }), deletePrevious]);
+      });
       if (!response.ok) return;
       const data = await response.json() as { result?: { message_id?: number } };
-      if (data.result?.message_id) rememberChatPanelMessage(chatId, data.result.message_id);
+      if (data.result?.message_id) {
+        rememberChatPanelMessage(chatId, data.result.message_id);
+        await deleteOldChatPanels(chatId, data.result.message_id);
+      }
     } catch (err) {
       console.error('Telegram panel send failed:', err);
     }
@@ -1047,7 +1128,7 @@ async function startServer() {
     const botToken = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
     if (!botToken) return;
     const tgApiBase = process.env.TELEGRAM_API_BASE || 'https://api.telegram.org';
-    const webAppUrl = process.env.WEBAPP_URL;
+    const webAppUrl = configuredWebAppUrl();
     const menuButton = user && !isFacultyUser(user) && webAppUrl
       ? {
           type: 'web_app',
@@ -1196,7 +1277,7 @@ async function startServer() {
       console.warn('TELEGRAM_BOT_TOKEN is not set. Telegram message was not sent.');
       return false;
     }
-    const webAppUrl = process.env.WEBAPP_URL;
+    const webAppUrl = configuredWebAppUrl();
 
     let replyMarkup: any = buildChatKeyboard(false, recipient);
     if (keyboardOnly) {
@@ -1292,7 +1373,18 @@ async function startServer() {
   ) {
     const dayNames = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
     const chatKey = String(chatId);
-    const availability = overrideSlots || alignedAvailabilitySlots(state.availabilities[user.id]);
+    const savedDraft = chatSlotDrafts.get(chatKey);
+    const availability = overrideSlots
+      || (savedDraft?.userId === user.id && savedDraft.weekStart === currentWeekStartIso() ? savedDraft.slots : undefined)
+      || alignedAvailabilitySlots(state.availabilities[user.id]);
+    chatSlotDrafts.set(chatKey, {
+      userId: user.id,
+      weekStart: currentWeekStartIso(),
+      slots: Object.fromEntries(
+        Object.entries(availability).map(([day, selectedHours]) => [Number(day), [...selectedHours]]),
+      ),
+    });
+    persistChatPanelMessageIds();
     chatSessions.set(chatKey, {
       flow: 'slots_edit',
       pendingSlots: Object.fromEntries(
@@ -1563,7 +1655,7 @@ async function startServer() {
   // Self-register Telegram Bot webhook
   app.get('/api/setup-webhook', async (req, res) => {
     const botToken = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
-    const webAppUrl = process.env.WEBAPP_URL;
+    const webAppUrl = configuredWebAppUrl();
 
     if (!botToken) {
       return res.status(400).json({ error: 'TELEGRAM_BOT_TOKEN or BOT_TOKEN is not set.' });
@@ -1605,6 +1697,19 @@ async function startServer() {
         return res.json({ ok: true });
       }
 
+      const callbackMessageId = Number(callback.message?.message_id);
+      const currentPanelId = chatPanelMessageIds.get(String(chatId));
+      const isSlotPanelAction = action === 'nav_slots'
+        || action === 'slot_save'
+        || action.startsWith('slots_day:')
+        || action.startsWith('slot_toggle:')
+        || action.startsWith('slot_toggle_day:');
+      if (isSlotPanelAction && currentPanelId && callbackMessageId !== currentPanelId) {
+        await deleteTelegramMessage(chatId, callbackMessageId);
+        await answerCallback(callback.id, 'Эта панель устарела. Открой «Слоты» ещё раз.');
+        return res.json({ ok: true });
+      }
+
       if (action === 'nav_profile') {
         await answerCallback(callback.id);
         await showProfilePanel(chatId, user, state);
@@ -1613,7 +1718,8 @@ async function startServer() {
 
       if (action === 'nav_slots') {
         await answerCallback(callback.id);
-        const pendingSlots = chatSessions.get(String(chatId))?.pendingSlots
+        const pendingSlots = chatSlotDrafts.get(String(chatId))?.slots
+          || chatSessions.get(String(chatId))?.pendingSlots
           || alignedAvailabilitySlots(state.availabilities[user.id]);
         await showSlotsPanel(chatId, user, state, pendingSlots);
         return res.json({ ok: true });
@@ -1632,9 +1738,12 @@ async function startServer() {
           return res.json({ ok: true });
         }
         const chatKey = String(chatId);
-        const pendingSlots = chatSessions.get(chatKey)?.pendingSlots
+        const pendingSlots = chatSlotDrafts.get(chatKey)?.slots
+          || chatSessions.get(chatKey)?.pendingSlots
           || { ...alignedAvailabilitySlots(state.availabilities[user.id]) };
         chatSessions.set(chatKey, { flow: 'slots_edit', slotDay: dayIndex, pendingSlots });
+        chatSlotDrafts.set(chatKey, { userId: user.id, weekStart: currentWeekStartIso(), slots: pendingSlots });
+        persistChatPanelMessageIds();
         const panel = slotDayPanel(user, state, dayIndex, pendingSlots);
         await answerCallback(callback.id);
         await editTelegramPanel(chatId, callback.message.message_id, panel.text, panel.keyboard);
@@ -1647,12 +1756,14 @@ async function startServer() {
         const hour = Number(hourValue);
         const chatKey = String(chatId);
         const session = chatSessions.get(chatKey);
-        const pendingSlots = session?.pendingSlots || { ...alignedAvailabilitySlots(state.availabilities[user.id]) };
+        const pendingSlots = chatSlotDrafts.get(chatKey)?.slots || session?.pendingSlots || { ...alignedAvailabilitySlots(state.availabilities[user.id]) };
         const selected = new Set(pendingSlots[dayIndex] || []);
         if (selected.has(hour)) selected.delete(hour);
         else selected.add(hour);
         pendingSlots[dayIndex] = [...selected].sort((a, b) => a - b);
         chatSessions.set(chatKey, { flow: 'slots_edit', slotDay: dayIndex, pendingSlots });
+        chatSlotDrafts.set(chatKey, { userId: user.id, weekStart: currentWeekStartIso(), slots: pendingSlots });
+        persistChatPanelMessageIds();
         const panel = slotDayPanel(user, state, dayIndex, pendingSlots);
         await answerCallback(callback.id, selected.has(hour) ? `${hour}:00 добавлено` : `${hour}:00 снято`);
         await editTelegramPanel(chatId, callback.message.message_id, panel.text, panel.keyboard);
@@ -1667,11 +1778,13 @@ async function startServer() {
         }
         const chatKey = String(chatId);
         const session = chatSessions.get(chatKey);
-        const pendingSlots = session?.pendingSlots || { ...alignedAvailabilitySlots(state.availabilities[user.id]) };
+        const pendingSlots = chatSlotDrafts.get(chatKey)?.slots || session?.pendingSlots || { ...alignedAvailabilitySlots(state.availabilities[user.id]) };
         const fullDay = [16, 17, 18, 19, 20, 21, 22, 23];
         const wasFull = (pendingSlots[dayIndex] || []).length === fullDay.length;
         pendingSlots[dayIndex] = wasFull ? [] : fullDay;
         chatSessions.set(chatKey, { flow: 'slots_edit', slotDay: dayIndex, pendingSlots });
+        chatSlotDrafts.set(chatKey, { userId: user.id, weekStart: currentWeekStartIso(), slots: pendingSlots });
+        persistChatPanelMessageIds();
         const panel = slotDayPanel(user, state, dayIndex, pendingSlots);
         await answerCallback(callback.id, wasFull ? 'День очищен' : 'Выбран весь день');
         await editTelegramPanel(chatId, callback.message.message_id, panel.text, panel.keyboard);
@@ -1680,7 +1793,8 @@ async function startServer() {
 
       if (action === 'slot_save') {
         const chatKey = String(chatId);
-        const pendingSlots = chatSessions.get(chatKey)?.pendingSlots
+        const pendingSlots = chatSlotDrafts.get(chatKey)?.slots
+          || chatSessions.get(chatKey)?.pendingSlots
           || alignedAvailabilitySlots(state.availabilities[user.id]);
         state.availabilities[user.id] = {
           userId: user.id,
@@ -1690,9 +1804,18 @@ async function startServer() {
           updatedAt: new Date().toISOString(),
         };
         chatSessions.delete(chatKey);
+        chatSlotDrafts.delete(chatKey);
+        persistChatPanelMessageIds();
         saveDatabase(state);
         await answerCallback(callback.id, 'Слоты сохранены');
         await showProfilePanel(chatId, user, state);
+        if (sheetsConfig) {
+          try {
+            await exportAvailabilityToSheet(sheetsConfig, state.users, state.availabilities[user.id]);
+          } catch (error: any) {
+            console.error('Google Sheets chat availability export failed:', error);
+          }
+        }
         return res.json({ ok: true });
       }
 
@@ -3793,7 +3916,7 @@ async function startServer() {
     }
 
     const tgApiBase = process.env.TELEGRAM_API_BASE || 'https://api.telegram.org';
-    const webAppUrl = process.env.WEBAPP_URL;
+    const webAppUrl = configuredWebAppUrl();
 
     console.log('Starting Telegram long polling...');
 

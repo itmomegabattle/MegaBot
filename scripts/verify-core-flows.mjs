@@ -165,7 +165,7 @@ try {
       DB_FILE: testDatabasePath,
       TELEGRAM_BOT_TOKEN: botToken,
       TELEGRAM_API_BASE: `http://127.0.0.1:${telegramPort}`,
-      WEBAPP_URL: 'https://example.test/app',
+      WEBAPP_URL: 'https://dead-tunnel.lhr.life',
       DISABLE_TELEGRAM_POLLING: 'true',
       ADMIN_USERNAMES: '@admin',
     },
@@ -220,6 +220,8 @@ try {
   });
   assert.ok(telegramCalls.some((call) => call.path.endsWith('/deleteMessage')));
   assert.ok(telegramCalls.some((call) => call.path.endsWith('/sendMessage')));
+  const menuButtonCall = telegramCalls.find((call) => call.path.endsWith('/setChatMenuButton'));
+  assert.equal(menuButtonCall.body.menu_button.web_app.url, 'https://megaorgiabot.ru');
   assert.ok(!telegramCalls.some((call) => String(call.body.text || '').includes('меняет администратор')));
   const startMenuCall = telegramCalls.find((call) => call.path.endsWith('/sendMessage') && call.body.reply_markup?.keyboard);
   const startMenuButtons = startMenuCall.body.reply_markup.keyboard.flat().map((button) => button.text);
@@ -412,6 +414,8 @@ try {
   });
   const wholeDayEdit = telegramCalls.find((call) => call.path.endsWith('/editMessageText'));
   assert.ok(wholeDayEdit);
+  const slotDraftState = JSON.parse(await readFile(`${testDatabasePath}.chat-panels.json`, 'utf8'));
+  assert.deepEqual(slotDraftState.slotDrafts['200'].slots['2'], [16, 17, 18, 19, 20, 21, 22, 23]);
   assert.ok(wholeDayEdit.body.reply_markup.inline_keyboard.flat().some((button) => button.text === 'Снять весь день'));
 
   telegramCalls.length = 0;
@@ -815,8 +819,11 @@ try {
   assert.ok(database.messages.u_alice.length > 0);
   assert.ok(database.messages.u_admin.some((message) => message.text.includes('Задача выполнена')));
   const persistedPanels = JSON.parse(await readFile(`${testDatabasePath}.chat-panels.json`, 'utf8'));
-  assert.ok(Number.isInteger(persistedPanels['200']));
-  assert.equal(serverErrors, '');
+  assert.equal(persistedPanels.version, 2);
+  assert.ok(Number.isInteger(persistedPanels.panels['200'].current));
+  assert.ok(Array.isArray(persistedPanels.panels['200'].known));
+  assert.equal(persistedPanels.slotDrafts['200'], undefined);
+  assert.match(serverErrors, /Temporary WEBAPP_URL dead-tunnel\.lhr\.life is not allowed in production/);
 
   console.log('Core flow verification passed: registration, access binding, task notifications, meeting notifications, and task completion.');
 } finally {
