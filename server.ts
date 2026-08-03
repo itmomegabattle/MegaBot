@@ -3958,6 +3958,9 @@ async function startServer() {
             : { type: 'commands' },
         })
       });
+      const menuState = loadDatabase();
+      const menuUsers = menuState.users.filter((user) => user.registered && user.telegramId);
+      await Promise.allSettled(menuUsers.map((user) => configureChatMenuButton(user.telegramId!, user)));
       console.log('Telegram commands configured. Mini App menu button configured.');
     } catch (err: any) {
       console.error('Failed to configure Telegram commands/menu:', err.message);
