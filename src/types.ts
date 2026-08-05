@@ -75,7 +75,7 @@ export interface Task {
   title: string;
   description: string;
   deadline: string;
-  assignedTo: string | string[] | null;
+  assignedTo: string[] | null;
   creatorId?: string;
   competency?: string;
   sow: string;

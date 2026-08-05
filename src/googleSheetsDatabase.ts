@@ -9,7 +9,7 @@ export type GoogleSheetsDatabaseConfig = {
 
 type SchemaSheet = { title: string; headers: string[] };
 
-export const DATABASE_SCHEMA_VERSION = 1;
+export const DATABASE_SCHEMA_VERSION = 2;
 
 const SCHEMA: SchemaSheet[] = [
   { title: 'meta', headers: ['key', 'value'] },
@@ -166,7 +166,7 @@ function stateRows(state: SimulationState) {
   const reminderRows: unknown[][] = [];
   state.tasks.forEach((task) => {
     taskRows.push([task.id, task.eventId || '', task.facultyId || '', task.title, task.description, task.deadline, task.creatorId || '', task.competency || '', task.sow || '', task.status, task.priority, task.createdAt || '', task.completedAt || '', task.timeSpentMinutes || '', json(task.tips || [])]);
-    const assignees = !task.assignedTo ? [] : Array.isArray(task.assignedTo) ? task.assignedTo : [task.assignedTo];
+    const assignees = task.assignedTo || [];
     assignees.forEach((userId) => assigneeRows.push([task.id, userId]));
     const commentUserIds = new Set([...Object.keys(task.assigneeNotes || {}), ...Object.keys(task.completionComments || {})]);
     commentUserIds.forEach((userId) => {
@@ -230,6 +230,13 @@ export async function exportStateToGoogleSheetsDatabase(config: GoogleSheetsData
   return { revision, counts: { users: state.users.length, events: state.events?.length || 0, meetings: state.meetings.length, tasks: state.tasks.length } };
 }
 
+export async function clearGoogleSheetsDatabaseAuditLog(config: GoogleSheetsDatabaseConfig) {
+  await googleSheetsApiRequest(config, '/values:batchClear', {
+    method: 'POST',
+    body: JSON.stringify({ ranges: [`${quoteSheet('audit_log')}!A2:D`] }),
+  });
+}
+
 function objects(values: unknown[][] | undefined) {
   if (!values?.length) return [] as Record<string, unknown>[];
   const headers = values[0].map(String);
@@ -246,7 +253,7 @@ export async function importStateFromGoogleSheetsDatabase(config: GoogleSheetsDa
   const meta = Object.fromEntries(metaRows.map((row) => [String(row.key), row.value]));
   if (!bool(meta.data_present)) return { initialized: false, revision: 0, state: null, counts: null };
   if (String(meta.sync_state || '') !== 'ready') return { initialized: false, revision: Number(meta.revision || 0), state: null, counts: null };
-  if (Number(meta.schema_version) !== DATABASE_SCHEMA_VERSION) throw new Error(`Unsupported Google Sheets database schema: ${meta.schema_version}`);
+  if (![1, DATABASE_SCHEMA_VERSION].includes(Number(meta.schema_version))) throw new Error(`Unsupported Google Sheets database schema: ${meta.schema_version}`);
 
   const snapshotState = decodeGoogleSheetsDatabaseSnapshot(objects(valuesByTitle.get('snapshot')));
   if (snapshotState) {
@@ -327,7 +334,7 @@ export function compareDatabaseStateCounts(left: SimulationState, right: Simulat
     meetings: state.meetings.length,
     meetingParticipants: state.meetings.reduce((sum, meeting) => sum + (Array.isArray(meeting.participants) ? meeting.participants.length : 0) + (meeting.attendeeIds?.length || 0), 0),
     tasks: state.tasks.length,
-    taskAssignees: state.tasks.reduce((sum, task) => sum + (!task.assignedTo ? 0 : Array.isArray(task.assignedTo) ? task.assignedTo.length : 1), 0),
+    taskAssignees: state.tasks.reduce((sum, task) => sum + (task.assignedTo?.length || 0), 0),
     taskComments: state.tasks.reduce((sum, task) => sum + new Set([...Object.keys(task.assigneeNotes || {}), ...Object.keys(task.completionComments || {})]).size, 0),
     taskReminders: state.tasks.reduce((sum, task) => sum + (task.reminders?.length || 0), 0),
     availabilities: Object.keys(state.availabilities || {}).length,

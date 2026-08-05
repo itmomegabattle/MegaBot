@@ -1,6 +1,6 @@
 # Деплой и эксплуатация
 
-Дата снимка: **1 августа 2026 года**.
+Дата снимка: **5 августа 2026 года**.
 
 Документ описывает фактический запуск MegaBot в интернете: где он хостится, как домен попадает на сервер, как Telegram открывает Mini App и что нужно делать при обновлении.
 
@@ -8,7 +8,7 @@
 
 Продакшен сейчас работает так:
 
-`Telegram → https://megaorgiabot.ru → Caddy → Node/Express на 127.0.0.1:3000 → database.json`.
+`Telegram → https://megaorgiabot.ru → Caddy → Node/Express на 127.0.0.1 ↔ Google Sheets database`.
 
 Telegram-бот: `@megaorgi_bot`.
 
@@ -105,7 +105,7 @@ curl -I https://megaorgiabot.ru
 - раздача Mini App;
 - Telegram long polling;
 - фоновые проверки напоминаний;
-- работа с JSON-БД.
+- работа с Google Sheets базой и очередью согласованных снимков.
 
 Порт приложения по умолчанию: `3000`.
 
@@ -116,15 +116,13 @@ pm2 status
 pm2 logs megabot --lines 50
 ```
 
-Сейчас процесс `megabot` запускается командой `npm run dev`, то есть `tsx server.ts`. Это рабочий вариант для быстрого раннего запуска. Для более строгого production-режима лучше перейти на:
+Процесс `megabot` запускает собранный `dist/server.cjs` через `ecosystem.config.cjs`. Штатное обновление:
 
 ```bash
-npm run build
-pm2 start npm --name megabot -- run start
-pm2 save
+bash scripts/deploy-selectel.sh
 ```
 
-Перед переходом нужно проверить, что `npm run start` корректно обслуживает Mini App и Telegram polling.
+Скрипт сам выполняет сборку, резервное копирование базы, PM2 reload и health-check.
 
 ## Telegram-интеграция
 
@@ -166,7 +164,6 @@ ADMIN_TELEGRAM_IDS=658274366
 
 ```env
 PORT=3000
-DB_FILE=/opt/megabot/database.json
 DISABLE_TELEGRAM_POLLING=true
 BIRTHDAY_PAYMENT_PHONE=
 BIRTHDAY_PAYMENT_BANK=
@@ -178,6 +175,8 @@ GOOGLE_SHEETS_WEBHOOK_SECRET=
 GOOGLE_SHEETS_PRIMARY_SHEET_TITLE=ОСНОВА
 GOOGLE_SHEETS_PRIMARY_SHEET_ID=432131861
 GOOGLE_SHEETS_TEMPLATE_SHEET_TITLE=ШАБЛОН НЕДЕЛИ
+GOOGLE_SHEETS_DATABASE_SPREADSHEET_ID=1R1MtYJfEuGNw0JI_laNmRk_Un7wIQwxt0xRYTp3mih4
+GOOGLE_SHEETS_DATABASE_ENABLED=true
 ```
 
 Токен бота нельзя коммитить, отправлять в публичные чаты и вставлять в документацию.
@@ -185,10 +184,10 @@ JSON-ключ Google также нельзя коммитить. Он храни
 
 ## Данные
 
-Текущая база данных — файл:
+Текущая база данных — отдельная закрытая Google-таблица. Проверка:
 
 ```bash
-/opt/megabot/database.json
+npm run db:sheets:status
 ```
 
 В нём хранится операционное состояние:
@@ -202,21 +201,13 @@ JSON-ключ Google также нельзя коммитить. Он храни
 - сообщения и служебные записи уведомлений;
 - настройки.
 
-Перед любым рискованным обновлением нужно сделать копию:
+Перед любым рискованным обновлением нужно сделать проверенную копию:
 
 ```bash
-cd /opt/megabot
-cp database.json "database.backup.$(date +%F-%H%M%S).json"
+npm run db:sheets:backup
 ```
 
-Минимальная регулярная резервная копия:
-
-```bash
-mkdir -p /opt/megabot/backups
-cp /opt/megabot/database.json "/opt/megabot/backups/database.$(date +%F-%H%M%S).json"
-```
-
-Долгосрочно лучше перейти на PostgreSQL или хотя бы SQLite с миграциями. JSON-файл проще, но хуже переживает конкурентные записи, ручные правки и рост истории.
+Резервные снимки создаются в `/opt/megabot/backups` с правами `600`. Production-процесс не читает и не записывает `database.json`.
 
 ## Обновление проекта на сервере
 
@@ -224,12 +215,9 @@ cp /opt/megabot/database.json "/opt/megabot/backups/database.$(date +%F-%H%M%S).
 
 ```bash
 cd /opt/megabot
-cp database.json "database.backup.$(date +%F-%H%M%S).json"
-git pull
-npm install
-npm run build
-pm2 restart megabot
-pm2 logs megabot --lines 50
+git pull --ff-only origin master
+bash scripts/deploy-selectel.sh
+pm2 logs megabot --lines 50 --nostream
 ```
 
 Проверить сайт:
@@ -339,7 +327,7 @@ pm2 logs megabot --lines 50 --nostream
 
 ## Отдельная Google-таблица как база данных
 
-Настройка и безопасная миграция описаны в `docs/12-google-sheets-database-migration.md`. До первого успешного `db:sheets:migrate` флаг `GOOGLE_SHEETS_DATABASE_ENABLED` должен оставаться `false`. Команда миграции сама создаёт резервную копию JSON и выполняет обратное чтение со сверкой связанных сущностей.
+Настройка, резервное копирование и production-reset описаны в `docs/12-google-sheets-database-migration.md`. В production флаг `GOOGLE_SHEETS_DATABASE_ENABLED` должен быть `true`.
 
 После включения `/api/health` должен показывать:
 

@@ -9,11 +9,6 @@ cd "${APP_DIR}"
 
 mkdir -p "${BACKUP_DIR}"
 
-if [[ -f database.json ]]; then
-  cp -p database.json "${BACKUP_DIR}/database-${TIMESTAMP}.json"
-  echo "Database backup: ${BACKUP_DIR}/database-${TIMESTAMP}.json"
-fi
-
 if [[ -f .env ]]; then
   cp -p .env "${BACKUP_DIR}/env-${TIMESTAMP}"
   chmod 600 "${BACKUP_DIR}/env-${TIMESTAMP}"
@@ -28,6 +23,7 @@ fi
 npm ci
 npm run lint
 npm run build
+npm run db:sheets:backup
 
 pm2 startOrReload ecosystem.config.cjs --update-env
 pm2 save

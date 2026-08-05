@@ -5,6 +5,7 @@ import {
   encodeGoogleSheetsDatabaseSnapshot,
 } from '../src/googleSheetsDatabase.js';
 import type { SimulationState } from '../src/types.js';
+import { resetOperationalData, sanitizeSimulationState } from '../src/stateMaintenance.js';
 
 const state: SimulationState = {
   users: [{ id: 'u1', username: 'nikita', realName: 'Никита 🚀', role: 'admin', avatarSeed: 'seed' }],
@@ -20,9 +21,18 @@ const state: SimulationState = {
 };
 
 (state.tasks[0] as typeof state.tasks[0] & { legacyField: string }).legacyField = 'must survive';
+(state.users[0] as typeof state.users[0] & { obsoleteFlag: boolean }).obsoleteFlag = true;
 const encoded = encodeGoogleSheetsDatabaseSnapshot(state, 127);
 assert.ok(encoded.length > 1, 'large snapshots must be split into chunks');
 const decoded = decodeGoogleSheetsDatabaseSnapshot(encoded.map(([chunk_index, data]) => ({ chunk_index, data })));
 assert.deepEqual(decoded, state, 'snapshot roundtrip must preserve every field and Unicode character');
 assert.equal(compareDatabaseStateCounts(state, decoded!).passed, true);
-console.log('Google Sheets database snapshot verification passed: chunking, Unicode, legacy fields, relations, and full roundtrip.');
+const sanitized = sanitizeSimulationState(decoded!);
+assert.equal('legacyField' in sanitized.tasks[0], false, 'obsolete task fields must be removed from active state');
+assert.equal('obsoleteFlag' in sanitized.users[0], false, 'obsolete user fields must be removed from active state');
+const reset = resetOperationalData(decoded!);
+assert.equal(reset.users.length, 1, 'production reset must preserve team members');
+assert.deepEqual({ tasks: reset.tasks, meetings: reset.meetings, events: reset.events, availabilities: reset.availabilities, messages: reset.messages }, {
+  tasks: [], meetings: [], events: [], availabilities: {}, messages: {},
+});
+console.log('Google Sheets database verification passed: exact snapshots, schema cleanup, and safe operational reset.');

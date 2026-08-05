@@ -23,10 +23,9 @@
     "sheets:range": "tsx scripts/google-sheets-admin.ts range",
     "sheets:roundtrip-test": "tsx scripts/google-sheets-admin.ts roundtrip-test",
     "db:sheets:check": "tsx scripts/google-sheets-database-admin.ts check",
-    "db:sheets:init": "tsx scripts/google-sheets-database-admin.ts init",
-    "db:sheets:migrate": "tsx scripts/google-sheets-database-admin.ts migrate",
-    "db:sheets:verify": "tsx scripts/google-sheets-database-admin.ts verify",
     "db:sheets:status": "tsx scripts/google-sheets-database-admin.ts status",
+    "db:sheets:backup": "tsx scripts/google-sheets-database-admin.ts backup",
+    "db:sheets:reset": "tsx scripts/google-sheets-database-admin.ts reset-operational-data",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit"
   },

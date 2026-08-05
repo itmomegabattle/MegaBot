@@ -23,6 +23,7 @@ import {
   googleSheetsDatabaseConfigFromEnv,
   importStateFromGoogleSheetsDatabase,
 } from './src/googleSheetsDatabase.js';
+import { sanitizeSimulationState } from './src/stateMaintenance.js';
 
 const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
 const telegramProxyAgent = proxyUrl ? new ProxyAgent(proxyUrl) : null;
@@ -63,10 +64,13 @@ const PORT = Number(process.env.PORT || 3000);
 const DB_FILE = process.env.DB_FILE
   ? path.resolve(process.env.DB_FILE)
   : path.join(process.cwd(), 'database.json');
+const DATABASE_SHEETS_CONFIG = googleSheetsDatabaseConfigFromEnv();
 const CHAT_PANEL_FILE = process.env.CHAT_PANEL_FILE
   ? path.resolve(process.env.CHAT_PANEL_FILE)
-  : `${DB_FILE}.chat-panels.json`;
-const DATABASE_SHEETS_CONFIG = googleSheetsDatabaseConfigFromEnv();
+  : DATABASE_SHEETS_CONFIG?.enabled
+    ? path.join(process.cwd(), 'chat-panels.json')
+    : `${DB_FILE}.chat-panels.json`;
+let databaseStateCache: SimulationState | null = null;
 let pendingDatabaseSheetsState: SimulationState | null = null;
 let databaseSheetsFlushTimer: NodeJS.Timeout | null = null;
 let databaseSheetsFlushPromise: Promise<void> | null = null;
@@ -98,13 +102,6 @@ function configuredWebAppUrl() {
   return resolvedWebAppUrl;
 }
 
-// Empty initial data. Real users are created through Telegram or added by admins.
-const INITIAL_USERS: User[] = [];
-const INITIAL_AVAILABILITIES: Record<string, Availability> = {};
-const INITIAL_MEETINGS: Meeting[] = [];
-const INITIAL_EVENTS: WorkEvent[] = [];
-const INITIAL_TASKS: Task[] = [];
-const INITIAL_MESSAGES: Record<string, BotMessage[]> = {};
 const DEFAULT_FACULTIES: Faculty[] = ['КТУ', 'НОЖ', 'ТИНТ', 'ФТМФ', 'ФТМИ'].map((name) => ({
   id: 'fac_' + name.toLowerCase(),
   name,
@@ -112,16 +109,16 @@ const DEFAULT_FACULTIES: Faculty[] = ['КТУ', 'НОЖ', 'ТИНТ', 'ФТМФ'
 
 function createEmptyState(): SimulationState {
   return {
-    users: [...INITIAL_USERS],
+    users: [],
     faculties: [...DEFAULT_FACULTIES],
     facultyCompetencies: [],
     competencies: [],
-    availabilities: { ...INITIAL_AVAILABILITIES },
-    meetings: [...INITIAL_MEETINGS],
-    events: [...INITIAL_EVENTS],
-    tasks: [...INITIAL_TASKS],
-    messages: { ...INITIAL_MESSAGES },
-    settings: {},
+    availabilities: {},
+    meetings: [],
+    events: [],
+    tasks: [],
+    messages: {},
+    settings: { availabilityWeekCount: 2 },
   };
 }
 
@@ -344,8 +341,7 @@ function isOpenAppText(text: string) {
 }
 
 function assignedIds(task: Task) {
-  if (!task.assignedTo) return [];
-  return Array.isArray(task.assignedTo) ? task.assignedTo : [task.assignedTo];
+  return task.assignedTo || [];
 }
 
 function userMention(user?: User) {
@@ -571,6 +567,8 @@ function parseFacultyTaskStatus(text: string): Task['status'] | null {
 }
 
 function loadDatabase(): SimulationState {
+  if (databaseStateCache) return structuredClone(databaseStateCache);
+  if (DATABASE_SHEETS_CONFIG?.enabled) throw new Error('Google Sheets database has not finished loading');
   let state: SimulationState;
   try {
     if (fs.existsSync(DB_FILE)) {
@@ -584,76 +582,30 @@ function loadDatabase(): SimulationState {
     state = createEmptyState();
   }
 
-  if (!Array.isArray(state.users)) state.users = [];
-  if (!Array.isArray(state.faculties)) state.faculties = [];
+  const cleanState = sanitizeSimulationState(state);
   DEFAULT_FACULTIES.forEach((faculty) => {
-    if (!state.faculties!.some((item) => item.id === faculty.id || item.name === faculty.name)) {
-      state.faculties!.push(faculty);
+    if (!cleanState.faculties!.some((item) => item.id === faculty.id || item.name === faculty.name)) {
+      cleanState.faculties!.push(faculty);
     }
   });
-  if (!Array.isArray(state.competencies)) state.competencies = [];
-  if (!Array.isArray(state.facultyCompetencies)) state.facultyCompetencies = [];
-  if (!state.availabilities) state.availabilities = {};
-  if (!Array.isArray(state.meetings)) state.meetings = [];
-  if (!Array.isArray(state.events)) state.events = [];
-  if (!Array.isArray(state.tasks)) state.tasks = [];
-  if (!state.messages) state.messages = {};
-  if (!state.settings) state.settings = {};
-  if (!Number.isInteger(state.settings.availabilityWeekCount) || Number(state.settings.availabilityWeekCount) < 2) {
-    state.settings.availabilityWeekCount = 2;
-  }
-
-  state.users.forEach((user) => {
-    if ((user.role as string) === 'faculty_lead') user.role = 'faculty_responsible';
-    if (!Array.isArray(user.competencies)) user.competencies = [];
-    if (user.primaryCompetency === undefined) user.primaryCompetency = user.competencies[0] || '';
-    if (user.primaryCompetency && !user.competencies.includes(user.primaryCompetency)) {
-      user.competencies = [user.primaryCompetency, ...user.competencies];
-    }
-    if (user.facultyId === undefined) user.facultyId = '';
-    if (user.joinedAt === undefined) user.joinedAt = '';
-    if (user.lastSeenAt === undefined) user.lastSeenAt = '';
-  });
-  state.meetings.forEach((meeting: any) => {
-    if (meeting.competency === undefined) meeting.competency = '';
-    if (meeting.description === undefined) meeting.description = '';
-    if (!Array.isArray(meeting.attendeeIds)) meeting.attendeeIds = [];
-  });
-  state.tasks.forEach((task: any) => {
-    if (task.creatorId === undefined) task.creatorId = '';
-    if (task.assignedTo === undefined) task.assignedTo = null;
-    if (task.competency === undefined) task.competency = '';
-    if (task.createdAt === undefined) task.createdAt = new Date().toISOString();
-    if (task.completedAt === undefined) task.completedAt = task.status === 'completed' ? new Date().toISOString() : '';
-    if (!['normal', 'important', 'critical'].includes(task.priority)) {
-      task.priority = 'normal';
-    }
-    if (task.timeSpentMinutes !== undefined) {
-      const minutes = Number(task.timeSpentMinutes);
-      task.timeSpentMinutes = Number.isFinite(minutes) && minutes > 0 ? Math.round(minutes) : undefined;
-    }
-    if (task.facultyId === undefined) task.facultyId = '';
-    if (task.eventId === undefined) task.eventId = '';
-    if (!Array.isArray(task.reminders)) task.reminders = [];
-    if (!task.assigneeNotes || typeof task.assigneeNotes !== 'object') task.assigneeNotes = {};
-    if (!task.completionComments || typeof task.completionComments !== 'object') task.completionComments = {};
-  });
-  Object.values(state.availabilities).forEach((availability: any) => {
-    if (availability.weekStart === undefined) availability.weekStart = '';
-    if (!Array.isArray(availability.hardUnavailableDays)) availability.hardUnavailableDays = [];
-  });
-
-  return state;
+  databaseStateCache = cleanState;
+  return structuredClone(databaseStateCache);
 }
 
 function saveDatabase(state: SimulationState) {
+  const cleanState = sanitizeSimulationState(state);
   if (DATABASE_SHEETS_CONFIG?.enabled) {
-    state.settings ||= {};
-    state.settings.databaseRevision = Math.max(0, Number(state.settings.databaseRevision || 0)) + 1;
+    cleanState.settings ||= {};
+    cleanState.settings.databaseRevision = Math.max(0, Number(cleanState.settings.databaseRevision || 0)) + 1;
   }
-  const saved = writeDatabaseFile(state);
-  if (saved && DATABASE_SHEETS_CONFIG?.enabled) scheduleDatabaseSheetsSnapshot(state);
-  return saved;
+  Object.keys(state).forEach((key) => delete (state as unknown as Record<string, unknown>)[key]);
+  Object.assign(state, cleanState);
+  databaseStateCache = structuredClone(state);
+  if (DATABASE_SHEETS_CONFIG?.enabled) {
+    scheduleDatabaseSheetsSnapshot(state);
+    return true;
+  }
+  return writeDatabaseFile(state);
 }
 
 function writeDatabaseFile(state: SimulationState) {
@@ -713,25 +665,10 @@ async function flushDatabaseSheetsSnapshots() {
 
 async function hydrateDatabaseFromGoogleSheets() {
   if (!DATABASE_SHEETS_CONFIG?.enabled) return;
-  const local = loadDatabase();
-  try {
-    const remote = await importStateFromGoogleSheetsDatabase(DATABASE_SHEETS_CONFIG);
-    if (!remote.initialized || !remote.state) {
-      console.warn('Google Sheets database has no complete snapshot; restoring it from local JSON.');
-      await exportStateToGoogleSheetsDatabase(DATABASE_SHEETS_CONFIG, local, 'startup_repair_from_json');
-      return;
-    }
-    const localRevision = Number(local.settings?.databaseRevision || 0);
-    if (remote.revision >= localRevision) {
-      if (!writeDatabaseFile(remote.state)) throw new Error('Could not cache Google Sheets database snapshot locally');
-      console.log(`Google Sheets database loaded at revision ${remote.revision}.`);
-      return;
-    }
-    console.warn(`Local JSON revision ${localRevision} is newer than Google Sheets revision ${remote.revision}; repairing remote snapshot.`);
-    await exportStateToGoogleSheetsDatabase(DATABASE_SHEETS_CONFIG, local, 'startup_repair_from_json');
-  } catch (error) {
-    console.error('Google Sheets database startup read failed; continuing from local JSON:', error);
-  }
+  const remote = await importStateFromGoogleSheetsDatabase(DATABASE_SHEETS_CONFIG);
+  if (!remote.initialized || !remote.state) throw new Error('Google Sheets database has no complete snapshot');
+  databaseStateCache = sanitizeSimulationState(remote.state);
+  console.log(`Google Sheets database loaded at revision ${remote.revision}.`);
 }
 
 function normalizeTaskReminders(value: unknown): TaskReminder[] {
@@ -2159,7 +2096,7 @@ async function startServer() {
           await sendTelegramMessage(chatId, 'Эту задачу уже взяли. Открой приложение, чтобы увидеть актуальный список.', [{ text: 'Открыть задачи', action: 'open_tasks' }]);
           return res.json({ ok: true });
         }
-        task.assignedTo = user.id;
+        task.assignedTo = [user.id];
         task.status = 'assigned';
         saveDatabase(state);
         await answerCallback(callback.id, 'Задача закреплена за тобой');
@@ -3956,7 +3893,7 @@ async function startServer() {
     if (!user) return res.status(404).json({ error: 'Пользователь не найден' });
     if (task.status !== 'open') return res.status(400).json({ error: 'Задача уже занята' });
 
-    task.assignedTo = userId;
+    task.assignedTo = [userId];
     task.status = 'assigned';
     const claimSendJobs: Promise<boolean>[] = [];
 

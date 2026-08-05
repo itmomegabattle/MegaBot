@@ -86,8 +86,7 @@ const openTelegramProfile = (event: React.MouseEvent<HTMLAnchorElement>, url: st
   window.open(url, '_blank', 'noopener,noreferrer');
 };
 const taskAssigneeIds = (task: Task) => {
-  if (!task.assignedTo) return [];
-  return Array.isArray(task.assignedTo) ? task.assignedTo : [task.assignedTo];
+  return task.assignedTo || [];
 };
 const workEventStatusClass = (status: WorkEvent['status']) => status === 'active'
   ? 'bg-emerald-50 text-emerald-700'

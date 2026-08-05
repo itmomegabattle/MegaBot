@@ -3,100 +3,108 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import {
-  compareDatabaseStateCounts,
+  clearGoogleSheetsDatabaseAuditLog,
   exportStateToGoogleSheetsDatabase,
   googleSheetsDatabaseConfigFromEnv,
   importStateFromGoogleSheetsDatabase,
   initializeGoogleSheetsDatabase,
 } from '../src/googleSheetsDatabase.js';
+import { resetOperationalData } from '../src/stateMaintenance.js';
 import type { SimulationState } from '../src/types.js';
 
 const command = process.argv[2] || 'status';
 const config = googleSheetsDatabaseConfigFromEnv();
-if (!config) {
-  throw new Error('Set GOOGLE_SHEETS_DATABASE_SPREADSHEET_ID and GOOGLE_SERVICE_ACCOUNT_FILE in .env');
-}
+if (!config) throw new Error('Set GOOGLE_SHEETS_DATABASE_SPREADSHEET_ID and GOOGLE_SERVICE_ACCOUNT_FILE in .env');
 
-const databaseFile = process.env.DB_FILE ? path.resolve(process.env.DB_FILE) : path.resolve('database.json');
+const backupDirectory = path.resolve(process.env.DB_BACKUP_DIR || 'backups');
+const stamp = () => new Date().toISOString().replace(/[:.]/g, '-');
+const digest = (state: SimulationState) => crypto.createHash('sha256').update(JSON.stringify(state)).digest('hex');
 
-function readLocalState() {
-  if (!fs.existsSync(databaseFile)) throw new Error(`Database file not found: ${databaseFile}`);
-  return JSON.parse(fs.readFileSync(databaseFile, 'utf8')) as SimulationState;
-}
-
-function writeLocalState(state: SimulationState) {
-  const temporaryFile = `${databaseFile}.${process.pid}.${crypto.randomUUID()}.tmp`;
-  fs.writeFileSync(temporaryFile, JSON.stringify(state, null, 2), 'utf8');
-  fs.renameSync(temporaryFile, databaseFile);
-}
-
-function backupLocalState() {
-  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const parsed = path.parse(databaseFile);
-  const backupFile = path.join(parsed.dir, `${parsed.name}.backup-before-google-sheets-${stamp}${parsed.ext || '.json'}`);
-  fs.copyFileSync(databaseFile, backupFile, fs.constants.COPYFILE_EXCL);
+function writeBackup(state: SimulationState, label: string) {
+  fs.mkdirSync(backupDirectory, { recursive: true });
+  const backupFile = path.join(backupDirectory, `${label}-${stamp()}.json`);
+  fs.writeFileSync(backupFile, JSON.stringify(state, null, 2), { encoding: 'utf8', flag: 'wx', mode: 0o600 });
   return backupFile;
 }
 
-const stateDigest = (state: SimulationState) => crypto.createHash('sha256').update(JSON.stringify(state)).digest('hex');
+function archiveLegacyRuntimeFiles() {
+  const archived: string[] = [];
+  for (const source of [path.resolve('database.json'), path.resolve('database.json.chat-panels.json'), path.resolve('chat-panels.json')]) {
+    if (!fs.existsSync(source)) continue;
+    const destination = path.join(backupDirectory, `retired-${path.basename(source)}-${stamp()}`);
+    fs.renameSync(source, destination);
+    archived.push(destination);
+  }
+  return archived;
+}
+
+async function readRemoteState() {
+  const imported = await importStateFromGoogleSheetsDatabase(config);
+  if (!imported.initialized || !imported.state) throw new Error('Google Sheets database is not initialized');
+  return imported;
+}
+
+async function assertBotStopped() {
+  try {
+    const response = await fetch(`http://127.0.0.1:${process.env.PORT || 3000}/api/health`, { signal: AbortSignal.timeout(1_500) });
+    if (response.ok) throw new Error('MegaBot is still running. Stop it with: pm2 stop megabot');
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith('MegaBot is still running')) throw error;
+  }
+}
 
 async function main() {
-  if (command === 'check' || command === 'init') {
+  if (command === 'check') {
     const result = await initializeGoogleSheetsDatabase(config);
     console.log(JSON.stringify({ passed: true, writeAccess: true, ...result }, null, 2));
     return;
   }
 
-  if (command === 'migrate') {
-    const local = readLocalState();
-    const backupFile = backupLocalState();
-    local.settings ||= {};
-    local.settings.databaseRevision = Math.max(1, Number(local.settings.databaseRevision || 0) + 1);
-    await initializeGoogleSheetsDatabase(config);
-    const exported = await exportStateToGoogleSheetsDatabase(config, local, 'initial_migration');
-    const imported = await importStateFromGoogleSheetsDatabase(config);
-    if (!imported.initialized || !imported.state) throw new Error('Google Sheets did not return a complete snapshot after migration');
-    const comparison = compareDatabaseStateCounts(local, imported.state);
-    const sourceDigest = stateDigest(local);
-    const destinationDigest = stateDigest(imported.state);
-    if (!comparison.passed || sourceDigest !== destinationDigest) throw new Error(`Roundtrip mismatch: ${JSON.stringify({ comparison, sourceDigest, destinationDigest })}`);
-    writeLocalState(local);
+  if (command === 'status') {
+    const imported = await readRemoteState();
     console.log(JSON.stringify({
       passed: true,
-      spreadsheetId: config.spreadsheetId,
-      backupFile,
-      revision: exported.revision,
-      counts: comparison,
-      digest: sourceDigest,
-      nextStep: 'Set GOOGLE_SHEETS_DATABASE_ENABLED=true and restart the bot',
-    }, null, 2));
-    return;
-  }
-
-  const imported = await importStateFromGoogleSheetsDatabase(config);
-  if (command === 'status') {
-    console.log(JSON.stringify({
-      passed: imported.initialized,
       spreadsheetId: config.spreadsheetId,
       enabled: config.enabled,
       initialized: imported.initialized,
       revision: imported.revision,
       counts: imported.counts,
+      digest: digest(imported.state!),
     }, null, 2));
-    if (!imported.initialized) process.exitCode = 2;
     return;
   }
-  if (command === 'verify') {
-    if (!imported.initialized || !imported.state) throw new Error('Google Sheets database is not initialized');
-    const comparison = compareDatabaseStateCounts(readLocalState(), imported.state);
-    const sourceDigest = stateDigest(readLocalState());
-    const destinationDigest = stateDigest(imported.state);
-    const passed = comparison.passed && sourceDigest === destinationDigest;
-    console.log(JSON.stringify({ passed, revision: imported.revision, sourceDigest, destinationDigest, ...comparison }, null, 2));
-    if (!passed) process.exitCode = 2;
+
+  if (command === 'backup') {
+    const imported = await readRemoteState();
+    const backupFile = writeBackup(imported.state!, 'google-sheets-database');
+    console.log(JSON.stringify({ passed: true, backupFile, revision: imported.revision, digest: digest(imported.state!) }, null, 2));
     return;
   }
-  throw new Error(`Unknown command: ${command}. Use check, init, migrate, verify, or status.`);
+
+  if (command === 'reset-operational-data') {
+    if (!process.argv.includes('--confirm')) throw new Error('Destructive reset refused. Stop the bot and repeat with --confirm.');
+    await assertBotStopped();
+    const imported = await readRemoteState();
+    const backupFile = writeBackup(imported.state!, 'before-production-reset');
+    const cleanState = resetOperationalData(imported.state!);
+    await clearGoogleSheetsDatabaseAuditLog(config);
+    await exportStateToGoogleSheetsDatabase(config, cleanState, 'production_reset');
+    const verified = await readRemoteState();
+    if (digest(verified.state!) !== digest(cleanState)) throw new Error('Reset roundtrip digest mismatch; backup was preserved');
+    const archivedLegacyFiles = archiveLegacyRuntimeFiles();
+    console.log(JSON.stringify({
+      passed: true,
+      backupFile,
+      archivedLegacyFiles,
+      revision: verified.revision,
+      digest: digest(cleanState),
+      preservedUsers: cleanState.users.length,
+      cleared: { events: 0, meetings: 0, tasks: 0, availabilities: 0, messages: 0 },
+    }, null, 2));
+    return;
+  }
+
+  throw new Error(`Unknown command: ${command}. Use check, status, backup, or reset-operational-data.`);
 }
 
 main().catch((error) => {

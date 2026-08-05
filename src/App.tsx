@@ -169,7 +169,7 @@ export default function App() {
     setState((current) => current ? {
       ...current,
       tasks: current.tasks.map((task) => task.id === taskId
-        ? { ...task, assignedTo: currentUserId, status: 'assigned' as const }
+        ? { ...task, assignedTo: [currentUserId], status: 'assigned' as const }
         : task),
     } : current);
 
