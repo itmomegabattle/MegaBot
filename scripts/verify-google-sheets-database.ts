@@ -32,6 +32,8 @@ assert.equal('legacyField' in sanitized.tasks[0], false, 'obsolete task fields m
 assert.equal('obsoleteFlag' in sanitized.users[0], false, 'obsolete user fields must be removed from active state');
 const reset = resetOperationalData(decoded!);
 assert.equal(reset.users.length, 1, 'production reset must preserve team members');
+assert.equal(reset.users[0].joinedAt, '', 'production reset must clear test-era join timestamps');
+assert.equal(reset.users[0].lastSeenAt, '', 'production reset must clear test-era activity timestamps');
 assert.deepEqual({ tasks: reset.tasks, meetings: reset.meetings, events: reset.events, availabilities: reset.availabilities, messages: reset.messages }, {
   tasks: [], meetings: [], events: [], availabilities: {}, messages: {},
 });

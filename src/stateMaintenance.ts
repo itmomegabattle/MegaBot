@@ -99,7 +99,7 @@ export function resetOperationalData(input: SimulationState): SimulationState {
   const state = sanitizeSimulationState({ ...input, availabilities: {}, meetings: [], events: [], tasks: [], messages: {} });
   return {
     ...state,
-    users: state.users.map((user) => ({ ...user, lastSeenAt: '' })),
+    users: state.users.map((user) => ({ ...user, joinedAt: '', lastSeenAt: '' })),
     availabilities: {},
     meetings: [],
     events: [],
