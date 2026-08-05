@@ -178,6 +178,9 @@ GOOGLE_SHEETS_PRIMARY_SHEET_ID=432131861
 GOOGLE_SHEETS_TEMPLATE_SHEET_TITLE=ШАБЛОН НЕДЕЛИ
 GOOGLE_SHEETS_DATABASE_SPREADSHEET_ID=1R1MtYJfEuGNw0JI_laNmRk_Un7wIQwxt0xRYTp3mih4
 GOOGLE_SHEETS_DATABASE_ENABLED=true
+GOOGLE_CALENDAR_ID=b8ce7f1ecee245cd75d151392661008b9bd79fe498ee412692ad7ac9848b91e0@group.calendar.google.com
+GOOGLE_CALENDAR_ENABLED=true
+GOOGLE_CALENDAR_TIME_ZONE=Europe/Moscow
 ```
 
 Токен бота нельзя коммитить, отправлять в публичные чаты и вставлять в документацию.
@@ -189,6 +192,7 @@ JSON-ключ Google также нельзя коммитить. Он храни
 
 ```bash
 npm run db:sheets:status
+npm run calendar:check
 ```
 
 В нём хранится операционное состояние:

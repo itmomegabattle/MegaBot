@@ -26,6 +26,9 @@
     "db:sheets:status": "tsx scripts/google-sheets-database-admin.ts status",
     "db:sheets:backup": "tsx scripts/google-sheets-database-admin.ts backup",
     "db:sheets:reset": "tsx scripts/google-sheets-database-admin.ts reset-operational-data",
+    "calendar:check": "tsx scripts/google-calendar-admin.ts check",
+    "calendar:sync": "tsx scripts/google-calendar-admin.ts sync",
+    "verify:calendar": "tsx scripts/verify-google-calendar.ts",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit"
   },

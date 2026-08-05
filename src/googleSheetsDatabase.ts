@@ -9,7 +9,7 @@ export type GoogleSheetsDatabaseConfig = {
 
 type SchemaSheet = { title: string; headers: string[] };
 
-export const DATABASE_SCHEMA_VERSION = 2;
+export const DATABASE_SCHEMA_VERSION = 3;
 
 const SCHEMA: SchemaSheet[] = [
   { title: 'meta', headers: ['key', 'value'] },
@@ -19,7 +19,7 @@ const SCHEMA: SchemaSheet[] = [
   { title: 'faculties', headers: ['id', 'name'] },
   { title: 'availability_weeks', headers: ['user_id', 'week_start', 'updated_at', 'hard_unavailable_days_json'] },
   { title: 'availability_slots', headers: ['user_id', 'week_start', 'day_index', 'hour'] },
-  { title: 'meetings', headers: ['id', 'title', 'type', 'date', 'time', 'duration_hours', 'host_id', 'participants_all', 'competency', 'topic', 'description', 'status'] },
+  { title: 'meetings', headers: ['id', 'title', 'type', 'date', 'time', 'duration_hours', 'host_id', 'participants_all', 'competency', 'topic', 'description', 'status', 'google_calendar_event_id'] },
   { title: 'meeting_participants', headers: ['meeting_id', 'user_id', 'kind'] },
   { title: 'tasks', headers: ['id', 'event_id', 'faculty_id', 'title', 'description', 'deadline', 'creator_id', 'competency', 'sow', 'status', 'priority', 'created_at', 'completed_at', 'time_spent_minutes', 'tips_json'] },
   { title: 'task_assignees', headers: ['task_id', 'user_id'] },
@@ -156,7 +156,7 @@ function stateRows(state: SimulationState) {
   const meetingRows: unknown[][] = [];
   const meetingParticipantRows: unknown[][] = [];
   state.meetings.forEach((meeting) => {
-    meetingRows.push([meeting.id, meeting.title, meeting.type, meeting.date, meeting.time, meeting.duration, meeting.hostId, meeting.participants === 'all', meeting.competency || '', meeting.topic || '', meeting.description || '', meeting.status]);
+    meetingRows.push([meeting.id, meeting.title, meeting.type, meeting.date, meeting.time, meeting.duration || 1, meeting.hostId, meeting.participants === 'all', meeting.competency || '', meeting.topic || '', meeting.description || '', meeting.status, meeting.googleCalendarEventId || '']);
     if (Array.isArray(meeting.participants)) meeting.participants.forEach((userId) => meetingParticipantRows.push([meeting.id, userId, 'invited']));
     (meeting.attendeeIds || []).forEach((userId) => meetingParticipantRows.push([meeting.id, userId, 'attending']));
   });
@@ -253,7 +253,7 @@ export async function importStateFromGoogleSheetsDatabase(config: GoogleSheetsDa
   const meta = Object.fromEntries(metaRows.map((row) => [String(row.key), row.value]));
   if (!bool(meta.data_present)) return { initialized: false, revision: 0, state: null, counts: null };
   if (String(meta.sync_state || '') !== 'ready') return { initialized: false, revision: Number(meta.revision || 0), state: null, counts: null };
-  if (![1, DATABASE_SCHEMA_VERSION].includes(Number(meta.schema_version))) throw new Error(`Unsupported Google Sheets database schema: ${meta.schema_version}`);
+  if (![1, 2, DATABASE_SCHEMA_VERSION].includes(Number(meta.schema_version))) throw new Error(`Unsupported Google Sheets database schema: ${meta.schema_version}`);
 
   const snapshotState = decodeGoogleSheetsDatabaseSnapshot(objects(valuesByTitle.get('snapshot')));
   if (snapshotState) {
@@ -296,6 +296,7 @@ export async function importStateFromGoogleSheetsDatabase(config: GoogleSheetsDa
     participants: bool(row.participants_all) ? 'all' as const : participantRows.filter((item) => item.meeting_id === row.id && item.kind === 'invited').map((item) => String(item.user_id)),
     attendeeIds: participantRows.filter((item) => item.meeting_id === row.id && item.kind === 'attending').map((item) => String(item.user_id)),
     competency: String(row.competency || ''), topic: String(row.topic || ''), description: String(row.description || ''), status: String(row.status) as any,
+    googleCalendarEventId: String(row.google_calendar_event_id || '') || undefined,
   }));
   const assignees = objects(valuesByTitle.get('task_assignees'));
   const comments = objects(valuesByTitle.get('task_comments'));

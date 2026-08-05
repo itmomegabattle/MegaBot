@@ -88,6 +88,7 @@ export function sanitizeSimulationState(input: SimulationState): SimulationState
       participants: meeting.participants === 'all' ? 'all' : [...new Set((meeting.participants || []).map(String).filter(Boolean))],
       attendeeIds: [...new Set((meeting.attendeeIds || []).map(String).filter(Boolean))],
       competency: text(meeting.competency), topic: text(meeting.topic), description: text(meeting.description), status: meeting.status,
+      googleCalendarEventId: optionalText(meeting.googleCalendarEventId),
     })),
     events: (input.events || []).map((event) => ({
       id: text(event.id), name: text(event.name), description: optionalText(event.description), startsAt: optionalText(event.startsAt),

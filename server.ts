@@ -27,6 +27,11 @@ import {
 import { sanitizeSimulationState } from './src/stateMaintenance.js';
 import { filterSlotsByAvailabilityConfig, normalizeAvailabilityConfig } from './src/availabilityConfig.js';
 import { birthdayGiftCollectionText } from './src/birthdayGift.js';
+import {
+  googleCalendarConfigFromEnv,
+  reconcileGoogleCalendar,
+  syncMeetingToGoogleCalendar,
+} from './src/googleCalendarSync.js';
 
 const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
 const telegramProxyAgent = proxyUrl ? new ProxyAgent(proxyUrl) : null;
@@ -731,6 +736,9 @@ async function startServer() {
   pruneExpiredAvailabilityWeeks();
   const app = express();
   const sheetsConfig = googleSheetsConfigFromEnv();
+  const calendarConfig = googleCalendarConfigFromEnv();
+  const pendingCalendarMeetingIds = new Set<string>();
+  let calendarReconciliationRunning = false;
   const processedSheetsEvents = new Set<string>();
   app.use(express.json({
     verify: (req, _res, buffer) => {
@@ -750,6 +758,8 @@ async function startServer() {
       googleSheetsConfigured: Boolean(sheetsConfig),
       googleSheetsDatabaseConfigured: Boolean(DATABASE_SHEETS_CONFIG),
       googleSheetsDatabaseEnabled: Boolean(DATABASE_SHEETS_CONFIG?.enabled),
+      googleCalendarConfigured: Boolean(calendarConfig),
+      googleCalendarEnabled: Boolean(calendarConfig?.enabled),
     });
   });
   app.use('/api', (req, res, next) => {
@@ -1322,6 +1332,60 @@ async function startServer() {
     return Promise.allSettled(sendJobs);
   }
 
+  async function syncMeetingCalendar(state: SimulationState, meeting: Meeting) {
+    if (!calendarConfig?.enabled) return true;
+    try {
+      const result = await syncMeetingToGoogleCalendar(calendarConfig, meeting, state);
+      if (!('skipped' in result)) meeting.googleCalendarEventId = result.eventId;
+      pendingCalendarMeetingIds.delete(meeting.id);
+      return true;
+    } catch (error: any) {
+      pendingCalendarMeetingIds.add(meeting.id);
+      console.error(`Google Calendar sync failed for meeting ${meeting.id}:`, error.message || error);
+      return false;
+    }
+  }
+
+  async function reconcileMeetingCalendar() {
+    if (!calendarConfig?.enabled || calendarReconciliationRunning) return;
+    calendarReconciliationRunning = true;
+    try {
+      const state = loadDatabase();
+      const previousEventIds = state.meetings.map((meeting) => meeting.googleCalendarEventId || '').join('|');
+      const result = await reconcileGoogleCalendar(calendarConfig, state);
+      pendingCalendarMeetingIds.clear();
+      result.failed.forEach((failure) => pendingCalendarMeetingIds.add(failure.meetingId));
+      const nextEventIds = state.meetings.map((meeting) => meeting.googleCalendarEventId || '').join('|');
+      if (nextEventIds !== previousEventIds) saveDatabase(state);
+      if (!result.passed) console.error('Google Calendar reconciliation incomplete:', result.failed);
+      else console.log(`Google Calendar synchronized: created=${result.created}, updated=${result.updated}, deleted=${result.deleted}.`);
+    } finally {
+      calendarReconciliationRunning = false;
+    }
+  }
+
+  async function retryPendingMeetingCalendar() {
+    if (!calendarConfig?.enabled || calendarReconciliationRunning || pendingCalendarMeetingIds.size === 0) return;
+    calendarReconciliationRunning = true;
+    try {
+      const state = loadDatabase();
+      let changed = false;
+      for (const meetingId of [...pendingCalendarMeetingIds]) {
+        const meeting = state.meetings.find((item) => item.id === meetingId);
+        if (!meeting) {
+          pendingCalendarMeetingIds.delete(meetingId);
+          continue;
+        }
+        const previousEventId = meeting.googleCalendarEventId;
+        const synced = await syncMeetingCalendar(state, meeting);
+        if (synced && meeting.googleCalendarEventId !== previousEventId) changed = true;
+      }
+      if (changed) saveDatabase(state);
+    } finally {
+      calendarReconciliationRunning = false;
+    }
+  }
+
   async function createMeetingAndNotify(state: SimulationState, data: {
     title: string;
     type: Meeting['type'];
@@ -1362,6 +1426,7 @@ async function startServer() {
         { text: 'Открыть встречи', action: 'open_tma' },
       ],
     );
+    await syncMeetingCalendar(state, meeting);
 
     return meeting;
   }
@@ -3675,6 +3740,7 @@ async function startServer() {
       `Встреча изменена.\n\n${meetingDetailsText(meeting, state)}\n\nПроверьте обновлённые дату, время и состав участников.`,
       'meeting_updated',
     );
+    await syncMeetingCalendar(state, meeting);
     saveDatabase(state);
     res.json({ success: true, meeting });
   });
@@ -3697,11 +3763,12 @@ async function startServer() {
       `Встреча отменена.\n\n${meeting.title}\nДата: ${formatShortDate(meeting.date)}\nВремя: ${meeting.time}`,
       'meeting_cancelled',
     );
+    await syncMeetingCalendar(state, meeting);
     saveDatabase(state);
     res.json({ success: true, meeting });
   });
 
-  app.post('/api/meeting/rsvp', (req, res) => {
+  app.post('/api/meeting/rsvp', async (req, res) => {
     const { requesterId, meetingId, attending = true } = req.body || {};
     const state = loadDatabase();
     const requester = state.users.find((user) => user.id === requesterId && user.registered && !isFacultyUser(user));
@@ -3710,6 +3777,7 @@ async function startServer() {
     if (!meeting) return res.status(404).json({ error: 'Собрание не найдено' });
 
     const result = updateMeetingAttendance(meeting, requester.id, Boolean(attending));
+    if (result.changed) await syncMeetingCalendar(state, meeting);
     saveDatabase(state);
     if (result.changed && result.attending && meeting.hostId !== requester.id) {
       const host = state.users.find((user) => user.id === meeting.hostId);
@@ -4418,6 +4486,13 @@ async function startServer() {
       } catch (error: any) {
         console.error('Google Sheets fallback reconciliation failed:', error.message || error);
       }
+    }, 60 * 1000);
+  }
+
+  if (calendarConfig?.enabled) {
+    reconcileMeetingCalendar().catch((error: any) => console.error('Google Calendar startup reconciliation failed:', error.message || error));
+    setInterval(() => {
+      retryPendingMeetingCalendar().catch((error: any) => console.error('Google Calendar retry failed:', error.message || error));
     }, 60 * 1000);
   }
 

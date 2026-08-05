@@ -40,6 +40,7 @@ export interface Meeting {
   topic?: string;
   description?: string;
   status: 'scheduled' | 'completed' | 'cancelled';
+  googleCalendarEventId?: string;
 }
 
 export type TaskStatus = 'open' | 'assigned' | 'completed' | 'waiting' | 'in_progress';
