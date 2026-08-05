@@ -56,7 +56,7 @@ export function googleSheetsConfigFromEnv(): GoogleSheetsConfig | null {
     spreadsheetId,
     credentialsFile,
     webhookSecret: process.env.GOOGLE_SHEETS_WEBHOOK_SECRET?.trim() || '',
-    primarySheetTitle: process.env.GOOGLE_SHEETS_PRIMARY_SHEET_TITLE?.trim() || 'Основа с 30 до 5',
+    primarySheetTitle: process.env.GOOGLE_SHEETS_PRIMARY_SHEET_TITLE?.trim() || 'ОСНОВА',
     primarySheetId: Number.isInteger(Number(process.env.GOOGLE_SHEETS_PRIMARY_SHEET_ID)) ? Number(process.env.GOOGLE_SHEETS_PRIMARY_SHEET_ID) : undefined,
     templateSheetTitle: process.env.GOOGLE_SHEETS_TEMPLATE_SHEET_TITLE?.trim() || 'ШАБЛОН НЕДЕЛИ',
     scanRange: process.env.GOOGLE_SHEETS_SCAN_RANGE?.trim() || 'A1:BZ200',
@@ -121,13 +121,6 @@ function addDays(dateIso: string, days: number) {
   const date = new Date(`${dateIso}T12:00:00Z`);
   date.setUTCDate(date.getUTCDate() + days);
   return date.toISOString().slice(0, 10);
-}
-
-function activeManagedSheets(metadata: Awaited<ReturnType<typeof sheetMetadata>>, currentWeek: string) {
-  return metadata.sheets
-    .map((sheet) => ({ ...sheet.properties, weekStart: sheet.properties.title.match(WEEK_SHEET_RE)?.[1] || '' }))
-    .filter((sheet) => sheet.weekStart >= currentWeek && dayIndexFor(sheet.weekStart, currentWeek) < 35)
-    .sort((a, b) => a.weekStart.localeCompare(b.weekStart));
 }
 
 async function sheetMetadata(config: GoogleSheetsConfig) {
@@ -205,10 +198,7 @@ async function readGrid(config: GoogleSheetsConfig, title = config.primarySheetT
 }
 
 async function readActiveWeekGrids(config: GoogleSheetsConfig) {
-  const metadata = await sheetMetadata(config);
-  const managed = activeManagedSheets(metadata, currentMoscowWeekStart());
-  if (!managed.length) return [await readGrid(config)];
-  return Promise.all(managed.map((sheet) => readGrid(config, sheet.title)));
+  return [await readGrid(config)];
 }
 
 function normalizeName(value: unknown) {
@@ -446,14 +436,116 @@ export async function ensureTemplateSheet(config: GoogleSheetsConfig, users: She
   return { created: true, sheetId: duplicated.replies?.[0]?.duplicateSheet?.properties?.sheetId, clearedCells: ranges.length };
 }
 
+function findPrimarySheet(metadata: Awaited<ReturnType<typeof sheetMetadata>>, config: GoogleSheetsConfig) {
+  return config.primarySheetId !== undefined
+    ? metadata.sheets.find((sheet) => sheet.properties.sheetId === config.primarySheetId)
+    : metadata.sheets.find((sheet) => sheet.properties.title === config.primarySheetTitle);
+}
+
+function moscowBackupTimestamp(date = new Date()) {
+  return new Intl.DateTimeFormat('sv-SE', {
+    timeZone: 'Europe/Moscow',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+  }).format(date).replace(':', '-').replace(':', '-');
+}
+
+export async function backupPrimarySheet(config: GoogleSheetsConfig, label = 'РЕЗЕРВ ОСНОВА') {
+  const metadata = await sheetMetadata(config);
+  const source = findPrimarySheet(metadata, config);
+  if (!source) throw new Error(`Primary sheet not found by id/title: ${config.primarySheetId ?? config.primarySheetTitle}`);
+  const baseTitle = `${label} ${moscowBackupTimestamp()}`.slice(0, 94);
+  const existingTitles = new Set(metadata.sheets.map((sheet) => sheet.properties.title));
+  let title = baseTitle;
+  let suffix = 2;
+  while (existingTitles.has(title)) {
+    title = `${baseTitle.slice(0, 96 - String(suffix).length)} ${suffix}`;
+    suffix += 1;
+  }
+  const duplicated = await googleRequest(config, ':batchUpdate', {
+    method: 'POST',
+    body: JSON.stringify({ requests: [{ duplicateSheet: {
+      sourceSheetId: source.properties.sheetId,
+      newSheetName: title,
+      insertSheetIndex: metadata.sheets.length,
+    } }] }),
+  });
+  const backupSheetId = Number(duplicated.replies?.[0]?.duplicateSheet?.properties?.sheetId);
+  if (!Number.isInteger(backupSheetId)) throw new Error('Google Sheets did not return the backup sheet ID');
+  const verifiedMetadata = await sheetMetadata(config);
+  const verifiedBackup = verifiedMetadata.sheets.find((sheet) => (
+    sheet.properties.sheetId === backupSheetId && sheet.properties.title === title
+  ));
+  if (!verifiedBackup) throw new Error(`Backup verification failed: ${title}`);
+  return {
+    sourceSheetId: source.properties.sheetId,
+    sourceTitle: source.properties.title,
+    backupSheetId,
+    backupTitle: title,
+    verified: true,
+  };
+}
+
+function availabilityRegions(grid: SheetGrid, layout: ReturnType<typeof discover>) {
+  if (!layout.allRows.length) throw new Error(`No participant rows were discovered in ${grid.title}`);
+  const slotColumns = layout.columnHours
+    .map((hour, col) => (hour !== null && layout.columnDates[col] ? col : -1))
+    .filter((col) => col >= 0);
+  if (!slotColumns.length) throw new Error(`No availability columns were discovered in ${grid.title}`);
+  const columnRegions: { start: number; end: number }[] = [];
+  for (const col of slotColumns) {
+    const current = columnRegions[columnRegions.length - 1];
+    if (current && current.end === col) current.end = col + 1;
+    else columnRegions.push({ start: col, end: col + 1 });
+  }
+  const startRow = Math.min(...layout.allRows.map((row) => row.rowIndex));
+  const endRow = Math.max(...layout.allRows.map((row) => row.rowIndex)) + 1;
+  return columnRegions.map((region) => ({ ...region, startRow, endRow }));
+}
+
+async function ensurePrimaryCheckboxes(
+  config: GoogleSheetsConfig,
+  grid: SheetGrid,
+  layout: ReturnType<typeof discover>,
+) {
+  const regions = availabilityRegions(grid, layout);
+  await googleRequest(config, ':batchUpdate', {
+    method: 'POST',
+    body: JSON.stringify({ requests: regions.map((region) => ({ setDataValidation: {
+      range: {
+        sheetId: grid.sheetId,
+        startRowIndex: region.startRow,
+        endRowIndex: region.endRow,
+        startColumnIndex: region.start,
+        endColumnIndex: region.end,
+      },
+      rule: { condition: { type: 'BOOLEAN' }, strict: true, showCustomUi: true },
+    } })) }),
+  });
+  const data = regions.map((region) => ({
+    range: `${quotedSheet(grid.title)}!${columnName(region.start)}${region.startRow + 1}:${columnName(region.end - 1)}${region.endRow}`,
+    values: Array.from({ length: region.endRow - region.startRow }, (_, rowOffset) => (
+      Array.from({ length: region.end - region.start }, (_, colOffset) => (
+        isSelected(grid.raw[region.startRow + rowOffset]?.[region.start + colOffset])
+      ))
+    )),
+  }));
+  await googleRequest(config, '/values:batchUpdate', {
+    method: 'POST',
+    body: JSON.stringify({ valueInputOption: 'RAW', data }),
+  });
+  return { regions: regions.length, checkboxCells: regions.reduce((sum, region) => (
+    sum + (region.endRow - region.startRow) * (region.end - region.start)
+  ), 0) };
+}
+
 export async function persistTelegramIdBindings(config: GoogleSheetsConfig, users: SheetUser[]) {
   const metadata = await sheetMetadata(config);
   const currentWeek = currentMoscowWeekStart();
-  const managed = activeManagedSheets(metadata, currentWeek);
   const selected = metadata.sheets.filter((sheet) => (
     sheet.properties.sheetId === config.primarySheetId
     || sheet.properties.title === config.templateSheetTitle
-    || managed.some((managedSheet) => managedSheet.sheetId === sheet.properties.sheetId)
+    || (config.primarySheetId === undefined && sheet.properties.title === config.primarySheetTitle)
   ));
   const requests: unknown[] = [];
   const bindings: { sheet: string; row: number; telegramId: string; name: string }[] = [];
@@ -476,64 +568,99 @@ export async function persistTelegramIdBindings(config: GoogleSheetsConfig, user
   return { writtenBindings: requests.length, bindings };
 }
 
-export async function ensureManagedWeekSheets(config: GoogleSheetsConfig, users: SheetUser[], weekCount: number) {
-  const count = Math.min(5, Math.max(2, Math.trunc(weekCount)));
-  await ensureTemplateSheet(config, users);
-  let metadata = await sheetMetadata(config);
-  const template = metadata.sheets.find((sheet) => sheet.properties.title === config.templateSheetTitle);
-  if (!template) throw new Error(`Template sheet not found: ${config.templateSheetTitle}`);
-  const primarySource = config.primarySheetId !== undefined
-    ? metadata.sheets.find((sheet) => sheet.properties.sheetId === config.primarySheetId)
-    : metadata.sheets.find((sheet) => sheet.properties.title === config.primarySheetTitle);
-  if (!primarySource) throw new Error('Primary source sheet not found');
+async function preparePrimaryWeekSheet(
+  config: GoogleSheetsConfig,
+  users: SheetUser[],
+  precreatedBackup: Awaited<ReturnType<typeof backupPrimarySheet>> | null = null,
+) {
   const currentWeek = currentMoscowWeekStart();
-  const desiredWeeks = Array.from({ length: count }, (_, index) => addDays(currentWeek, index * 7));
-  const desiredTitles = new Set(desiredWeeks.map((week) => `Неделя ${week}`));
-  const deleted: string[] = [];
-  const deleteRequests = metadata.sheets
-    .filter((sheet) => WEEK_SHEET_RE.test(sheet.properties.title) && !desiredTitles.has(sheet.properties.title))
-    .map((sheet) => {
-      deleted.push(sheet.properties.title);
-      return { deleteSheet: { sheetId: sheet.properties.sheetId } };
+  const grid = await readGrid(config);
+  const layout = discover(grid, users, currentWeek, config.nameAliases);
+  const explicitDateColumns: number[] = [];
+  const currentHeaderDates: string[] = [];
+  for (let col = 0; col < (grid.formatted[layout.dateRow]?.length || 0); col += 1) {
+    const date = parseHeaderDate(grid.formatted[layout.dateRow]?.[col], currentWeek);
+    if (!date) continue;
+    explicitDateColumns.push(col);
+    currentHeaderDates.push(date);
+  }
+  if (explicitDateColumns.length !== 7) {
+    throw new Error(`Expected exactly 7 date headers in ${grid.title}, found ${explicitDateColumns.length}`);
+  }
+  availabilityRegions(grid, layout);
+  const desiredDates = Array.from({ length: 7 }, (_, day) => addDays(currentWeek, day));
+  const rotated = desiredDates.some((date, index) => currentHeaderDates[index] !== date);
+  let backup = precreatedBackup;
+  if (rotated) {
+    backup ||= await backupPrimarySheet(config, `РЕЗЕРВ ${grid.title}`);
+    const weekdays = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
+    const data = explicitDateColumns.map((col, day) => {
+      const [, month, dateDay] = desiredDates[day].split('-');
+      return { range: `${quotedSheet(grid.title)}!${columnName(col)}${layout.dateRow + 1}`, values: [[`${dateDay}.${month} ${weekdays[day]}`]] };
     });
-  if (deleteRequests.length) await googleRequest(config, ':batchUpdate', { method: 'POST', body: JSON.stringify({ requests: deleteRequests }) });
-  metadata = await sheetMetadata(config);
-  const created: string[] = [];
-  for (const week of desiredWeeks) {
-    const title = `Неделя ${week}`;
-    if (!metadata.sheets.some((sheet) => sheet.properties.title === title)) {
-      await googleRequest(config, ':batchUpdate', {
-        method: 'POST',
-        body: JSON.stringify({ requests: [{ duplicateSheet: { sourceSheetId: template.properties.sheetId, newSheetName: title, insertSheetIndex: metadata.sheets.length } }] }),
-      });
-      created.push(title);
-      metadata = await sheetMetadata(config);
+    await googleRequest(config, '/values:batchUpdate', {
+      method: 'POST',
+      body: JSON.stringify({ valueInputOption: 'USER_ENTERED', data }),
+    });
+    const ranges = availabilityRegions(grid, layout).map((region) => (
+      `${quotedSheet(grid.title)}!${columnName(region.start)}${region.startRow + 1}:${columnName(region.end - 1)}${region.endRow}`
+    ));
+    await googleRequest(config, '/values:batchClear', {
+      method: 'POST',
+      body: JSON.stringify({ ranges }),
+    });
+    for (const region of availabilityRegions(grid, layout)) {
+      for (let row = region.startRow; row < region.endRow; row += 1) {
+        if (!grid.raw[row]) grid.raw[row] = [];
+        for (let col = region.start; col < region.end; col += 1) grid.raw[row][col] = false;
+      }
     }
-    const targetSheet = metadata.sheets.find((sheet) => sheet.properties.title === title);
-    if (!targetSheet) throw new Error(`Managed sheet not found after creation: ${title}`);
+  }
+  const checkboxes = await ensurePrimaryCheckboxes(config, grid, layout);
+  const metadata = await sheetMetadata(config);
+  const legacySheets = metadata.sheets.filter((sheet) => WEEK_SHEET_RE.test(sheet.properties.title));
+  const visibleLegacySheets = legacySheets.filter((sheet) => !sheet.properties.hidden);
+  if (visibleLegacySheets.length) {
     await googleRequest(config, ':batchUpdate', {
       method: 'POST',
-      body: JSON.stringify({ requests: [{ copyPaste: {
-        source: { sheetId: primarySource.properties.sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 0, endColumnIndex: 74 },
-        destination: { sheetId: targetSheet.properties.sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 0, endColumnIndex: 74 },
-        pasteType: 'PASTE_NORMAL', pasteOrientation: 'NORMAL',
-      } }] }),
+      body: JSON.stringify({ requests: visibleLegacySheets.map((sheet) => ({ updateSheetProperties: {
+        properties: { sheetId: sheet.properties.sheetId, hidden: true },
+        fields: 'hidden',
+      } })) }),
     });
-    const grid = await readGrid(config, title);
-    const layout = discover(grid, users, week, config.nameAliases);
-    const explicitDateColumns: number[] = [];
-    for (let col = 0; col < (grid.formatted[layout.dateRow]?.length || 0); col += 1) {
-      if (parseHeaderDate(grid.formatted[layout.dateRow]?.[col], week)) explicitDateColumns.push(col);
-    }
-    const weekdays = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
-    const data = explicitDateColumns.slice(0, 7).map((col, day) => {
-      const date = addDays(week, day);
-      const [year, month, dateDay] = date.split('-');
-      return { range: `${quotedSheet(title)}!${columnName(col)}${layout.dateRow + 1}`, values: [[`${dateDay}.${month} ${weekdays[day]}`]] };
-    });
-    if (data.length !== 7) throw new Error(`Expected 7 date headers in ${title}, found ${data.length}`);
-    await googleRequest(config, '/values:batchUpdate', { method: 'POST', body: JSON.stringify({ valueInputOption: 'USER_ENTERED', data }) });
   }
   const userBindings = await persistTelegramIdBindings(config, users);
-  return { weekCount: count, currentWeek, created, deleted, active: desiredWeeks.map((week) => `Неделя ${week}`), userBindings };
+  return {
+    primary: grid.title,
+    primarySheetId: grid.sheetId,
+    currentWeek,
+    dates: desiredDates,
+    rotated,
+    backup,
+    checkboxes,
+    hiddenLegacySheets: visibleLegacySheets.map((sheet) => sheet.properties.title),
+    preservedLegacySheets: legacySheets.map((sheet) => sheet.properties.title),
+    userBindings,
+  };
+}
+
+let primaryWeekMaintenance: Promise<Awaited<ReturnType<typeof preparePrimaryWeekSheet>>> | null = null;
+
+export async function ensurePrimaryWeekSheet(config: GoogleSheetsConfig, users: SheetUser[]) {
+  if (!primaryWeekMaintenance) {
+    primaryWeekMaintenance = preparePrimaryWeekSheet(config, users).finally(() => {
+      primaryWeekMaintenance = null;
+    });
+  }
+  return primaryWeekMaintenance;
+}
+
+export async function migratePrimaryWeekSheet(config: GoogleSheetsConfig, users: SheetUser[]) {
+  const backup = await backupPrimarySheet(config);
+  return preparePrimaryWeekSheet(config, users, backup);
+}
+
+/** Backward-compatible entry point: the horizon remains an app setting, while Sheets uses only ОСНОВА. */
+export async function ensureManagedWeekSheets(config: GoogleSheetsConfig, users: SheetUser[], _weekCount: number) {
+  return ensurePrimaryWeekSheet(config, users);
 }

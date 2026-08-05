@@ -12,7 +12,7 @@ import {
   buildUserMappingReport,
   currentMoscowWeekStart,
   ensureTemplateSheet,
-  ensureManagedWeekSheets,
+  ensurePrimaryWeekSheet,
   exportAvailabilityToSheet,
   googleSheetsConfigFromEnv,
   importAvailabilitiesFromSheet,
@@ -633,10 +633,19 @@ function loadDatabase(): SimulationState {
 }
 
 function saveDatabase(state: SimulationState) {
+  const temporaryFile = `${DB_FILE}.${process.pid}.${crypto.randomUUID()}.tmp`;
   try {
-    fs.writeFileSync(DB_FILE, JSON.stringify(state, null, 2), 'utf-8');
+    fs.writeFileSync(temporaryFile, JSON.stringify(state, null, 2), 'utf-8');
+    fs.renameSync(temporaryFile, DB_FILE);
+    return true;
   } catch (error) {
     console.error('Error writing database file:', error);
+    try {
+      if (fs.existsSync(temporaryFile)) fs.unlinkSync(temporaryFile);
+    } catch {
+      // The original write error is the useful one.
+    }
+    return false;
   }
 }
 
@@ -817,20 +826,31 @@ async function startServer() {
   );
   const chatSlotDrafts = new Map(Object.entries(chatUiState.slotDrafts || {}));
   const pendingSheetAvailabilityExports = new Set(chatUiState.pendingSheetExports || []);
+  const processedCallbackIds = new Set<string>();
+  const telegramChatUpdateQueues = new Map<string, Promise<void>>();
   const persistChatPanelMessageIds = () => {
+    const temporaryFile = `${CHAT_PANEL_FILE}.${process.pid}.${crypto.randomUUID()}.tmp`;
     try {
       const panels = Object.fromEntries([...chatPanelKnownIds.entries()].map(([chatId, known]) => [chatId, {
         current: chatPanelMessageIds.get(chatId),
         known: [...known],
       }]));
-      fs.writeFileSync(CHAT_PANEL_FILE, JSON.stringify({
+      fs.writeFileSync(temporaryFile, JSON.stringify({
         version: 2,
         panels,
         pendingSheetExports: [...pendingSheetAvailabilityExports],
         slotDrafts: Object.fromEntries(chatSlotDrafts),
       }, null, 2), 'utf8');
+      fs.renameSync(temporaryFile, CHAT_PANEL_FILE);
+      return true;
     } catch (error) {
       console.error('Error writing chat panel state:', error);
+      try {
+        if (fs.existsSync(temporaryFile)) fs.unlinkSync(temporaryFile);
+      } catch {
+        // The original write error is the useful one.
+      }
+      return false;
     }
   };
   const rememberChatPanelMessage = (chatId: string | number, messageId?: number) => {
@@ -905,8 +925,7 @@ async function startServer() {
     const isPrimarySheet = sheetsConfig.primarySheetId !== undefined
       ? Number(req.body?.sheetId) === sheetsConfig.primarySheetId
       : String(req.body?.sheetTitle || '') === sheetsConfig.primarySheetTitle;
-    const isManagedWeekSheet = /^Неделя \d{4}-\d{2}-\d{2}$/.test(String(req.body?.sheetTitle || ''));
-    if (!isPrimarySheet && !isManagedWeekSheet) {
+    if (!isPrimarySheet) {
       return res.json({ success: true, ignored: 'not_primary_sheet' });
     }
     try {
@@ -1028,9 +1047,19 @@ async function startServer() {
           reply_markup: inlineKeyboard ? { inline_keyboard: inlineKeyboard } : undefined,
         }),
       });
-      if (response.ok) rememberChatPanelMessage(chatId, messageId);
-      return response.ok;
-    } catch {
+      if (response.ok) {
+        rememberChatPanelMessage(chatId, messageId);
+        return true;
+      }
+      const errorBody = await response.text();
+      if (response.status === 400 && errorBody.toLowerCase().includes('message is not modified')) {
+        rememberChatPanelMessage(chatId, messageId);
+        return true;
+      }
+      console.error('Telegram panel edit failed:', response.status, errorBody);
+      return false;
+    } catch (error) {
+      console.error('Telegram panel edit failed:', error);
       return false;
     }
   }
@@ -1092,6 +1121,17 @@ async function startServer() {
     } catch (err) {
       console.error('Telegram panel send failed:', err);
     }
+  }
+
+  async function updateInlinePanel(
+    chatId: string | number,
+    messageId: number | undefined,
+    text: string,
+    inlineKeyboard: { text: string; callback_data: string }[][],
+  ) {
+    if (messageId && await editTelegramPanel(chatId, messageId, text, inlineKeyboard)) return true;
+    await sendInlinePanel(chatId, text, inlineKeyboard);
+    return false;
   }
 
   async function sendGroupMessage(chatId: string | number, text: string) {
@@ -1396,11 +1436,39 @@ async function startServer() {
     );
   }
 
+  const CHAT_SLOT_HOURS = [16, 17, 18, 19, 20, 21, 22, 23];
+
+  function cloneValidSlotSelection(source?: Record<number, number[]>) {
+    const result: Record<number, number[]> = {};
+    for (const [dayValue, hoursValue] of Object.entries(source || {})) {
+      const dayIndex = Number(dayValue);
+      if (!Number.isInteger(dayIndex) || dayIndex < 0 || dayIndex >= 35 || !Array.isArray(hoursValue)) continue;
+      result[dayIndex] = [...new Set(hoursValue.map(Number).filter((hour) => CHAT_SLOT_HOURS.includes(hour)))]
+        .sort((a, b) => a - b);
+    }
+    return result;
+  }
+
+  function currentSlotDraft(chatKey: string, user: User, state: SimulationState) {
+    const savedDraft = chatSlotDrafts.get(chatKey);
+    if (savedDraft?.userId === user.id && savedDraft.weekStart === currentWeekStartIso()) {
+      return cloneValidSlotSelection(savedDraft.slots);
+    }
+    return cloneValidSlotSelection(alignedAvailabilitySlots(state.availabilities[user.id]));
+  }
+
+  function storeSlotDraft(chatKey: string, user: User, slots: Record<number, number[]>, slotDay?: number) {
+    const safeSlots = cloneValidSlotSelection(slots);
+    chatSessions.set(chatKey, { flow: 'slots_edit', slotDay, pendingSlots: safeSlots });
+    chatSlotDrafts.set(chatKey, { userId: user.id, weekStart: currentWeekStartIso(), slots: safeSlots });
+    persistChatPanelMessageIds();
+    return safeSlots;
+  }
+
   function slotDayPanel(user: User, state: SimulationState, dayIndex: number, pendingSlots: Record<number, number[]>) {
     const dayNames = ['Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота', 'Воскресенье'];
-    const slotHours = [16, 17, 18, 19, 20, 21, 22, 23];
     const selected = pendingSlots[dayIndex] || [];
-    const keyboard = slotHours.reduce<{ text: string; callback_data: string }[][]>((rows, hour, index) => {
+    const keyboard = CHAT_SLOT_HOURS.reduce<{ text: string; callback_data: string }[][]>((rows, hour, index) => {
       if (index % 2 === 0) rows.push([]);
       rows[rows.length - 1].push({
         text: `${selected.includes(hour) ? '✓ ' : ''}${hour}:00`,
@@ -1409,7 +1477,7 @@ async function startServer() {
       return rows;
     }, []);
     keyboard.push([{
-      text: selected.length === slotHours.length ? 'Снять весь день' : 'Выбрать весь день',
+      text: selected.length === CHAT_SLOT_HOURS.length ? 'Снять весь день' : 'Выбрать весь день',
       callback_data: `slot_toggle_day:${dayIndex}`,
     }]);
     keyboard.push([
@@ -1432,23 +1500,13 @@ async function startServer() {
     const dayNames = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
     const chatKey = String(chatId);
     const savedDraft = chatSlotDrafts.get(chatKey);
-    const availability = overrideSlots
+    const availability = cloneValidSlotSelection(overrideSlots
       || (savedDraft?.userId === user.id && savedDraft.weekStart === currentWeekStartIso() ? savedDraft.slots : undefined)
-      || alignedAvailabilitySlots(state.availabilities[user.id]);
-    chatSlotDrafts.set(chatKey, {
-      userId: user.id,
-      weekStart: currentWeekStartIso(),
-      slots: Object.fromEntries(
-        Object.entries(availability).map(([day, selectedHours]) => [Number(day), [...selectedHours]]),
-      ),
-    });
-    persistChatPanelMessageIds();
-    chatSessions.set(chatKey, {
-      flow: 'slots_edit',
-      pendingSlots: Object.fromEntries(
-        Object.entries(availability).map(([day, selectedHours]) => [Number(day), [...selectedHours]]),
-      ),
-    });
+      || alignedAvailabilitySlots(state.availabilities[user.id]));
+    storeSlotDraft(chatKey, user, availability);
+    const wholeWeekSelected = Array.from({ length: 7 }, (_, dayIndex) => (
+      (availability[dayIndex] || []).length === CHAT_SLOT_HOURS.length
+    )).every(Boolean);
     const keyboard = [
       dayNames.slice(0, 4).map((day, index) => ({
         text: `${day} · ${(availability[index] || []).length}/8`,
@@ -1458,10 +1516,14 @@ async function startServer() {
         text: `${day} · ${(availability[offset + 4] || []).length}/8`,
         callback_data: `slots_day:${offset + 4}`,
       })),
+      [{
+        text: wholeWeekSelected ? 'Снять все слоты' : 'Выбрать все слоты',
+        callback_data: 'slot_toggle_week',
+      }],
       [{ text: 'Сохранить', callback_data: 'slot_save' }],
     ];
     const text = `${slotsSummaryText(user, state, availability)}\n\nВыбери день. Внутри можно отметить отдельные часы или нажать «Выбрать весь день».`;
-    if (messageId) await editTelegramPanel(chatId, messageId, text, keyboard);
+    if (messageId) await updateInlinePanel(chatId, messageId, text, keyboard);
     else await sendInlinePanel(chatId, text, keyboard);
   }
 
@@ -1741,7 +1803,34 @@ async function startServer() {
   });
 
   // Telegram webhook router
-  app.post('/api/telegram-webhook', async (req, res) => {
+  app.post('/api/telegram-webhook', async (req, res, next) => {
+    const update = req.body || {};
+    const chatKey = String(
+      update.callback_query?.message?.chat?.id
+      || update.callback_query?.from?.id
+      || update.message?.chat?.id
+      || 'unknown',
+    );
+    const previous = telegramChatUpdateQueues.get(chatKey) || Promise.resolve();
+    let releaseQueue!: () => void;
+    const gate = new Promise<void>((resolve) => { releaseQueue = resolve; });
+    const tail = previous.catch(() => undefined).then(() => gate);
+    telegramChatUpdateQueues.set(chatKey, tail);
+    await previous.catch(() => undefined);
+
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      releaseQueue();
+      void tail.finally(() => {
+        if (telegramChatUpdateQueues.get(chatKey) === tail) telegramChatUpdateQueues.delete(chatKey);
+      });
+    };
+    res.once('finish', release);
+    res.once('close', release);
+    next();
+  }, async (req, res) => {
     const update = req.body;
 
     if (update.callback_query) {
@@ -1757,13 +1846,23 @@ async function startServer() {
         return res.json({ ok: true });
       }
 
+      if (processedCallbackIds.has(callback.id)) {
+        await answerCallback(callback.id, 'Это нажатие уже обработано');
+        return res.json({ ok: true });
+      }
+      processedCallbackIds.add(callback.id);
+      if (processedCallbackIds.size > 2_000) {
+        processedCallbackIds.delete(processedCallbackIds.values().next().value as string);
+      }
+
       const callbackMessageId = Number(callback.message?.message_id);
       const currentPanelId = chatPanelMessageIds.get(String(chatId));
       const isSlotPanelAction = action === 'nav_slots'
         || action === 'slot_save'
         || action.startsWith('slots_day:')
         || action.startsWith('slot_toggle:')
-        || action.startsWith('slot_toggle_day:');
+        || action.startsWith('slot_toggle_day:')
+        || action === 'slot_toggle_week';
       if (isSlotPanelAction && currentPanelId && callbackMessageId !== currentPanelId) {
         await deleteTelegramMessage(chatId, callbackMessageId);
         await answerCallback(callback.id, 'Эта панель устарела. Открой «Слоты» ещё раз.');
@@ -1778,9 +1877,7 @@ async function startServer() {
 
       if (action === 'nav_slots') {
         await answerCallback(callback.id);
-        const pendingSlots = chatSlotDrafts.get(String(chatId))?.slots
-          || chatSessions.get(String(chatId))?.pendingSlots
-          || alignedAvailabilitySlots(state.availabilities[user.id]);
+        const pendingSlots = currentSlotDraft(String(chatId), user, state);
         await showSlotsPanel(chatId, user, state, pendingSlots, callbackMessageId);
         return res.json({ ok: true });
       }
@@ -1798,15 +1895,10 @@ async function startServer() {
           return res.json({ ok: true });
         }
         const chatKey = String(chatId);
-        const pendingSlots = chatSlotDrafts.get(chatKey)?.slots
-          || chatSessions.get(chatKey)?.pendingSlots
-          || { ...alignedAvailabilitySlots(state.availabilities[user.id]) };
-        chatSessions.set(chatKey, { flow: 'slots_edit', slotDay: dayIndex, pendingSlots });
-        chatSlotDrafts.set(chatKey, { userId: user.id, weekStart: currentWeekStartIso(), slots: pendingSlots });
-        persistChatPanelMessageIds();
+        const pendingSlots = storeSlotDraft(chatKey, user, currentSlotDraft(chatKey, user, state), dayIndex);
         const panel = slotDayPanel(user, state, dayIndex, pendingSlots);
         await answerCallback(callback.id);
-        await editTelegramPanel(chatId, callback.message.message_id, panel.text, panel.keyboard);
+        await updateInlinePanel(chatId, callbackMessageId, panel.text, panel.keyboard);
         return res.json({ ok: true });
       }
 
@@ -1814,19 +1906,20 @@ async function startServer() {
         const [, dayValue, hourValue] = action.split(':');
         const dayIndex = Number(dayValue);
         const hour = Number(hourValue);
+        if (!Number.isInteger(dayIndex) || dayIndex < 0 || dayIndex > 6 || !CHAT_SLOT_HOURS.includes(hour)) {
+          await answerCallback(callback.id, 'Неизвестный слот');
+          return res.json({ ok: true });
+        }
         const chatKey = String(chatId);
-        const session = chatSessions.get(chatKey);
-        const pendingSlots = chatSlotDrafts.get(chatKey)?.slots || session?.pendingSlots || { ...alignedAvailabilitySlots(state.availabilities[user.id]) };
+        const pendingSlots = currentSlotDraft(chatKey, user, state);
         const selected = new Set(pendingSlots[dayIndex] || []);
         if (selected.has(hour)) selected.delete(hour);
         else selected.add(hour);
         pendingSlots[dayIndex] = [...selected].sort((a, b) => a - b);
-        chatSessions.set(chatKey, { flow: 'slots_edit', slotDay: dayIndex, pendingSlots });
-        chatSlotDrafts.set(chatKey, { userId: user.id, weekStart: currentWeekStartIso(), slots: pendingSlots });
-        persistChatPanelMessageIds();
+        storeSlotDraft(chatKey, user, pendingSlots, dayIndex);
         const panel = slotDayPanel(user, state, dayIndex, pendingSlots);
         await answerCallback(callback.id, selected.has(hour) ? `${hour}:00 добавлено` : `${hour}:00 снято`);
-        await editTelegramPanel(chatId, callback.message.message_id, panel.text, panel.keyboard);
+        await updateInlinePanel(chatId, callbackMessageId, panel.text, panel.keyboard);
         return res.json({ ok: true });
       }
 
@@ -1837,25 +1930,35 @@ async function startServer() {
           return res.json({ ok: true });
         }
         const chatKey = String(chatId);
-        const session = chatSessions.get(chatKey);
-        const pendingSlots = chatSlotDrafts.get(chatKey)?.slots || session?.pendingSlots || { ...alignedAvailabilitySlots(state.availabilities[user.id]) };
-        const fullDay = [16, 17, 18, 19, 20, 21, 22, 23];
+        const pendingSlots = currentSlotDraft(chatKey, user, state);
+        const fullDay = [...CHAT_SLOT_HOURS];
         const wasFull = (pendingSlots[dayIndex] || []).length === fullDay.length;
         pendingSlots[dayIndex] = wasFull ? [] : fullDay;
-        chatSessions.set(chatKey, { flow: 'slots_edit', slotDay: dayIndex, pendingSlots });
-        chatSlotDrafts.set(chatKey, { userId: user.id, weekStart: currentWeekStartIso(), slots: pendingSlots });
-        persistChatPanelMessageIds();
+        storeSlotDraft(chatKey, user, pendingSlots, dayIndex);
         const panel = slotDayPanel(user, state, dayIndex, pendingSlots);
         await answerCallback(callback.id, wasFull ? 'День очищен' : 'Выбран весь день');
-        await editTelegramPanel(chatId, callback.message.message_id, panel.text, panel.keyboard);
+        await updateInlinePanel(chatId, callbackMessageId, panel.text, panel.keyboard);
+        return res.json({ ok: true });
+      }
+
+      if (action === 'slot_toggle_week') {
+        const chatKey = String(chatId);
+        const pendingSlots = currentSlotDraft(chatKey, user, state);
+        const wasFull = Array.from({ length: 7 }, (_, dayIndex) => (
+          (pendingSlots[dayIndex] || []).length === CHAT_SLOT_HOURS.length
+        )).every(Boolean);
+        for (let dayIndex = 0; dayIndex < 7; dayIndex += 1) {
+          pendingSlots[dayIndex] = wasFull ? [] : [...CHAT_SLOT_HOURS];
+        }
+        storeSlotDraft(chatKey, user, pendingSlots);
+        await answerCallback(callback.id, wasFull ? 'Все слоты сняты' : 'Выбраны все слоты недели');
+        await showSlotsPanel(chatId, user, state, pendingSlots, callbackMessageId);
         return res.json({ ok: true });
       }
 
       if (action === 'slot_save') {
         const chatKey = String(chatId);
-        const pendingSlots = chatSlotDrafts.get(chatKey)?.slots
-          || chatSessions.get(chatKey)?.pendingSlots
-          || alignedAvailabilitySlots(state.availabilities[user.id]);
+        const pendingSlots = currentSlotDraft(chatKey, user, state);
         state.availabilities[user.id] = {
           userId: user.id,
           slots: pendingSlots,
@@ -1863,13 +1966,25 @@ async function startServer() {
           weekStart: currentWeekStartIso(),
           updatedAt: new Date().toISOString(),
         };
+        if (!saveDatabase(state)) {
+          await answerCallback(callback.id, 'Не удалось сохранить. Попробуй ещё раз.');
+          await updateInlinePanel(
+            chatId,
+            callbackMessageId,
+            `⚠️ *Слоты пока не сохранены*\n\n${slotsSummaryText(user, state, pendingSlots)}\n\nЧерновик сохранён. Нажми «Повторить сохранение».`,
+            [
+              [{ text: 'Повторить сохранение', callback_data: 'slot_save' }],
+              [{ text: 'К дням', callback_data: 'nav_slots' }],
+            ],
+          );
+          return res.json({ ok: true });
+        }
         chatSessions.delete(chatKey);
         chatSlotDrafts.delete(chatKey);
         if (sheetsConfig) pendingSheetAvailabilityExports.add(user.id);
         persistChatPanelMessageIds();
-        saveDatabase(state);
         await answerCallback(callback.id, 'Слоты сохранены');
-        await editTelegramPanel(
+        await updateInlinePanel(
           chatId,
           callbackMessageId,
           `✅ *Слоты сохранены*\n\n${slotsSummaryText(user, state, pendingSlots)}`,
@@ -3258,10 +3373,10 @@ async function startServer() {
     saveDatabase(state);
     let googleSheetsWeeks: unknown = null;
     if (sheetsConfig) {
-      try { googleSheetsWeeks = await ensureManagedWeekSheets(sheetsConfig, state.users, weekCount); }
+      try { googleSheetsWeeks = await ensurePrimaryWeekSheet(sheetsConfig, state.users); }
       catch (error: any) {
-        console.error('Google Sheets week update failed:', error);
-        return res.status(502).json({ error: error.message || 'Не удалось обновить недели Google Sheets' });
+        console.error('Google Sheets primary week update failed:', error);
+        return res.status(502).json({ error: error.message || 'Не удалось обновить текущую неделю на листе ОСНОВА' });
       }
     }
     let notified = 0;
@@ -4103,13 +4218,13 @@ async function startServer() {
   }, 60 * 1000);
 
   if (sheetsConfig) {
-    const maintainSheetsWeeks = async () => {
+    const maintainPrimarySheetWeek = async () => {
       const state = loadDatabase();
-      await ensureManagedWeekSheets(sheetsConfig, state.users, Number(state.settings?.availabilityWeekCount || 2));
+      await ensurePrimaryWeekSheet(sheetsConfig, state.users);
     };
-    maintainSheetsWeeks().catch((error: any) => console.error('Google Sheets week maintenance failed:', error.message || error));
+    maintainPrimarySheetWeek().catch((error: any) => console.error('Google Sheets primary week maintenance failed:', error.message || error));
     setInterval(() => {
-      maintainSheetsWeeks().catch((error: any) => console.error('Google Sheets week maintenance failed:', error.message || error));
+      maintainPrimarySheetWeek().catch((error: any) => console.error('Google Sheets primary week maintenance failed:', error.message || error));
     }, 60 * 60 * 1000);
     setInterval(async () => {
       try {

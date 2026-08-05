@@ -3,8 +3,10 @@ import fs from 'fs';
 import path from 'path';
 import {
   buildUserMappingReport,
+  backupPrimarySheet,
   ensureTemplateSheet,
-  ensureManagedWeekSheets,
+  ensurePrimaryWeekSheet,
+  migratePrimaryWeekSheet,
   googleSheetsConfigFromEnv,
   listGoogleSheets,
   importAvailabilitiesFromSheet,
@@ -27,8 +29,14 @@ if (command === 'sheets') {
   console.log(JSON.stringify(await buildUserMappingReport(config, users), null, 2));
 } else if (command === 'template') {
   console.log(JSON.stringify(await ensureTemplateSheet(config, users), null, 2));
+} else if (command === 'backup') {
+  console.log(JSON.stringify(await backupPrimarySheet(config), null, 2));
+} else if (command === 'prepare') {
+  console.log(JSON.stringify(await ensurePrimaryWeekSheet(config, users), null, 2));
+} else if (command === 'migrate') {
+  console.log(JSON.stringify(await migratePrimaryWeekSheet(config, users), null, 2));
 } else if (command === 'weeks') {
-  console.log(JSON.stringify(await ensureManagedWeekSheets(config, users, Number(process.argv[3] || state.settings?.availabilityWeekCount || 2)), null, 2));
+  console.log(JSON.stringify({ deprecatedCommand: 'weeks', ...(await ensurePrimaryWeekSheet(config, users)) }, null, 2));
 } else if (command === 'import-preview') {
   console.log(JSON.stringify(await importAvailabilitiesFromSheet(config, users), null, 2));
 } else if (command === 'layout') {

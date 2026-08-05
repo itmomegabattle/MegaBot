@@ -61,8 +61,10 @@ Interpretation: balanced composition, restrained state-led motion, and a dense o
 
 ## Current implementation update — 2026-08-03
 
-Availability in Telegram chat is now a single-message workflow: choose a day, toggle hours or the whole day, return to the week, save, and reopen the same values later. Day buttons expose exact counts such as `Ср · 7/8`. Drafts survive a process restart, stale buttons are rejected, and successful saves are written to the application database before synchronization.
+Availability in Telegram chat is now a single-message workflow: choose a day, toggle hours, a whole day, or the whole week, return to the week, save, and reopen the same values later. Day buttons expose exact counts such as `Ср · 7/8`. Drafts survive a process restart, stale and duplicate buttons are rejected, rapid taps are serialized, failed message edits recover into one replacement panel, and successful saves are written atomically to the application database before synchronization.
 
 The production Mini App uses `https://megaorgiabot.ru`; temporary tunnel hosts are rejected. Telegram usernames open through the Mini App API so supported clients keep the application alive while showing a teammate’s chat.
 
 Next product work: show synchronization state to users, add retry/error feedback, collect completion telemetry, and run repeatable real-device checks on Telegram Desktop, Android and iOS.
+
+Google Sheets uses one stable operational tab, `ОСНОВА`, addressed by its permanent sheet ID. Weekly rotation backs it up before changing dates or clearing slot values, restores native checkboxes, and preserves older generated week tabs as hidden recovery data instead of creating more tabs.

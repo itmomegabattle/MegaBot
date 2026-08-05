@@ -14,6 +14,7 @@ const botToken = 'integration-test-token';
 const telegramCalls = [];
 let nextTelegramMessageId = 1000;
 let sessionCookie = '';
+let failNextTelegramEdit = false;
 
 const fixture = {
   users: [
@@ -140,6 +141,12 @@ const fakeTelegram = http.createServer((req, res) => {
       body: rawBody ? JSON.parse(rawBody) : {},
       resultMessageId,
     });
+    if (failNextTelegramEdit && req.url.endsWith('/editMessageText')) {
+      failNextTelegramEdit = false;
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, description: 'Bad Request: message to edit not found' }));
+      return;
+    }
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       ok: true,
@@ -507,6 +514,131 @@ try {
   assert.ok(reopenedSlots);
   assert.ok(reopenedSlots.body.reply_markup.inline_keyboard.flat().some((button) => button.text === 'Ср · 7/8'));
   assert.ok(String(reopenedSlots.body.text).includes('Ср: 16:00, 17:00, 18:00, 19:00, 20:00, 21:00, 22:00'));
+  assert.ok(reopenedSlots.body.reply_markup.inline_keyboard.flat().some((button) => (
+    button.text === 'Выбрать все слоты' && button.callback_data === 'slot_toggle_week'
+  )));
+  const reopenedSlotsPanelId = reopenedSlots.resultMessageId;
+
+  telegramCalls.length = 0;
+  await request('/api/telegram-webhook', {
+    update_id: 142,
+    callback_query: {
+      id: 'slots-whole-week',
+      from: aliceTelegram,
+      data: 'slot_toggle_week',
+      message: { message_id: reopenedSlotsPanelId, chat: { id: 200, type: 'private' } },
+    },
+  });
+  const wholeWeekDraft = JSON.parse(await readFile(`${testDatabasePath}.chat-panels.json`, 'utf8'));
+  for (let dayIndex = 0; dayIndex < 7; dayIndex += 1) {
+    assert.deepEqual(wholeWeekDraft.slotDrafts['200'].slots[String(dayIndex)], [16, 17, 18, 19, 20, 21, 22, 23]);
+  }
+  assert.ok(telegramCalls.some((call) => (
+    call.path.endsWith('/editMessageText')
+    && call.body.reply_markup.inline_keyboard.flat().some((button) => button.text === 'Снять все слоты')
+  )));
+
+  telegramCalls.length = 0;
+  await request('/api/telegram-webhook', {
+    update_id: 143,
+    callback_query: {
+      id: 'slots-whole-week',
+      from: aliceTelegram,
+      data: 'slot_toggle_week',
+      message: { message_id: reopenedSlotsPanelId, chat: { id: 200, type: 'private' } },
+    },
+  });
+  const duplicateProtectedDraft = JSON.parse(await readFile(`${testDatabasePath}.chat-panels.json`, 'utf8'));
+  assert.deepEqual(duplicateProtectedDraft.slotDrafts['200'].slots['0'], [16, 17, 18, 19, 20, 21, 22, 23]);
+  assert.ok(!telegramCalls.some((call) => call.path.endsWith('/editMessageText')));
+
+  telegramCalls.length = 0;
+  await Promise.all([
+    request('/api/telegram-webhook', {
+      update_id: 144,
+      callback_query: {
+        id: 'slots-rapid-16',
+        from: aliceTelegram,
+        data: 'slot_toggle:0:16',
+        message: { message_id: reopenedSlotsPanelId, chat: { id: 200, type: 'private' } },
+      },
+    }),
+    request('/api/telegram-webhook', {
+      update_id: 145,
+      callback_query: {
+        id: 'slots-rapid-17',
+        from: aliceTelegram,
+        data: 'slot_toggle:0:17',
+        message: { message_id: reopenedSlotsPanelId, chat: { id: 200, type: 'private' } },
+      },
+    }),
+  ]);
+  const rapidToggleDraft = JSON.parse(await readFile(`${testDatabasePath}.chat-panels.json`, 'utf8'));
+  assert.deepEqual(rapidToggleDraft.slotDrafts['200'].slots['0'], [18, 19, 20, 21, 22, 23]);
+
+  telegramCalls.length = 0;
+  failNextTelegramEdit = true;
+  await request('/api/telegram-webhook', {
+    update_id: 146,
+    callback_query: {
+      id: 'slots-edit-recovery',
+      from: aliceTelegram,
+      data: 'slot_toggle:0:18',
+      message: { message_id: reopenedSlotsPanelId, chat: { id: 200, type: 'private' } },
+    },
+  });
+  assert.ok(telegramCalls.some((call) => call.path.endsWith('/editMessageText')));
+  const recoveredPanel = telegramCalls.find((call) => call.path.endsWith('/sendMessage') && call.body.reply_markup?.inline_keyboard);
+  assert.ok(recoveredPanel, 'a failed Telegram edit must be recovered by sending one replacement panel');
+  assert.ok(telegramCalls.some((call) => call.path.endsWith('/deleteMessage') && call.body.message_id === reopenedSlotsPanelId));
+  const recoveredPanelId = recoveredPanel.resultMessageId;
+  const recoveredDraft = JSON.parse(await readFile(`${testDatabasePath}.chat-panels.json`, 'utf8'));
+  assert.deepEqual(recoveredDraft.slotDrafts['200'].slots['0'], [19, 20, 21, 22, 23]);
+
+  telegramCalls.length = 0;
+  await request('/api/telegram-webhook', {
+    update_id: 147,
+    callback_query: {
+      id: 'slots-old-after-recovery',
+      from: aliceTelegram,
+      data: 'slot_toggle:0:19',
+      message: { message_id: reopenedSlotsPanelId, chat: { id: 200, type: 'private' } },
+    },
+  });
+  assert.ok(!telegramCalls.some((call) => call.path.endsWith('/editMessageText')));
+  const afterStaleRecoveryDraft = JSON.parse(await readFile(`${testDatabasePath}.chat-panels.json`, 'utf8'));
+  assert.deepEqual(afterStaleRecoveryDraft.slotDrafts['200'].slots['0'], [19, 20, 21, 22, 23]);
+  assert.ok(Number.isInteger(recoveredPanelId));
+
+  telegramCalls.length = 0;
+  await request('/api/telegram-webhook', {
+    update_id: 148,
+    callback_query: {
+      id: 'slots-save-after-recovery',
+      from: aliceTelegram,
+      data: 'slot_save',
+      message: { message_id: recoveredPanelId, chat: { id: 200, type: 'private' } },
+    },
+  });
+  const savedAfterRecovery = JSON.parse(await readFile(testDatabasePath, 'utf8'));
+  assert.deepEqual(savedAfterRecovery.availabilities.u_alice.slots['0'], [19, 20, 21, 22, 23]);
+  assert.deepEqual(savedAfterRecovery.availabilities.u_alice.slots['2'], [16, 17, 18, 19, 20, 21, 22, 23]);
+  assert.equal((JSON.parse(await readFile(`${testDatabasePath}.chat-panels.json`, 'utf8'))).slotDrafts['200'], undefined);
+
+  telegramCalls.length = 0;
+  await request('/api/telegram-webhook', {
+    update_id: 149,
+    message: {
+      message_id: 149,
+      chat: { id: 200, type: 'private' },
+      from: aliceTelegram,
+      text: 'Слоты',
+    },
+  });
+  const reopenedAfterRecovery = telegramCalls.find((call) => call.path.endsWith('/sendMessage') && call.body.reply_markup?.inline_keyboard);
+  assert.ok(reopenedAfterRecovery);
+  assert.ok(reopenedAfterRecovery.body.reply_markup.inline_keyboard.flat().some((button) => button.text === 'Пн · 5/8'));
+  assert.ok(reopenedAfterRecovery.body.reply_markup.inline_keyboard.flat().some((button) => button.text === 'Ср · 8/8'));
 
   telegramCalls.length = 0;
   await request('/api/telegram-webhook', {
@@ -865,10 +997,11 @@ try {
   assert.equal(persistedPanels.version, 2);
   assert.ok(Number.isInteger(persistedPanels.panels['200'].current));
   assert.ok(Array.isArray(persistedPanels.panels['200'].known));
-  assert.deepEqual(persistedPanels.slotDrafts['200'].slots['2'], [16, 17, 18, 19, 20, 21, 22]);
+  assert.deepEqual(persistedPanels.slotDrafts['200'].slots['0'], [19, 20, 21, 22, 23]);
+  assert.deepEqual(persistedPanels.slotDrafts['200'].slots['2'], [16, 17, 18, 19, 20, 21, 22, 23]);
   assert.match(serverErrors, /Temporary WEBAPP_URL dead-tunnel\.lhr\.life is not allowed in production/);
 
-  console.log('Core flow verification passed: registration, access binding, task notifications, meeting notifications, and task completion.');
+  console.log('Core flow verification passed: chat buttons, resilient slot editing, registration, access binding, task notifications, meeting notifications, and task completion.');
 } finally {
   if (appProcess && !appProcess.killed) appProcess.kill();
   await new Promise((resolve) => fakeTelegram.close(resolve));
