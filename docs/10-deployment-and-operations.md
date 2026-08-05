@@ -336,3 +336,16 @@ pm2 logs megabot --lines 50 --nostream
 ```
 
 После старта проверить `/api/health`, кнопку `Начать`, один полный сценарий слотов и отсутствие растущей `pendingSheetExports`. Следующее улучшение эксплуатации — health-поля с длиной очереди и временем последней успешной Google-сверки, плюс алерт при ненулевой очереди дольше заданного SLA.
+
+## Отдельная Google-таблица как база данных
+
+Настройка и безопасная миграция описаны в `docs/12-google-sheets-database-migration.md`. До первого успешного `db:sheets:migrate` флаг `GOOGLE_SHEETS_DATABASE_ENABLED` должен оставаться `false`. Команда миграции сама создаёт резервную копию JSON и выполняет обратное чтение со сверкой связанных сущностей.
+
+После включения `/api/health` должен показывать:
+
+```json
+{
+  "googleSheetsDatabaseConfigured": true,
+  "googleSheetsDatabaseEnabled": true
+}
+```

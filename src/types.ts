@@ -119,5 +119,6 @@ export interface SimulationState {
   settings?: {
     teamChatId?: string;
     availabilityWeekCount?: number;
+    databaseRevision?: number;
   };
 }

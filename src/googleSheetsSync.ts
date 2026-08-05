@@ -68,13 +68,13 @@ function base64Url(value: string | Buffer) {
   return Buffer.from(value).toString('base64url');
 }
 
-function loadCredentials(config: GoogleSheetsConfig): ServiceAccountCredentials {
+function loadCredentials(config: Pick<GoogleSheetsConfig, 'credentialsFile'>): ServiceAccountCredentials {
   const parsed = JSON.parse(fs.readFileSync(config.credentialsFile, 'utf8')) as ServiceAccountCredentials;
   if (!parsed.client_email || !parsed.private_key) throw new Error('Google service account JSON is incomplete');
   return parsed;
 }
 
-async function accessToken(config: GoogleSheetsConfig) {
+async function accessToken(config: Pick<GoogleSheetsConfig, 'credentialsFile'>) {
   const credentials = loadCredentials(config);
   const cacheKey = `${credentials.client_email}:${config.credentialsFile}`;
   if (tokenCache && tokenCache.key === cacheKey && tokenCache.expiresAt > Date.now() + 60_000) return tokenCache.value;
@@ -100,7 +100,7 @@ async function accessToken(config: GoogleSheetsConfig) {
   return body.access_token;
 }
 
-async function googleRequest(config: GoogleSheetsConfig, path: string, init: RequestInit = {}) {
+export async function googleSheetsApiRequest(config: Pick<GoogleSheetsConfig, 'spreadsheetId' | 'credentialsFile'>, path: string, init: RequestInit = {}) {
   const token = await accessToken(config);
   const response = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${config.spreadsheetId}${path}`, {
     ...init,
@@ -109,6 +109,10 @@ async function googleRequest(config: GoogleSheetsConfig, path: string, init: Req
   const body = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(`Google Sheets API ${response.status}: ${JSON.stringify(body)}`);
   return body as any;
+}
+
+async function googleRequest(config: GoogleSheetsConfig, path: string, init: RequestInit = {}) {
+  return googleSheetsApiRequest(config, path, init);
 }
 
 function quotedSheet(title: string) {

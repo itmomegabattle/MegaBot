@@ -18,6 +18,11 @@ import {
   importAvailabilitiesFromSheet,
   verifySheetsWebhook,
 } from './src/googleSheetsSync.js';
+import {
+  exportStateToGoogleSheetsDatabase,
+  googleSheetsDatabaseConfigFromEnv,
+  importStateFromGoogleSheetsDatabase,
+} from './src/googleSheetsDatabase.js';
 
 const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
 const telegramProxyAgent = proxyUrl ? new ProxyAgent(proxyUrl) : null;
@@ -61,6 +66,10 @@ const DB_FILE = process.env.DB_FILE
 const CHAT_PANEL_FILE = process.env.CHAT_PANEL_FILE
   ? path.resolve(process.env.CHAT_PANEL_FILE)
   : `${DB_FILE}.chat-panels.json`;
+const DATABASE_SHEETS_CONFIG = googleSheetsDatabaseConfigFromEnv();
+let pendingDatabaseSheetsState: SimulationState | null = null;
+let databaseSheetsFlushTimer: NodeJS.Timeout | null = null;
+let databaseSheetsFlushPromise: Promise<void> | null = null;
 
 const PRODUCTION_WEBAPP_URL = 'https://megaorgiabot.ru';
 const TEMPORARY_TUNNEL_HOST = /(?:^|\.)(?:loca\.lt|localtunnel\.me|lhr\.life|ngrok(?:-free)?\.(?:app|io)|trycloudflare\.com)$/i;
@@ -638,6 +647,16 @@ function loadDatabase(): SimulationState {
 }
 
 function saveDatabase(state: SimulationState) {
+  if (DATABASE_SHEETS_CONFIG?.enabled) {
+    state.settings ||= {};
+    state.settings.databaseRevision = Math.max(0, Number(state.settings.databaseRevision || 0)) + 1;
+  }
+  const saved = writeDatabaseFile(state);
+  if (saved && DATABASE_SHEETS_CONFIG?.enabled) scheduleDatabaseSheetsSnapshot(state);
+  return saved;
+}
+
+function writeDatabaseFile(state: SimulationState) {
   const temporaryFile = `${DB_FILE}.${process.pid}.${crypto.randomUUID()}.tmp`;
   try {
     fs.writeFileSync(temporaryFile, JSON.stringify(state, null, 2), 'utf-8');
@@ -651,6 +670,67 @@ function saveDatabase(state: SimulationState) {
       // The original write error is the useful one.
     }
     return false;
+  }
+}
+
+function scheduleDatabaseSheetsSnapshot(state: SimulationState, delayMs = 500) {
+  if (!DATABASE_SHEETS_CONFIG?.enabled) return;
+  pendingDatabaseSheetsState = structuredClone(state);
+  if (databaseSheetsFlushTimer || databaseSheetsFlushPromise) return;
+  databaseSheetsFlushTimer = setTimeout(() => {
+    databaseSheetsFlushTimer = null;
+    void flushDatabaseSheetsSnapshots();
+  }, delayMs);
+}
+
+async function flushDatabaseSheetsSnapshots() {
+  if (!DATABASE_SHEETS_CONFIG?.enabled) return;
+  if (databaseSheetsFlushPromise) return databaseSheetsFlushPromise;
+  databaseSheetsFlushPromise = (async () => {
+    while (pendingDatabaseSheetsState) {
+      const snapshot = pendingDatabaseSheetsState;
+      pendingDatabaseSheetsState = null;
+      try {
+        await exportStateToGoogleSheetsDatabase(DATABASE_SHEETS_CONFIG, snapshot, 'runtime_snapshot');
+      } catch (error) {
+        console.error('Google Sheets database snapshot failed; local JSON remains authoritative until retry:', error);
+        pendingDatabaseSheetsState ||= snapshot;
+        if (!databaseSheetsFlushTimer) {
+          databaseSheetsFlushTimer = setTimeout(() => {
+            databaseSheetsFlushTimer = null;
+            void flushDatabaseSheetsSnapshots();
+          }, 5_000);
+        }
+        break;
+      }
+    }
+  })().finally(() => {
+    databaseSheetsFlushPromise = null;
+    if (pendingDatabaseSheetsState && !databaseSheetsFlushTimer) scheduleDatabaseSheetsSnapshot(pendingDatabaseSheetsState);
+  });
+  return databaseSheetsFlushPromise;
+}
+
+async function hydrateDatabaseFromGoogleSheets() {
+  if (!DATABASE_SHEETS_CONFIG?.enabled) return;
+  const local = loadDatabase();
+  try {
+    const remote = await importStateFromGoogleSheetsDatabase(DATABASE_SHEETS_CONFIG);
+    if (!remote.initialized || !remote.state) {
+      console.warn('Google Sheets database has no complete snapshot; restoring it from local JSON.');
+      await exportStateToGoogleSheetsDatabase(DATABASE_SHEETS_CONFIG, local, 'startup_repair_from_json');
+      return;
+    }
+    const localRevision = Number(local.settings?.databaseRevision || 0);
+    if (remote.revision >= localRevision) {
+      if (!writeDatabaseFile(remote.state)) throw new Error('Could not cache Google Sheets database snapshot locally');
+      console.log(`Google Sheets database loaded at revision ${remote.revision}.`);
+      return;
+    }
+    console.warn(`Local JSON revision ${localRevision} is newer than Google Sheets revision ${remote.revision}; repairing remote snapshot.`);
+    await exportStateToGoogleSheetsDatabase(DATABASE_SHEETS_CONFIG, local, 'startup_repair_from_json');
+  } catch (error) {
+    console.error('Google Sheets database startup read failed; continuing from local JSON:', error);
   }
 }
 
@@ -689,6 +769,7 @@ function pruneExpiredAvailabilityWeeks() {
 }
 
 async function startServer() {
+  await hydrateDatabaseFromGoogleSheets();
   pruneExpiredAvailabilityWeeks();
   const app = express();
   const sheetsConfig = googleSheetsConfigFromEnv();
@@ -709,6 +790,8 @@ async function startServer() {
       telegramConfigured: Boolean(process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN),
       webAppConfigured: Boolean(configuredWebAppUrl()),
       googleSheetsConfigured: Boolean(sheetsConfig),
+      googleSheetsDatabaseConfigured: Boolean(DATABASE_SHEETS_CONFIG),
+      googleSheetsDatabaseEnabled: Boolean(DATABASE_SHEETS_CONFIG?.enabled),
     });
   });
   app.use('/api', (req, res, next) => {
@@ -4364,7 +4447,10 @@ async function startServer() {
   });
 }
 
-startServer();
+startServer().catch((error) => {
+  console.error('Server startup failed:', error);
+  process.exitCode = 1;
+});
 
 
 
