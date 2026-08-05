@@ -14,6 +14,9 @@ function cleanUser(user: User): User {
     realName: text(user.realName),
     role,
     avatarSeed: text(user.avatarSeed || user.id),
+    avatarDataUrl: /^data:image\/(?:jpeg|png|webp);base64,/i.test(text(user.avatarDataUrl)) && text(user.avatarDataUrl).length <= 300_000
+      ? text(user.avatarDataUrl)
+      : undefined,
     birthday: optionalText(user.birthday),
     telegramId: optionalText(user.telegramId),
     registered: Boolean(user.registered),
@@ -26,7 +29,10 @@ function cleanUser(user: User): User {
 }
 
 function cleanTask(task: Task): Task {
-  const assignees = [...new Set((task.assignedTo || []).map(String).filter(Boolean))];
+  const rawAssignees = Array.isArray(task.assignedTo) ? task.assignedTo : task.assignedTo ? [task.assignedTo] : [];
+  const rawCompetencies = Array.isArray(task.competencies) ? task.competencies : task.competency ? [task.competency] : [];
+  const assignees = [...new Set(rawAssignees.map(String).filter(Boolean))];
+  const competencies = [...new Set(rawCompetencies.map(String).filter(Boolean))];
   return {
     id: text(task.id),
     title: text(task.title),
@@ -34,7 +40,8 @@ function cleanTask(task: Task): Task {
     deadline: text(task.deadline),
     assignedTo: assignees.length ? assignees : null,
     creatorId: optionalText(task.creatorId),
-    competency: text(task.competency),
+    competency: competencies[0] || '',
+    competencies,
     sow: text(task.sow),
     tips: Array.isArray(task.tips) ? task.tips.map(String) : [],
     status: task.status,

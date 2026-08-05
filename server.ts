@@ -21,6 +21,7 @@ import {
 } from './src/googleSheetsSync.js';
 import {
   exportStateToGoogleSheetsDatabase,
+  googleSheetsDatabaseSheetUrl,
   googleSheetsDatabaseConfigFromEnv,
   importStateFromGoogleSheetsDatabase,
 } from './src/googleSheetsDatabase.js';
@@ -352,6 +353,10 @@ function assignedIds(task: Task) {
   return task.assignedTo || [];
 }
 
+function taskCompetencyNames(task: Task) {
+  return task.competencies?.length ? task.competencies : task.competency ? [task.competency] : [];
+}
+
 function meetingScheduleError(dateValue: string, timeValue: string, duration: number, settings: SimulationState['settings']) {
   const date = parseShortDate(dateValue);
   const timeMatch = String(timeValue || '').match(/^(\d{1,2}):(\d{2})$/);
@@ -410,7 +415,7 @@ function taskDetailsText(task: Task, state: SimulationState) {
   const completionNotes = Object.entries(task.completionComments || {})
     .filter(([, comment]) => String(comment || '').trim())
     .map(([id, comment]) => `• ${state.users.find((user) => user.id === id)?.realName || 'Исполнитель'}: ${comment}`);
-  return `*${task.title}*\n\n${task.description}\n\n*Мероприятие:* ${workEvent?.name || 'без мероприятия'}\n*Блок:* ${task.competency || 'не указан'}\n*Приоритет:* ${taskPriorityLabel(task.priority)}\n*Автор:* ${userMention(creator)}\n*Срок:* ${formatShortDate(task.deadline)}\n*Исполнитель:* ${executorText}${task.timeSpentMinutes ? `\n*Затрачено:* ${taskDurationLabel(task.timeSpentMinutes)}` : ''}${task.sow ? `\n\n*ТЗ:* ${task.sow}` : ''}${progressNotes.length ? `\n\n*Комментарии по работе:*\n${progressNotes.join('\n')}` : ''}${completionNotes.length ? `\n\n*Комментарий при завершении:*\n${completionNotes.join('\n')}` : ''}${task.tips?.length ? `\n\n*Подсказки:*\n${task.tips.map((tip) => `• ${tip}`).join('\n')}` : ''}`;
+  return `*${task.title}*\n\n${task.description}\n\n*Мероприятие:* ${workEvent?.name || 'без мероприятия'}\n*Блоки:* ${taskCompetencyNames(task).join(', ') || 'не указаны'}\n*Приоритет:* ${taskPriorityLabel(task.priority)}\n*Автор:* ${userMention(creator)}\n*Срок:* ${formatShortDate(task.deadline)}\n*Исполнитель:* ${executorText}${task.timeSpentMinutes ? `\n*Затрачено:* ${taskDurationLabel(task.timeSpentMinutes)}` : ''}${task.sow ? `\n\n*ТЗ:* ${task.sow}` : ''}${progressNotes.length ? `\n\n*Комментарии по работе:*\n${progressNotes.join('\n')}` : ''}${completionNotes.length ? `\n\n*Комментарий при завершении:*\n${completionNotes.join('\n')}` : ''}${task.tips?.length ? `\n\n*Подсказки:*\n${task.tips.map((tip) => `• ${tip}`).join('\n')}` : ''}`;
 }
 
 function meetingDetailsText(meeting: Meeting, state: SimulationState) {
@@ -741,6 +746,7 @@ async function startServer() {
   let calendarReconciliationRunning = false;
   const processedSheetsEvents = new Set<string>();
   app.use(express.json({
+    limit: '1mb',
     verify: (req, _res, buffer) => {
       if (req.url.startsWith('/api/integrations/google-sheets/webhook')) {
         (req as express.Request & { rawBody?: Buffer }).rawBody = Buffer.from(buffer);
@@ -819,6 +825,19 @@ async function startServer() {
       req.body[identityField] = authUser.id;
     }
     return next();
+  });
+  app.get('/api/integrations/google-sheets/availability', (_req, res) => {
+    if (!sheetsConfig) return res.status(503).json({ error: 'Google Sheets availability is not configured' });
+    const gid = sheetsConfig.primarySheetId === undefined ? '' : `#gid=${sheetsConfig.primarySheetId}`;
+    return res.redirect(`https://docs.google.com/spreadsheets/d/${sheetsConfig.spreadsheetId}/edit${gid}`);
+  });
+  app.get('/api/integrations/google-sheets/task-log', async (_req, res) => {
+    if (!DATABASE_SHEETS_CONFIG) return res.status(503).json({ error: 'Google Sheets database is not configured' });
+    try {
+      return res.redirect(await googleSheetsDatabaseSheetUrl(DATABASE_SHEETS_CONFIG, 'task_log'));
+    } catch (error: any) {
+      return res.status(502).json({ error: error.message || 'Не удалось открыть лог задач' });
+    }
   });
   const chatSessions = new Map<string, {
     flow: string;
@@ -3175,10 +3194,11 @@ async function startServer() {
 
   // Update user birthday or details
   app.post('/api/user/update', (req, res) => {
-    const { requesterId, userId, realName, username, role, birthday, competencies, primaryCompetency } = req.body;
+    const { requesterId, userId, realName, username, role, birthday, competencies, primaryCompetency, avatarDataUrl } = req.body;
     const state = loadDatabase();
 
-    const selfEditOnly = requesterId === userId && !realName && !username && !role && !birthday && (Array.isArray(competencies) || primaryCompetency !== undefined);
+    const selfEditOnly = requesterId === userId && realName === undefined && username === undefined && role === undefined && birthday === undefined
+      && (Array.isArray(competencies) || primaryCompetency !== undefined || avatarDataUrl !== undefined);
     if (!isAdminUser(state, requesterId) && !selfEditOnly) {
       return res.status(403).json({ error: 'Редактировать участников может только админ' });
     }
@@ -3223,6 +3243,13 @@ async function startServer() {
       if (user.primaryCompetency && !user.competencies?.includes(user.primaryCompetency)) {
         user.competencies = [user.primaryCompetency, ...(user.competencies || [])];
       }
+    }
+    if (avatarDataUrl !== undefined) {
+      const cleanAvatar = String(avatarDataUrl || '');
+      if (cleanAvatar && (!/^data:image\/(?:jpeg|png|webp);base64,/i.test(cleanAvatar) || cleanAvatar.length > 300_000)) {
+        return res.status(400).json({ error: 'Не удалось сохранить аватар: проверь формат изображения' });
+      }
+      user.avatarDataUrl = cleanAvatar || undefined;
     }
 
     saveDatabase(state);
@@ -3313,7 +3340,7 @@ async function startServer() {
       user.role = role;
       user.facultyId = facultyId;
       user.registered = Boolean(user.telegramId);
-      user.competencies = role === 'faculty_helper' ? cleanCompetencies : [];
+      user.competencies = cleanCompetencies;
       user.primaryCompetency = user.competencies[0] || '';
     } else {
       user = {
@@ -3325,8 +3352,8 @@ async function startServer() {
         avatarSeed: sanitizedUsername.toLowerCase(),
         birthday: '',
         registered: false,
-        competencies: role === 'faculty_helper' ? cleanCompetencies : [],
-        primaryCompetency: role === 'faculty_helper' ? cleanCompetencies[0] || '' : '',
+        competencies: cleanCompetencies,
+        primaryCompetency: cleanCompetencies[0] || '',
         joinedAt: new Date().toISOString(),
         lastSeenAt: '',
       };
@@ -3360,7 +3387,7 @@ async function startServer() {
     user.username = sanitizedUsername;
     user.role = role;
     user.facultyId = facultyId;
-    user.competencies = role === 'faculty_helper' ? cleanCompetencies : [];
+    user.competencies = cleanCompetencies;
     user.primaryCompetency = user.competencies[0] || '';
     saveDatabase(state);
     res.json({ success: true, user });
@@ -3600,10 +3627,14 @@ async function startServer() {
     if (!isAdminUser(state, requesterId)) return res.status(403).json({ error: 'Изменять мероприятия может только администратор' });
     const workEvent = state.events?.find((item) => item.id === eventId);
     if (!workEvent) return res.status(404).json({ error: 'Мероприятие не найдено' });
+    const nextName = name === undefined ? workEvent.name : String(name || '').trim();
+    const nextStatus = status === undefined ? workEvent.status : status;
+    if (nextStatus === 'active' && state.events?.some((item) => item.id !== eventId && item.status === 'active' && item.name.toLowerCase() === nextName.toLowerCase())) {
+      return res.status(409).json({ error: 'Активное мероприятие с таким названием уже существует' });
+    }
     if (name !== undefined) {
-      const cleanName = String(name || '').trim();
-      if (!cleanName) return res.status(400).json({ error: 'Название мероприятия не может быть пустым' });
-      workEvent.name = cleanName;
+      if (!nextName) return res.status(400).json({ error: 'Название мероприятия не может быть пустым' });
+      workEvent.name = nextName;
     }
     if (description !== undefined) workEvent.description = String(description || '').trim();
     if (startsAt !== undefined) workEvent.startsAt = String(startsAt || '').trim();
@@ -3790,7 +3821,7 @@ async function startServer() {
 
   // Create a new task
   app.post('/api/task/create', async (req, res) => {
-    const { title, description, deadline, assignedTo, sow, tips, priority, creatorId, competency, reminders, eventId } = req.body;
+    const { title, description, deadline, assignedTo, sow, tips, priority, creatorId, competency, competencies, reminders, eventId } = req.body;
     const state = loadDatabase();
 
     if (!isRegisteredUser(state, creatorId)) {
@@ -3806,6 +3837,8 @@ async function startServer() {
     const assigneeIds = [...new Set(requestedAssigneeIds)]
       .filter((id) => state.users.some((user) => user.id === id && !isFacultyUser(user)));
     const now = new Date().toISOString();
+    const cleanCompetencies = [...new Set((Array.isArray(competencies) ? competencies : competency ? [competency] : [])
+      .map(String).filter((name) => state.competencies?.includes(name)))];
     const newTask: Task = {
       id: 't_' + Date.now(),
       title: String(title || '').trim() || 'Без названия',
@@ -3813,7 +3846,8 @@ async function startServer() {
       deadline: String(deadline || '').trim(),
       assignedTo: assigneeIds.length === 0 ? null : assigneeIds,
       creatorId,
-      competency: String(competency || '').trim(),
+      competency: cleanCompetencies[0] || '',
+      competencies: cleanCompetencies,
       eventId: cleanEventId,
       sow: sow || '',
       tips: tips || [],
@@ -3880,7 +3914,7 @@ async function startServer() {
   });
 
   app.post('/api/task/update', async (req, res) => {
-    const { requesterId, taskId, title, description, deadline, assignedTo, sow, priority, competency, reminders, eventId } = req.body || {};
+    const { requesterId, taskId, title, description, deadline, assignedTo, sow, priority, competency, competencies, reminders, eventId } = req.body || {};
     const state = loadDatabase();
     const task = state.tasks.find((item) => item.id === taskId);
     if (!task) return res.status(404).json({ error: 'Задача не найдена' });
@@ -3893,6 +3927,10 @@ async function startServer() {
     if (description !== undefined) task.description = String(description || '').trim();
     if (deadline !== undefined) task.deadline = String(deadline || '').trim();
     if (competency !== undefined) task.competency = String(competency || '').trim();
+    if (competencies !== undefined) {
+      task.competencies = [...new Set((Array.isArray(competencies) ? competencies : []).map(String).filter((name) => state.competencies?.includes(name)))];
+      task.competency = task.competencies[0] || '';
+    }
     if (eventId !== undefined) {
       const cleanEventId = String(eventId || '').trim();
       if (cleanEventId && !state.events?.some((item) => item.id === cleanEventId)) {
@@ -4016,7 +4054,7 @@ async function startServer() {
       id: 'task_claim_bot_' + Date.now(),
       userId,
       sender: 'bot',
-      text: `Ты закрепил за собой задачу: *"${task.title}"*\nБлок: ${task.competency || 'не указан'}\nДедлайн: ${formatShortDate(task.deadline)}.\nТЗ можно проверить в Mini App.`,
+      text: `Ты закрепил за собой задачу: *"${task.title}"*\nБлоки: ${taskCompetencyNames(task).join(', ') || 'не указаны'}\nДедлайн: ${formatShortDate(task.deadline)}.\nТЗ можно проверить в Mini App.`,
       timestamp: new Date().toISOString()
     });
     if (user.telegramId) {
@@ -4135,7 +4173,7 @@ async function startServer() {
         .join(', ') || 'Участник';
       const sendJobs: Promise<boolean>[] = [];
       state.users.filter(u => u.role === 'admin').forEach(admin => {
-        const text = `Задача выполнена!\nБлок: ${task.competency || 'не указан'}\nИсполнитель: ${workerName}\nЗадача: "${task.title}"${task.timeSpentMinutes ? `\nЗатрачено: ${taskDurationLabel(task.timeSpentMinutes)}` : ''}${String(completionComment || '').trim() ? `\nКомментарий: ${String(completionComment).trim()}` : ''}`;
+        const text = `Задача выполнена!\nБлоки: ${taskCompetencyNames(task).join(', ') || 'не указаны'}\nИсполнитель: ${workerName}\nЗадача: "${task.title}"${task.timeSpentMinutes ? `\nЗатрачено: ${taskDurationLabel(task.timeSpentMinutes)}` : ''}${String(completionComment || '').trim() ? `\nКомментарий: ${String(completionComment).trim()}` : ''}`;
         if (!state.messages[admin.id]) state.messages[admin.id] = [];
         state.messages[admin.id].push({
           id: 'task_comp_admin_' + Date.now() + '_' + admin.id,
@@ -4182,7 +4220,7 @@ async function startServer() {
         return `
           <tr>
             <td>${escapeHtml(workEvent?.name || 'Без мероприятия')}</td>
-            <td>${escapeHtml(task.competency || 'Без блока')}</td>
+            <td>${escapeHtml(taskCompetencyNames(task).join(', ') || 'Без блока')}</td>
             <td>${escapeHtml(taskStatusLabel(task.status))}</td>
             <td>${escapeHtml(task.title)}</td>
             <td>${escapeHtml(task.description)}</td>

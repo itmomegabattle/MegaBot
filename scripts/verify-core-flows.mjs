@@ -53,8 +53,8 @@ const fixture = {
       telegramId: '300',
       registered: true,
       birthday: '21.02',
-      competencies: [],
-      primaryCompetency: '',
+      competencies: ['Продакшн'],
+      primaryCompetency: 'Продакшн',
       facultyId: '',
     },
     {
@@ -73,7 +73,7 @@ const fixture = {
   ],
   faculties: [{ id: 'fac_test', name: 'Тестовый факультет' }],
   facultyCompetencies: ['Дизайн'],
-  competencies: ['Дизайн'],
+  competencies: ['Дизайн', 'Продакшн'],
   availabilities: {},
   meetings: [],
   tasks: [],
@@ -298,6 +298,13 @@ try {
     primaryCompetency: '',
   });
   assert.equal(restoreBob.response.status, 200);
+  const avatarUpdate = await request('/api/user/update', {
+    requesterId: 'u_admin',
+    userId: 'u_admin',
+    avatarDataUrl: `data:image/webp;base64,${'a'.repeat(64)}`,
+  });
+  assert.equal(avatarUpdate.response.status, 200);
+  assert.match(avatarUpdate.data.user.avatarDataUrl, /^data:image\/webp;base64,/);
 
   const createEvent = await request('/api/event/create', {
     requesterId: 'u_admin',
@@ -315,6 +322,9 @@ try {
   const reactivateEvent = await request('/api/event/update', { requesterId: 'u_admin', eventId: createdEventId, status: 'active' });
   assert.equal(reactivateEvent.response.status, 200);
   assert.equal(reactivateEvent.data.event.status, 'active');
+  const renameEvent = await request('/api/event/update', { requesterId: 'u_admin', eventId: createdEventId, name: 'Тестовое мероприятие — обновлено', description: 'Новое описание' });
+  assert.equal(renameEvent.response.status, 200);
+  assert.equal(renameEvent.data.event.name, 'Тестовое мероприятие — обновлено');
 
   telegramCalls.length = 0;
   const horizonNotification = await request('/api/availability/weeks', {
@@ -693,13 +703,14 @@ try {
     deadline: '2030-01-01',
     assignedTo: ['u_alice', 'u_bob', 'u_alice', 'missing'],
     creatorId: 'u_admin',
-    competency: 'Дизайн',
+    competencies: ['Дизайн', 'Продакшн'],
     priority: 'critical',
     eventId: createdEventId,
   });
   assert.equal(taskResult.response.status, 200);
   assert.deepEqual(taskResult.data.task.assignedTo, ['u_alice', 'u_bob']);
   assert.equal(taskResult.data.task.priority, 'critical');
+  assert.deepEqual(taskResult.data.task.competencies, ['Дизайн', 'Продакшн']);
   assert.equal(telegramCalls.filter((call) => call.path.endsWith('/sendMessage')).length, 2);
 
   telegramCalls.length = 0;
@@ -730,10 +741,12 @@ try {
     deadline: '2030-01-06',
     assignedTo: ['u_alice', 'u_bob'],
     reminders: [{ type: 'before_deadline', value: 2, unit: 'days' }],
+    competencies: ['Продакшн', 'Дизайн'],
   });
   assert.equal(editedTask.response.status, 200);
   assert.deepEqual(editedTask.data.task.assignedTo, ['u_alice', 'u_bob']);
   assert.equal(editedTask.data.task.reminders.length, 1);
+  assert.deepEqual(editedTask.data.task.competencies, ['Продакшн', 'Дизайн']);
 
   const executorComment = await request('/api/task/comment', {
     requesterId: 'u_alice',

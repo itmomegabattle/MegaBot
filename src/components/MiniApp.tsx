@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   CalendarDots,
   UsersThree,
@@ -15,7 +15,8 @@ import {
   Bell,
   ChatCircleText,
   X,
-  DownloadSimple,
+  ArrowSquareOut,
+  Camera,
   Moon,
   Sun,
   MagnifyingGlass,
@@ -88,6 +89,7 @@ const openTelegramProfile = (event: React.MouseEvent<HTMLAnchorElement>, url: st
 const taskAssigneeIds = (task: Task) => {
   return task.assignedTo || [];
 };
+const taskCompetencyNames = (task: Task) => task.competencies?.length ? task.competencies : task.competency ? [task.competency] : [];
 const workEventStatusClass = (status: WorkEvent['status']) => status === 'active'
   ? 'bg-emerald-50 text-emerald-700'
   : 'bg-slate-100 text-slate-500';
@@ -286,11 +288,10 @@ export default function MiniApp({
   const [savingTask, setSavingTask] = useState(false);
   const [taskTitle, setTaskTitle] = useState('');
   const [taskDesc, setTaskDesc] = useState('');
-  const [taskCompetency, setTaskCompetency] = useState('');
+  const [taskCompetencies, setTaskCompetencies] = useState<string[]>([]);
   const [taskDeadline, setTaskDeadline] = useState('');
   const [taskAssignedTo, setTaskAssignedTo] = useState<string[]>([]);
   const [taskAssigneeSearch, setTaskAssigneeSearch] = useState('');
-  const [taskEventId, setTaskEventId] = useState('');
   const [showAllTaskAssignees, setShowAllTaskAssignees] = useState(false);
   const [taskSow, setTaskSow] = useState('');
   const [taskPriority, setTaskPriority] = useState<Task['priority']>('normal');
@@ -320,6 +321,7 @@ export default function MiniApp({
   });
   const [adminSection, setAdminSection] = useState<'team' | 'events' | 'slots' | 'meetings' | 'tasks' | 'faculties'>('team');
   const [showEventForm, setShowEventForm] = useState(false);
+  const [editingEventId, setEditingEventId] = useState<string | null>(null);
   const [eventName, setEventName] = useState('');
   const [eventDescription, setEventDescription] = useState('');
   const [eventStartsAt, setEventStartsAt] = useState('');
@@ -327,10 +329,9 @@ export default function MiniApp({
   const [eventSaving, setEventSaving] = useState(false);
   const [eventError, setEventError] = useState('');
   const [eventNotice, setEventNotice] = useState('');
-  const [myTaskEventFilter, setMyTaskEventFilter] = useState('all');
-  const [openTaskEventFilter, setOpenTaskEventFilter] = useState('all');
-  const [completedTaskEventFilter, setCompletedTaskEventFilter] = useState('all');
-  const [backlogEventFilter, setBacklogEventFilter] = useState('all');
+  const [selectedTaskEventId, setSelectedTaskEventId] = useState('');
+  const [avatarEditorSource, setAvatarEditorSource] = useState<string | null>(null);
+  const [avatarSaving, setAvatarSaving] = useState(false);
 
   const [newUserRealName, setNewUserRealName] = useState('');
   const [newUserUsername, setNewUserUsername] = useState('');
@@ -396,19 +397,22 @@ export default function MiniApp({
     Number(a.status === 'archived') - Number(b.status === 'archived')
     || a.name.localeCompare(b.name, 'ru')
   ));
-  const taskEventOptions = editingTaskId ? allEvents : activeEvents;
+  const activeEventIds = activeEvents.map((item) => item.id).join('|');
+  useEffect(() => {
+    if (!activeEvents.some((item) => item.id === selectedTaskEventId)) setSelectedTaskEventId(activeEvents[0]?.id || '');
+  }, [activeEventIds, selectedTaskEventId]);
+  const selectedTaskEvent = activeEvents.find((item) => item.id === selectedTaskEventId);
+  const eligibleTaskAssignees = taskCompetencies.length
+    ? coreTeamUsers.filter((user) => taskCompetencies.some((name) => user.primaryCompetency === name || user.competencies?.includes(name)))
+    : coreTeamUsers;
   const normalizedTaskAssigneeSearch = taskAssigneeSearch.trim().toLowerCase();
   const matchedTaskAssignees = normalizedTaskAssigneeSearch
-    ? coreTeamUsers.filter((user) => `${user.realName} ${user.username} ${(user.competencies || []).join(' ')}`.toLowerCase().includes(normalizedTaskAssigneeSearch))
-    : coreTeamUsers;
+    ? eligibleTaskAssignees.filter((user) => `${user.realName} ${user.username} ${(user.competencies || []).join(' ')}`.toLowerCase().includes(normalizedTaskAssigneeSearch))
+    : eligibleTaskAssignees;
   const visibleTaskAssignees = normalizedTaskAssigneeSearch || showAllTaskAssignees
     ? matchedTaskAssignees
     : matchedTaskAssignees.slice(0, 3);
-  const filterTasksByEvent = (tasks: Task[], filter: string) => {
-    if (filter === 'all') return tasks;
-    if (filter === 'none') return tasks.filter((task) => !task.eventId);
-    return tasks.filter((task) => task.eventId === filter);
-  };
+  const filterTasksBySelectedEvent = (tasks: Task[]) => selectedTaskEventId ? tasks.filter((task) => task.eventId === selectedTaskEventId) : [];
   const votedUsers = useMemo(
     () => state.users.filter((user) => {
       if (user.role !== 'admin' && user.role !== 'organizer') return false;
@@ -425,9 +429,9 @@ export default function MiniApp({
     .filter((task) => task.status === 'completed')
     .slice()
     .sort((a, b) => String(b.completedAt || b.createdAt || '').localeCompare(String(a.completedAt || a.createdAt || '')));
-  const myTasks = filterTasksByEvent(allMyTasks, myTaskEventFilter);
-  const openTasks = filterTasksByEvent(allOpenTasks, openTaskEventFilter);
-  const completedTasks = filterTasksByEvent(allCompletedTasks, completedTaskEventFilter);
+  const myTasks = filterTasksBySelectedEvent(allMyTasks);
+  const openTasks = filterTasksBySelectedEvent(allOpenTasks);
+  const completedTasks = filterTasksBySelectedEvent(allCompletedTasks);
   const latestCompletedTasks = completedTasks.slice(0, 10);
   const scheduledMeetings = state.meetings.filter((meeting) => meeting.status === 'scheduled');
   const visibleScheduledMeetings = showAllMeetings ? scheduledMeetings : scheduledMeetings.slice(0, 3);
@@ -448,8 +452,8 @@ export default function MiniApp({
   const profileCreatedCompletedTasks = profileCreatedTasks.filter((task) => task.status === 'completed');
   const profileImportantTasks = allMyTasks.filter((task) => task.priority === 'important' || task.priority === 'critical');
   const profileCompletedByCompetency = profileCompletedTasks.reduce<Record<string, number>>((acc, task) => {
-    const competency = task.competency || 'Без блока';
-    acc[competency] = (acc[competency] || 0) + 1;
+    const taskBlocks = taskCompetencyNames(task);
+    for (const competency of taskBlocks.length ? taskBlocks : ['Без блока']) acc[competency] = (acc[competency] || 0) + 1;
     return acc;
   }, {});
   const profileTopCompetency = Object.entries(profileCompletedByCompetency)
@@ -470,8 +474,14 @@ export default function MiniApp({
   const profileAge = ageFromBirthday(currentUser.birthday);
   const facultyTasks = state.tasks.filter((task) => task.facultyId);
   const visibleFacultyTasks = showAllFacultyTasks ? facultyTasks : facultyTasks.slice(0, 3);
-  const tasksByCompetency = filterTasksByEvent(state.tasks, backlogEventFilter).reduce<Record<string, Task[]>>((acc, task) => {
-    const key = task.competency || 'Без блока';
+  const tasksByCompetency = filterTasksBySelectedEvent(state.tasks).reduce<Record<string, Task[]>>((acc, task) => {
+    const key = taskCompetencyNames(task).join(' · ') || 'Без блока';
+    if (!acc[key]) acc[key] = [];
+    acc[key].push(task);
+    return acc;
+  }, {});
+  const allTasksByCompetency = state.tasks.reduce<Record<string, Task[]>>((acc, task) => {
+    const key = taskCompetencyNames(task).join(' · ') || 'Без блока';
     if (!acc[key]) acc[key] = [];
     acc[key].push(task);
     return acc;
@@ -546,25 +556,6 @@ export default function MiniApp({
     }
     ranges.push(start === prev ? `${start}:00` : `${start}:00-${prev + 1}:00`);
     return ranges.join(', ');
-  };
-
-  const downloadAvailabilityCsv = () => {
-    const header = ['Имя', 'Telegram', ...activeDayLabels.map((day) => day.full)];
-    const rows = coreTeamUsers.map((user) => [
-      user.realName,
-      user.username,
-      ...activeDays.map((dayIndex) => formatHours(alignedSlots(state.availabilities[user.id])?.[dayIndex] || [])),
-    ]);
-    const csv = [header, ...rows]
-      .map((row) => row.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(';'))
-      .join('\n');
-    const blob = new Blob([`\uFEFF${csv}`], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = 'megabattle-availability.csv';
-    link.click();
-    URL.revokeObjectURL(url);
   };
 
   useEffect(() => {
@@ -679,15 +670,13 @@ export default function MiniApp({
     setShowAllMeetingParticipants(false);
   };
 
-  const selectTaskCompetency = (name: string) => {
-    setTaskCompetency(name);
-    setTaskAssignedTo(
-      name
-        ? coreTeamUsers
-            .filter((user) => user.primaryCompetency === name || user.competencies?.includes(name))
-            .map((user) => user.id)
-        : [],
-    );
+  const toggleTaskCompetency = (name: string) => {
+    const next = taskCompetencies.includes(name) ? taskCompetencies.filter((item) => item !== name) : [...taskCompetencies, name];
+    setTaskCompetencies(next);
+    const eligibleIds = new Set(coreTeamUsers
+      .filter((user) => next.some((item) => user.primaryCompetency === item || user.competencies?.includes(item)))
+      .map((user) => user.id));
+    setTaskAssignedTo((current) => current.filter((id) => eligibleIds.has(id)));
     setShowAllTaskAssignees(false);
   };
 
@@ -835,11 +824,10 @@ export default function MiniApp({
   const resetTaskForm = () => {
     setTaskTitle('');
     setTaskDesc('');
-    setTaskCompetency('');
+    setTaskCompetencies([]);
     setTaskDeadline('');
     setTaskAssignedTo([]);
     setTaskAssigneeSearch('');
-    setTaskEventId('');
     setShowAllTaskAssignees(false);
     setTaskSow('');
     setTaskPriority('normal');
@@ -848,6 +836,10 @@ export default function MiniApp({
   };
 
   const openTaskForm = () => {
+    if (!showTaskForm && !selectedTaskEventId) {
+      setTaskError('Сначала добавь активное мероприятие в админской панели.');
+      return;
+    }
     if (!showTaskForm) setTaskError('');
     if (showTaskForm) resetTaskForm();
     setShowTaskForm((value) => !value);
@@ -857,11 +849,10 @@ export default function MiniApp({
     setEditingTaskId(task.id);
     setTaskTitle(task.title);
     setTaskDesc(task.description);
-    setTaskCompetency(task.competency || '');
+    setTaskCompetencies(taskCompetencyNames(task));
     setTaskDeadline(formatDateShort(task.deadline));
     setTaskAssignedTo(taskAssigneeIds(task));
     setTaskAssigneeSearch('');
-    setTaskEventId(task.eventId || '');
     setTaskSow(task.sow || '');
     setTaskPriority(task.priority || 'normal');
     setTaskReminders(task.reminders?.map((reminder) => ({ ...reminder })) || []);
@@ -874,12 +865,21 @@ export default function MiniApp({
     event.preventDefault();
     setTaskError('');
     setTaskNotice('');
+    if (!selectedTaskEventId) {
+      setTaskError('Выбери мероприятие в верхней части страницы.');
+      return;
+    }
+    if (!taskCompetencies.length) {
+      setTaskError('Выбери хотя бы один блок исполнителей.');
+      return;
+    }
     setSavingTask(true);
     const payload = {
       title: taskTitle.trim() || 'Без названия',
       description: taskDesc.trim(),
-      competency: taskCompetency.trim(),
-      eventId: taskEventId,
+      competency: taskCompetencies[0] || '',
+      competencies: taskCompetencies,
+      eventId: selectedTaskEventId,
       deadline: taskDeadline,
       assignedTo: taskAssignedTo,
       sow: taskSow,
@@ -1001,11 +1001,12 @@ export default function MiniApp({
     }
     setEventSaving(true);
     try {
-      const response = await fetch('/api/event/create', {
+      const response = await fetch(editingEventId ? '/api/event/update' : '/api/event/create', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           requesterId: currentUser.id,
+          eventId: editingEventId,
           name: eventName,
           description: eventDescription,
           startsAt: eventStartsAt,
@@ -1018,14 +1019,35 @@ export default function MiniApp({
       setEventDescription('');
       setEventStartsAt('');
       setEventEndsAt('');
+      setEditingEventId(null);
       setShowEventForm(false);
-      setEventNotice('Мероприятие добавлено и доступно в задачах.');
+      setEventNotice(editingEventId ? 'Изменения мероприятия сохранены.' : 'Мероприятие добавлено и доступно в задачах.');
       await onRefreshState();
     } catch (error: any) {
       setEventError(error.message || 'Не удалось добавить мероприятие.');
     } finally {
       setEventSaving(false);
     }
+  };
+
+  const startWorkEventEdit = (workEvent: WorkEvent) => {
+    setEditingEventId(workEvent.id);
+    setEventName(workEvent.name);
+    setEventDescription(workEvent.description || '');
+    setEventStartsAt(workEvent.startsAt || '');
+    setEventEndsAt(workEvent.endsAt || '');
+    setEventError('');
+    setShowEventForm(true);
+  };
+
+  const closeWorkEventForm = () => {
+    setShowEventForm(false);
+    setEditingEventId(null);
+    setEventName('');
+    setEventDescription('');
+    setEventStartsAt('');
+    setEventEndsAt('');
+    setEventError('');
   };
 
   const setWorkEventStatus = async (workEvent: WorkEvent, status: WorkEvent['status']) => {
@@ -1121,6 +1143,34 @@ export default function MiniApp({
       setTeamError(error.message || 'Не удалось сохранить профиль.');
     } finally {
       setSavingUserId(null);
+    }
+  };
+
+  const chooseAvatarFile = (file?: File) => {
+    if (!file || !file.type.startsWith('image/')) return;
+    const reader = new FileReader();
+    reader.onload = () => setAvatarEditorSource(String(reader.result || ''));
+    reader.readAsDataURL(file);
+  };
+
+  const saveAvatar = async (avatarDataUrl: string) => {
+    if (avatarSaving) return;
+    setAvatarSaving(true);
+    setTeamError('');
+    try {
+      const response = await fetch('/api/user/update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ requesterId: currentUser.id, userId: currentUser.id, avatarDataUrl }),
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || 'Не удалось сохранить аватар');
+      await onRefreshState();
+      setAvatarEditorSource(null);
+    } catch (error: any) {
+      setTeamError(error.message || 'Не удалось сохранить аватар.');
+    } finally {
+      setAvatarSaving(false);
     }
   };
 
@@ -1355,9 +1405,7 @@ export default function MiniApp({
           <section className="space-y-4">
             <div className="rounded-3xl border border-blue-100 bg-white p-5 shadow-sm">
               <div className="flex items-center gap-4">
-                <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-[#0069E0] text-white">
-                  <UserCircle className="h-8 w-8" weight="fill" />
-                </div>
+                <UserAvatar user={currentUser} className="h-16 w-16 rounded-2xl" />
                 <div className="min-w-0">
                   <h2 className="truncate text-lg font-black">{currentUser.realName}</h2>
                   <a href={telegramLink(currentUser.username)} onClick={(event) => openTelegramProfile(event, telegramLink(currentUser.username))} className="text-sm font-bold text-[#0069E0]">
@@ -1369,6 +1417,15 @@ export default function MiniApp({
                     {profileAge !== null ? ` · ${profileAge} лет` : ''}
                   </p>
                 </div>
+              </div>
+              <div className="mt-4 flex flex-wrap gap-2">
+                <label className={`${secondaryButtonClass} cursor-pointer`}>
+                  <Camera className="h-4 w-4" /> Изменить фото
+                  <input type="file" accept="image/*" className="sr-only" onChange={(event) => { chooseAvatarFile(event.target.files?.[0]); event.currentTarget.value = ''; }} />
+                </label>
+                {currentUser.avatarDataUrl && (
+                  <button type="button" disabled={avatarSaving} onClick={() => void saveAvatar('')} className={`${miniButtonClass} border-rose-100 bg-rose-50 text-rose-600 disabled:opacity-60`}>Удалить фото</button>
+                )}
               </div>
 
               <div className="mt-5 grid grid-cols-2 overflow-hidden rounded-2xl border border-blue-100 bg-slate-50 sm:grid-cols-4">
@@ -1477,7 +1534,7 @@ export default function MiniApp({
                       <h2 className="font-black">Мероприятия в работе</h2>
                       <p className="mt-1 text-sm font-semibold text-slate-500">Мероприятие объединяет задачи и фильтры. Одновременно активными могут быть несколько.</p>
                     </div>
-                    <button type="button" onClick={() => setShowEventForm((value) => !value)} className={`${primaryCompactButtonClass} w-full sm:w-auto`}>
+                    <button type="button" onClick={() => showEventForm ? closeWorkEventForm() : setShowEventForm(true)} className={`${primaryCompactButtonClass} w-full sm:w-auto`}>
                       {showEventForm ? <X className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
                       {showEventForm ? 'Закрыть' : 'Добавить мероприятие'}
                     </button>
@@ -1488,13 +1545,14 @@ export default function MiniApp({
 
                 {showEventForm && (
                   <form onSubmit={submitWorkEvent} className="space-y-3 rounded-3xl border border-blue-100 bg-white p-4 shadow-sm animate-in fade-in slide-in-from-top-2 duration-200">
+                    <h2 className="font-black">{editingEventId ? 'Редактировать мероприятие' : 'Новое мероприятие'}</h2>
                     <Field label="Название"><input value={eventName} onChange={(event) => setEventName(event.target.value)} className={inputClass} placeholder="Например, MegaBattle 2027" /></Field>
                     <Field label="Описание"><textarea value={eventDescription} onChange={(event) => setEventDescription(event.target.value)} className={inputClass} rows={3} placeholder="Коротко: что проводим и для кого" /></Field>
                     <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                       <Field label="Начало"><DatePickerField value={eventStartsAt} onChange={setEventStartsAt} placeholder="Не указано" /></Field>
                       <Field label="Завершение"><DatePickerField value={eventEndsAt} onChange={setEventEndsAt} placeholder="Не указано" /></Field>
                     </div>
-                    <button disabled={eventSaving} className={`${primaryButtonClass} disabled:opacity-60`}>{eventSaving ? 'Сохраняю...' : 'Создать мероприятие'}</button>
+                    <button disabled={eventSaving} className={`${primaryButtonClass} disabled:opacity-60`}>{eventSaving ? 'Сохраняю...' : editingEventId ? 'Сохранить изменения' : 'Создать мероприятие'}</button>
                   </form>
                 )}
 
@@ -1512,9 +1570,14 @@ export default function MiniApp({
                             {workEvent.description && <p className="mt-2 break-words text-sm text-slate-500">{workEvent.description}</p>}
                             <p className="mt-2 text-xs font-bold text-slate-500">Задач: {eventTaskCount}{workEvent.startsAt || workEvent.endsAt ? ` · ${workEvent.startsAt || '…'} — ${workEvent.endsAt || '…'}` : ''}</p>
                           </div>
-                          <button type="button" disabled={eventSaving} onClick={() => setWorkEventStatus(workEvent, workEvent.status === 'active' ? 'archived' : 'active')} className={`${secondaryButtonClass} w-full shrink-0 sm:w-auto disabled:opacity-60`}>
-                            {workEvent.status === 'active' ? 'Завершить' : 'Вернуть в работу'}
-                          </button>
+                          <div className="flex w-full shrink-0 flex-col gap-2 sm:w-auto">
+                            <button type="button" disabled={eventSaving} onClick={() => startWorkEventEdit(workEvent)} className={`${secondaryButtonClass} w-full disabled:opacity-60`}>
+                              <PencilSimple className="h-4 w-4" /> Редактировать
+                            </button>
+                            <button type="button" disabled={eventSaving} onClick={() => setWorkEventStatus(workEvent, workEvent.status === 'active' ? 'archived' : 'active')} className={`${secondaryButtonClass} w-full disabled:opacity-60`}>
+                              {workEvent.status === 'active' ? 'Завершить' : 'Вернуть в работу'}
+                            </button>
+                          </div>
                         </div>
                       </div>
                     );
@@ -1563,7 +1626,7 @@ export default function MiniApp({
                           type="button"
                           aria-pressed={selected}
                           onClick={() => setSlotSettingsDays((current) => selected ? current.filter((value) => value !== dayIndex) : [...current, dayIndex].sort((a, b) => a - b))}
-                          className={`min-h-11 rounded-xl border text-xs font-black ${pressClass} ${selected ? 'border-[#0069E0] bg-[#0069E0] text-white' : 'border-slate-200 bg-slate-50 text-slate-600 hover:bg-blue-50 hover:text-blue-800'}`}
+                          className={`min-h-11 rounded-xl border text-xs font-black ${pressClass} ${selected ? 'border-[#0069E0] bg-[#0069E0] text-white' : 'border-slate-200 bg-slate-50 text-[#3A526A] hover:bg-blue-50 hover:text-blue-800'}`}
                         >
                           {day.short}
                         </button>
@@ -1597,7 +1660,7 @@ export default function MiniApp({
                     {meetingError && <div role="alert" className="rounded-2xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-bold text-rose-800">{meetingError}</div>}
                     <MeetingAudiencePicker value={meetingType} onChange={setMeetingAudience} />
                     <Field label="Название"><input value={meetingTitle} onChange={(event) => setMeetingTitle(event.target.value)} className={inputClass} /></Field>
-                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                    <div className="grid min-w-0 grid-cols-1 gap-3 min-[720px]:grid-cols-3">
                       <Field label="Дата"><DatePickerField value={meetingDate} onChange={setMeetingDate} placeholder="Выбери дату" /></Field>
                       <Field label="Время"><input type="time" min={`${String(availabilityConfig.startHour).padStart(2, '0')}:00`} max={`${String(availabilityConfig.endHour).padStart(2, '0')}:00`} value={meetingTime} onChange={(event) => setMeetingTime(event.target.value)} className={inputClass} /></Field>
                       <Field label="Длительность">
@@ -1665,8 +1728,8 @@ export default function MiniApp({
                     <p className="mt-1 text-xs font-semibold text-slate-500">Экспортируй историю или полностью очисти журнал задач.</p>
                   </div>
                   <div className="flex flex-wrap gap-2">
-                    <a href="/api/task/export" className={miniButtonClass}>
-                      <DownloadSimple className="h-4 w-4" /> Excel
+                    <a href="/api/integrations/google-sheets/task-log" target="_blank" rel="noreferrer" className={miniButtonClass}>
+                      <ArrowSquareOut className="h-4 w-4" /> Таблица лога
                     </a>
                     <button onClick={clearTaskLog} className={`${miniButtonClass} border-rose-100 bg-rose-50 text-rose-600 hover:bg-rose-100 active:bg-rose-200`}>
                       <Trash className="h-4 w-4" /> Удалить лог
@@ -1676,7 +1739,7 @@ export default function MiniApp({
                     </button>
                   </div>
                 </div>
-                {showTaskLog && <div className="mt-4 space-y-3"><TaskEventFilter label="Бэклог" value={backlogEventFilter} onChange={setBacklogEventFilter} events={allEvents} /><TaskLogView tasksByCompetency={tasksByCompetency} users={state.users} events={allEvents} /></div>}
+                {showTaskLog && <div className="mt-4"><TaskLogView tasksByCompetency={allTasksByCompetency} users={state.users} events={allEvents} /></div>}
               </div>
             )}
           </section>
@@ -1765,9 +1828,9 @@ export default function MiniApp({
                   <h2 className="font-black">Общий календарь</h2>
                   <p className="mt-1 text-xs font-semibold text-slate-500">Все свободные часы команды на текущей неделе</p>
                 </div>
-                <button type="button" onClick={downloadAvailabilityCsv} className={miniButtonClass}>
-                  <DownloadSimple className="h-4 w-4" /> Скачать
-                </button>
+                <a href="/api/integrations/google-sheets/availability" target="_blank" rel="noreferrer" className={miniButtonClass}>
+                  <ArrowSquareOut className="h-4 w-4" /> Открыть ОСНОВА
+                </a>
               </div>
               {calendarUsers.length > 3 && (
                 <ListDisclosure expanded={showFullCalendar} onToggle={() => setShowFullCalendar((value) => !value)} total={calendarUsers.length} className="mt-3" />
@@ -1967,7 +2030,7 @@ export default function MiniApp({
               <Field label="Название">
                 <input value={meetingTitle} onChange={(e) => setMeetingTitle(e.target.value)} className={inputClass} />
               </Field>
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                  <div className="grid min-w-0 grid-cols-1 gap-3 min-[720px]:grid-cols-3">
                 <Field label="Дата">
                   <DatePickerField value={meetingDate} onChange={setMeetingDate} placeholder="Выбери дату" />
                 </Field>
@@ -2108,6 +2171,16 @@ export default function MiniApp({
 
         {activeTab === 'tasks' && (
           <section className="space-y-4">
+            <EventScopePicker
+              events={activeEvents}
+              value={selectedTaskEventId}
+              onChange={(eventId) => {
+                setSelectedTaskEventId(eventId);
+                resetTaskForm();
+                setShowTaskForm(false);
+                setTaskError('');
+              }}
+            />
             {taskError && <div role="alert" className="rounded-2xl border border-rose-200 bg-rose-50 p-3 text-sm font-bold text-rose-800">{taskError}</div>}
             {taskNotice && <div role="status" className="rounded-2xl border border-emerald-200 bg-emerald-50 p-3 text-sm font-bold text-emerald-800">{taskNotice}</div>}
             <button onClick={openTaskForm} className={primaryButtonClass}>
@@ -2127,21 +2200,19 @@ export default function MiniApp({
                   <textarea value={taskDesc} onChange={(e) => setTaskDesc(e.target.value)} className={inputClass} rows={3} />
                 </Field>
                 <Field label="Мероприятие">
-                  <select value={taskEventId} onChange={(event) => setTaskEventId(event.target.value)} className={selectClass}>
-                    <option value="">Без мероприятия</option>
-                    {taskEventOptions.map((workEvent) => (
-                      <option key={workEvent.id} value={workEvent.id}>{workEvent.name}{workEvent.status === 'archived' ? ' · завершено' : ''}</option>
-                    ))}
-                  </select>
+                  <div className="rounded-2xl bg-blue-50 px-3 py-3 text-sm font-black text-[#005BC4]">{selectedTaskEvent?.name || 'Не выбрано'}</div>
                 </Field>
-                <Field label="Блок">
-                  <select value={taskCompetency} onChange={(e) => selectTaskCompetency(e.target.value)} className={selectClass}>
-                    <option value="">Выбери блок задачи</option>
-                    {competencies.map((name) => (
-                      <option key={name} value={name}>{name}</option>
-                    ))}
-                    {competencies.length === 0 && <option value="Общее">Общее</option>}
-                  </select>
+                <Field label="Блоки исполнителей">
+                  <div className="grid grid-cols-1 gap-2 rounded-2xl border border-slate-200 bg-slate-50 p-2 sm:grid-cols-2">
+                    {(competencies.length ? competencies : ['Общее']).map((name) => {
+                      const selected = taskCompetencies.includes(name);
+                      return (
+                        <button key={name} type="button" aria-pressed={selected} onClick={() => toggleTaskCompetency(name)} className={`min-h-11 rounded-xl border px-3 py-2 text-left text-sm font-black ${pressClass} ${selected ? 'border-[#0069E0] bg-[#0069E0] text-white' : 'border-slate-200 bg-white text-slate-700 hover:border-blue-300'}`}>
+                          {name}
+                        </button>
+                      );
+                    })}
+                  </div>
                 </Field>
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                   <Field label="Дедлайн">
@@ -2157,7 +2228,7 @@ export default function MiniApp({
                 </div>
                 <Field label="Исполнитель">
                   <div className="space-y-2 rounded-2xl border border-slate-200 bg-slate-50 p-2">
-                    <div className="px-1 text-xs font-bold text-slate-500">Никого не выбирай, если задача открытая.</div>
+                    <div className="px-1 text-xs font-bold text-slate-500">Показываются люди хотя бы из одного выбранного блока. Никого не выбирай, если задача открытая.</div>
                     <label className="relative block">
                       <MagnifyingGlass className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
                       <input
@@ -2170,17 +2241,17 @@ export default function MiniApp({
                     </label>
                     <button
                       type="button"
-                      onClick={() => setTaskAssignedTo(taskAssignedTo.length === coreTeamUsers.length ? [] : coreTeamUsers.map((user) => user.id))}
+                      onClick={() => setTaskAssignedTo(taskAssignedTo.length === eligibleTaskAssignees.length ? [] : eligibleTaskAssignees.map((user) => user.id))}
                       className={`${secondaryButtonClass} w-full`}
                     >
                       <UsersThree className="h-4 w-4" />
-                      {taskAssignedTo.length === coreTeamUsers.length ? 'Снять выбор со всей команды' : 'Назначить всей команде'}
+                      {taskAssignedTo.length === eligibleTaskAssignees.length ? 'Снять выбор со всех блоков' : 'Назначить всем из выбранных блоков'}
                     </button>
-                    {!normalizedTaskAssigneeSearch && coreTeamUsers.length > 3 && (
+                    {!normalizedTaskAssigneeSearch && eligibleTaskAssignees.length > 3 && (
                       <ListDisclosure
                         expanded={showAllTaskAssignees}
                         onToggle={() => setShowAllTaskAssignees((value) => !value)}
-                        total={coreTeamUsers.length}
+                        total={eligibleTaskAssignees.length}
                       />
                     )}
                     {visibleTaskAssignees.map((user) => (
@@ -2228,9 +2299,7 @@ export default function MiniApp({
                 </button>
               </form>
             )}
-            <TaskEventFilter label="Мои задачи" value={myTaskEventFilter} onChange={setMyTaskEventFilter} events={allEvents} />
             <TaskList title="Мои задачи" tasks={myTasks} users={state.users} events={allEvents} currentUser={currentUser} actionLabel="Готово" onAction={openCompletionPrompt} onRelease={onReleaseTask} onEdit={startTaskEdit} onNotify={notifyTaskAssignees} onSaveComment={saveTaskComment} />
-            <TaskEventFilter label="Открытые задачи" value={openTaskEventFilter} onChange={setOpenTaskEventFilter} events={allEvents} />
             <TaskList title="Открытые задачи" tasks={openTasks} users={state.users} events={allEvents} currentUser={currentUser} actionLabel="Взять" onAction={claimTask} onEdit={startTaskEdit} onNotify={notifyTaskAssignees} onSaveComment={saveTaskComment} />
             <button onClick={() => setShowCompletedTasks((value) => !value)} className={secondaryButtonClass}>
               {showCompletedTasks ? <Minus className="h-4 w-4" /> : <Check className="h-4 w-4" />}
@@ -2238,7 +2307,6 @@ export default function MiniApp({
             </button>
             {showCompletedTasks && (
               <>
-                <TaskEventFilter label="Выполненные задачи" value={completedTaskEventFilter} onChange={setCompletedTaskEventFilter} events={allEvents} />
                 <TaskList title="Последние выполненные" tasks={latestCompletedTasks} users={state.users} events={allEvents} currentUser={currentUser} actionLabel="Готово" onAction={() => undefined} onSaveComment={saveTaskComment} />
               </>
             )}
@@ -2250,9 +2318,9 @@ export default function MiniApp({
                   <p className="text-xs font-semibold text-slate-500">Все задачи за всё время, разбитые по блокам.</p>
                 </div>
                 <div className="flex flex-wrap gap-2">
-                  <a href="/api/task/export" className={miniButtonClass}>
-                    <DownloadSimple className="h-4 w-4" />
-                    Excel
+                  <a href="/api/integrations/google-sheets/task-log" target="_blank" rel="noreferrer" className={miniButtonClass}>
+                    <ArrowSquareOut className="h-4 w-4" />
+                    Полный лог в таблице
                   </a>
                   <button onClick={() => setShowTaskLog((value) => !value)} className={miniButtonClass}>
                     {showTaskLog ? 'Свернуть' : 'Открыть лог'}
@@ -2261,7 +2329,6 @@ export default function MiniApp({
               </div>
               {showTaskLog && (
                 <div className="mt-4 space-y-3">
-                  <TaskEventFilter label="Бэклог" value={backlogEventFilter} onChange={setBacklogEventFilter} events={allEvents} />
                   <TaskLogView tasksByCompetency={tasksByCompetency} users={state.users} events={allEvents} />
                 </div>
               )}
@@ -2548,15 +2615,17 @@ export default function MiniApp({
                     </Field>
                     <Field label="Роль">
                       <select
-                        value={facultyUserDraft.role === 'faculty_responsible' ? 'faculty_responsible' : facultyUserDraft.competencies[0] || ''}
-                        onChange={(e) => setFacultyUserDraft((prev) => (
-                          e.target.value === 'faculty_responsible'
-                            ? { ...prev, role: 'faculty_responsible', competencies: [] }
-                            : { ...prev, role: 'faculty_helper', competencies: e.target.value ? [e.target.value] : [] }
-                        ))}
+                        value={facultyUserDraft.role}
+                        onChange={(e) => setFacultyUserDraft((prev) => ({ ...prev, role: e.target.value as User['role'] }))}
                         className={selectClass}
                       >
                         <option value="faculty_responsible">Ответственный</option>
+                        <option value="faculty_helper">Помощник</option>
+                      </select>
+                    </Field>
+                    <Field label="Компетенция">
+                      <select value={facultyUserDraft.competencies[0] || ''} onChange={(e) => setFacultyUserDraft((prev) => ({ ...prev, competencies: e.target.value ? [e.target.value] : [] }))} className={selectClass}>
+                        <option value="">Не выбрана</option>
                         {facultyCompetencies.map((name) => <option key={name} value={name}>{name}</option>)}
                       </select>
                     </Field>
@@ -2637,15 +2706,17 @@ export default function MiniApp({
                                         </Field>
                                         <Field label="Роль">
                                           <select
-                                            value={facultyEditDraft.role === 'faculty_responsible' ? 'faculty_responsible' : facultyEditDraft.competencies[0] || ''}
-                                            onChange={(e) => setFacultyEditDraft((prev) => (
-                                              e.target.value === 'faculty_responsible'
-                                                ? { ...prev, role: 'faculty_responsible', competencies: [] }
-                                                : { ...prev, role: 'faculty_helper', competencies: e.target.value ? [e.target.value] : [] }
-                                            ))}
+                                            value={facultyEditDraft.role}
+                                            onChange={(e) => setFacultyEditDraft((prev) => ({ ...prev, role: e.target.value as User['role'] }))}
                                             className={selectClass}
                                           >
                                             <option value="faculty_responsible">Ответственный</option>
+                                            <option value="faculty_helper">Помощник</option>
+                                          </select>
+                                        </Field>
+                                        <Field label="Компетенция">
+                                          <select value={facultyEditDraft.competencies[0] || ''} onChange={(e) => setFacultyEditDraft((prev) => ({ ...prev, competencies: e.target.value ? [e.target.value] : [] }))} className={selectClass}>
+                                            <option value="">Не выбрана</option>
                                             {facultyCompetencies.map((name) => <option key={name} value={name}>{name}</option>)}
                                           </select>
                                         </Field>
@@ -2855,9 +2926,9 @@ export default function MiniApp({
                           total={facultyTasks.length}
                         />
                       )}
-                      <a href="/api/tasks/export" target="_blank" rel="noreferrer" className={miniButtonClass}>
-                        <DownloadSimple className="h-4 w-4" />
-                        Excel
+                      <a href="/api/integrations/google-sheets/task-log" target="_blank" rel="noreferrer" className={miniButtonClass}>
+                        <ArrowSquareOut className="h-4 w-4" />
+                        Таблица лога
                       </a>
                     </div>
                   </div>
@@ -2958,6 +3029,10 @@ export default function MiniApp({
         </div>
       )}
 
+      {avatarEditorSource && (
+        <AvatarCropEditor source={avatarEditorSource} saving={avatarSaving} onCancel={() => setAvatarEditorSource(null)} onSave={saveAvatar} />
+      )}
+
       <nav className="mega-bottom-nav fixed inset-x-0 bottom-0 z-40 border border-blue-100 bg-white/95 p-1.5 shadow-[0_-12px_30px_rgba(0,105,224,0.08)] backdrop-blur">
         <div className="mega-bottom-nav-inner mx-auto grid max-w-3xl grid-cols-5 gap-1">
           <NavButton icon={<CalendarDots />} label="Слоты" active={activeTab === 'slots'} onClick={() => setActiveTab('slots')} />
@@ -2972,8 +3047,8 @@ export default function MiniApp({
 }
 
 const pressClass = 'transition duration-150 hover:brightness-105 active:scale-[0.98] active:brightness-90';
-const inputClass = 'w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-3 text-base font-semibold outline-none transition focus:border-[#0069E0] focus:bg-white';
-const selectClass = 'w-full appearance-none rounded-2xl border border-blue-100 bg-white px-3 py-3 pr-10 text-base font-black text-slate-950 shadow-sm outline-none transition hover:border-[#0069E0]/40 hover:bg-slate-50 focus:border-[#0069E0] focus:bg-white focus:shadow-[0_0_0_4px_rgba(0,105,224,0.10)] [background-image:linear-gradient(45deg,transparent_50%,#0069E0_50%),linear-gradient(135deg,#0069E0_50%,transparent_50%)] [background-position:calc(100%-18px)_50%,calc(100%-13px)_50%] [background-repeat:no-repeat] [background-size:6px_6px,6px_6px]';
+const inputClass = 'min-w-0 max-w-full w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-3 text-base font-semibold outline-none transition focus:border-[#0069E0] focus:bg-white';
+const selectClass = 'min-w-0 max-w-full w-full appearance-none rounded-2xl border border-blue-100 bg-white px-3 py-3 pr-10 text-base font-black text-slate-950 shadow-sm outline-none transition hover:border-[#0069E0]/40 hover:bg-slate-50 focus:border-[#0069E0] focus:bg-white focus:shadow-[0_0_0_4px_rgba(0,105,224,0.10)] [background-image:linear-gradient(45deg,transparent_50%,#0069E0_50%),linear-gradient(135deg,#0069E0_50%,transparent_50%)] [background-position:calc(100%-18px)_50%,calc(100%-13px)_50%] [background-repeat:no-repeat] [background-size:6px_6px,6px_6px]';
 const primaryButtonClass = `mega-primary-button flex w-full items-center justify-center gap-2 rounded-3xl bg-[#0069E0] px-5 py-3 text-sm font-black text-white shadow-[0_12px_28px_rgba(0,105,224,0.24)] hover:bg-[#1677E8] active:bg-[#0058BD] ${pressClass}`;
 const primaryCompactButtonClass = `mega-primary-button flex items-center justify-center gap-2 rounded-full bg-[#0069E0] px-4 py-2 text-xs font-black text-white shadow-[0_10px_24px_rgba(0,105,224,0.22)] hover:bg-[#1677E8] active:bg-[#0058BD] ${pressClass}`;
 const secondaryButtonClass = `mega-secondary-button flex items-center justify-center gap-2 rounded-full border border-blue-100 bg-blue-50 px-3 py-2 text-xs font-black text-[#0069E0] hover:bg-blue-100 active:bg-blue-200 ${pressClass}`;
@@ -2988,7 +3063,7 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
     : children;
 
   return (
-    <div className="block" role="group" aria-label={label}>
+    <div className="block min-w-0 max-w-full" role="group" aria-label={label}>
       <span className="mb-1.5 block text-xs font-black uppercase text-slate-500">{label}</span>
       {labelledChild}
     </div>
@@ -3010,13 +3085,29 @@ function DatePickerField({
   fullYear?: boolean;
   error?: boolean;
 }) {
-  const inputValue = shortDateToInputDate(value);
+  const focusedRef = useRef(false);
+  const dirtyRef = useRef(false);
+  const [draft, setDraft] = useState(() => shortDateToInputDate(value));
+  useEffect(() => {
+    if (!focusedRef.current) setDraft(shortDateToInputDate(value));
+  }, [value]);
   return (
-    <div>
+    <div className="min-w-0 max-w-full">
       <input
         type="date"
-        value={inputValue}
-        onChange={(event) => onChange(inputDateToShortDate(event.target.value, withYear, fullYear))}
+        value={draft}
+        onFocus={() => { focusedRef.current = true; dirtyRef.current = false; }}
+        onChange={(event) => {
+          const next = event.target.value;
+          dirtyRef.current = true;
+          setDraft(next);
+          if (/^\d{4}-\d{2}-\d{2}$/.test(next)) onChange(inputDateToShortDate(next, withYear, fullYear));
+        }}
+        onBlur={() => {
+          focusedRef.current = false;
+          if (dirtyRef.current && !draft) onChange('');
+          setDraft(shortDateToInputDate(draft ? inputDateToShortDate(draft, withYear, fullYear) : ''));
+        }}
         className={`${inputClass} cursor-pointer pr-3 ${error ? 'border-rose-300 bg-rose-50 focus:border-rose-500' : ''}`}
       />
       <div className={`mt-1 flex items-center gap-1.5 text-xs font-bold ${value ? 'text-[#0069E0]' : 'text-slate-400'}`}>
@@ -3079,17 +3170,76 @@ function MeetingAudiencePicker({ value, onChange }: { value: 'general' | 'custom
   );
 }
 
-function TaskEventFilter({ label, value, onChange, events }: { label: string; value: string; onChange: (value: string) => void; events: WorkEvent[] }) {
+function EventScopePicker({ events, value, onChange }: { events: WorkEvent[]; value: string; onChange: (value: string) => void }) {
+  if (!events.length) {
+    return <div className="rounded-3xl border border-amber-200 bg-amber-50 p-4 text-sm font-bold text-amber-900">Нет активных мероприятий. Администратору нужно добавить или вернуть мероприятие в работу.</div>;
+  }
   return (
-    <div className="rounded-2xl border border-blue-100 bg-white p-3 shadow-sm">
-      <label className="grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(180px,45%)] sm:items-center">
-        <span className="text-xs font-black uppercase tracking-wide text-slate-500">Фильтр · {label}</span>
-        <select value={value} onChange={(event) => onChange(event.target.value)} className={`${selectClass} min-w-0`} aria-label={`Фильтр по мероприятию: ${label}`}>
-          <option value="all">Все мероприятия</option>
-          <option value="none">Без мероприятия</option>
-          {events.map((workEvent) => <option key={workEvent.id} value={workEvent.id}>{workEvent.name}{workEvent.status === 'archived' ? ' · завершено' : ''}</option>)}
-        </select>
-      </label>
+    <div className="rounded-3xl border border-blue-100 bg-white p-3 shadow-sm">
+      <div className="mb-2 px-1 text-xs font-black uppercase tracking-wide text-slate-500">Мероприятие</div>
+      <div className="grid gap-2 [grid-template-columns:repeat(auto-fit,minmax(min(100%,10rem),1fr))]" role="radiogroup" aria-label="Фильтр задач по мероприятию">
+        {events.map((workEvent) => {
+          const selected = value === workEvent.id;
+          return (
+            <button key={workEvent.id} type="button" role="radio" aria-checked={selected} onClick={() => onChange(workEvent.id)} className={`min-h-12 min-w-0 break-words rounded-2xl border px-3 py-2 text-sm font-black leading-tight ${pressClass} ${selected ? 'border-[#0069E0] bg-[#0069E0] text-white shadow-[0_8px_20px_rgba(0,105,224,0.2)]' : 'border-blue-100 bg-blue-50 text-[#005BC4] hover:bg-blue-100'}`}>
+              {workEvent.name}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function UserAvatar({ user, className = '' }: { user: User; className?: string }) {
+  return user.avatarDataUrl
+    ? <img src={user.avatarDataUrl} alt={`Аватар ${user.realName}`} className={`shrink-0 bg-blue-50 object-cover ${className}`} />
+    : <div className={`flex shrink-0 items-center justify-center bg-[#0069E0] text-white ${className}`}><UserCircle className="h-3/5 w-3/5" weight="fill" /></div>;
+}
+
+function AvatarCropEditor({ source, saving, onCancel, onSave }: { source: string; saving: boolean; onCancel: () => void; onSave: (dataUrl: string) => Promise<void> }) {
+  const imageRef = useRef<HTMLImageElement | null>(null);
+  const [zoom, setZoom] = useState(1);
+  const [offsetX, setOffsetX] = useState(0);
+  const [offsetY, setOffsetY] = useState(0);
+
+  const crop = async () => {
+    const image = imageRef.current;
+    if (!image?.naturalWidth || !image.naturalHeight) return;
+    const canvas = document.createElement('canvas');
+    canvas.width = 256;
+    canvas.height = 256;
+    const context = canvas.getContext('2d');
+    if (!context) return;
+    const cropSize = Math.min(image.naturalWidth, image.naturalHeight) / zoom;
+    const maxX = Math.max(0, (image.naturalWidth - cropSize) / 2);
+    const maxY = Math.max(0, (image.naturalHeight - cropSize) / 2);
+    const sourceX = Math.max(0, Math.min(image.naturalWidth - cropSize, (image.naturalWidth - cropSize) / 2 + (offsetX / 100) * maxX));
+    const sourceY = Math.max(0, Math.min(image.naturalHeight - cropSize, (image.naturalHeight - cropSize) / 2 + (offsetY / 100) * maxY));
+    context.drawImage(image, sourceX, sourceY, cropSize, cropSize, 0, 0, 256, 256);
+    const dataUrl = canvas.toDataURL('image/webp', 0.82);
+    await onSave(dataUrl.startsWith('data:image/webp') ? dataUrl : canvas.toDataURL('image/jpeg', 0.82));
+  };
+
+  return (
+    <div className="fixed inset-0 z-[70] flex items-end justify-center bg-slate-950/65 p-3 backdrop-blur-sm sm:items-center" role="dialog" aria-modal="true" aria-labelledby="avatar-editor-title">
+      <div className="w-full max-w-md rounded-3xl bg-white p-4 shadow-2xl">
+        <div className="flex items-center justify-between gap-3">
+          <div><h2 id="avatar-editor-title" className="text-lg font-black">Обрезать аватар</h2><p className="text-xs font-semibold text-slate-500">Перемести кадр ползунками и выбери масштаб.</p></div>
+          <button type="button" onClick={onCancel} className={miniButtonClass} aria-label="Закрыть"><X className="h-4 w-4" /></button>
+        </div>
+        <div className="mx-auto mt-4 aspect-square w-full max-w-[280px] overflow-hidden rounded-3xl bg-slate-100">
+          <img ref={imageRef} src={source} alt="Предпросмотр аватара" className="h-full w-full object-cover" style={{ transform: `translate(${offsetX * 0.2}%, ${offsetY * 0.2}%) scale(${zoom})` }} />
+        </div>
+        <div className="mt-4 space-y-3">
+          <Field label="Масштаб"><input type="range" min="1" max="3" step="0.05" value={zoom} onChange={(event) => setZoom(Number(event.target.value))} className="w-full" /></Field>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="По горизонтали"><input type="range" min="-100" max="100" value={offsetX} onChange={(event) => setOffsetX(Number(event.target.value))} className="w-full" /></Field>
+            <Field label="По вертикали"><input type="range" min="-100" max="100" value={offsetY} onChange={(event) => setOffsetY(Number(event.target.value))} className="w-full" /></Field>
+          </div>
+          <button type="button" disabled={saving} onClick={() => void crop()} className={`${primaryButtonClass} disabled:opacity-60`}>{saving ? 'Сохраняю...' : 'Сохранить аватар'}</button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -3161,7 +3311,7 @@ function TaskList({
                 {workEvent?.name || 'Без мероприятия'}
               </span>
               <span className="rounded-full bg-blue-50 px-2.5 py-1 text-[#0069E0]">
-                {task.competency || 'Без блока'}
+                {taskCompetencyNames(task).join(', ') || 'Без блока'}
               </span>
               <span className="flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-1">
                 <Clock className="h-3 w-3" />
@@ -3177,7 +3327,7 @@ function TaskList({
               <div className="mt-4 space-y-2 border-t border-slate-100 pt-4 text-sm text-slate-600" onClick={(event) => event.stopPropagation()}>
                 {creator && <InfoRow label="Автор" value={creator.realName} href={telegramLink(creator.username)} />}
                 <InfoRow label="Мероприятие" value={workEvent?.name || 'Без мероприятия'} />
-                <InfoRow label="Блок" value={task.competency || 'Без блока'} />
+                <InfoRow label="Блоки" value={taskCompetencyNames(task).join(', ') || 'Без блока'} />
                 <InfoRow label="Статус" value={task.status === 'open' ? 'Открытая' : task.status === 'completed' ? 'Готово' : 'В работе'} />
                 <InfoRow label="Исполнители" value={executors.length ? executors.map((user) => user.realName).join(', ') : 'пока никто'} />
                 {executors.length > 0 && (

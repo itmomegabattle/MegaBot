@@ -6,6 +6,7 @@ export interface User {
   realName: string;
   role: UserRole;
   avatarSeed: string;
+  avatarDataUrl?: string;
   birthday?: string;
   telegramId?: string;
   registered?: boolean;
@@ -79,6 +80,7 @@ export interface Task {
   assignedTo: string[] | null;
   creatorId?: string;
   competency?: string;
+  competencies?: string[];
   sow: string;
   tips: string[];
   status: TaskStatus;

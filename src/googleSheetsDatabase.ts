@@ -9,22 +9,24 @@ export type GoogleSheetsDatabaseConfig = {
 
 type SchemaSheet = { title: string; headers: string[] };
 
-export const DATABASE_SCHEMA_VERSION = 3;
+export const DATABASE_SCHEMA_VERSION = 4;
 
 const SCHEMA: SchemaSheet[] = [
   { title: 'meta', headers: ['key', 'value'] },
   { title: 'snapshot', headers: ['chunk_index', 'data'] },
   { title: 'events', headers: ['id', 'name', 'description', 'starts_at', 'ends_at', 'status', 'created_at', 'created_by'] },
   { title: 'users', headers: ['id', 'telegram_id', 'username', 'real_name', 'role', 'registered', 'birthday', 'competencies_json', 'primary_competency', 'faculty_id', 'joined_at', 'last_seen_at', 'avatar_seed'] },
+  { title: 'user_avatars', headers: ['user_id', 'chunk_index', 'data'] },
   { title: 'faculties', headers: ['id', 'name'] },
   { title: 'availability_weeks', headers: ['user_id', 'week_start', 'updated_at', 'hard_unavailable_days_json'] },
   { title: 'availability_slots', headers: ['user_id', 'week_start', 'day_index', 'hour'] },
   { title: 'meetings', headers: ['id', 'title', 'type', 'date', 'time', 'duration_hours', 'host_id', 'participants_all', 'competency', 'topic', 'description', 'status', 'google_calendar_event_id'] },
   { title: 'meeting_participants', headers: ['meeting_id', 'user_id', 'kind'] },
-  { title: 'tasks', headers: ['id', 'event_id', 'faculty_id', 'title', 'description', 'deadline', 'creator_id', 'competency', 'sow', 'status', 'priority', 'created_at', 'completed_at', 'time_spent_minutes', 'tips_json'] },
+  { title: 'tasks', headers: ['id', 'event_id', 'faculty_id', 'title', 'description', 'deadline', 'creator_id', 'competency', 'competencies_json', 'sow', 'status', 'priority', 'created_at', 'completed_at', 'time_spent_minutes', 'tips_json'] },
   { title: 'task_assignees', headers: ['task_id', 'user_id'] },
   { title: 'task_comments', headers: ['task_id', 'user_id', 'executor_comment', 'coordinator_comment', 'completion_comment', 'updated_at'] },
   { title: 'task_reminders', headers: ['task_id', 'id', 'type', 'value', 'unit', 'sent_at', 'last_sent_at'] },
+  { title: 'task_log', headers: ['Мероприятие', 'Блоки', 'Задача', 'Описание', 'ТЗ', 'Статус', 'Приоритет', 'Автор', 'Исполнители', 'Назначена', 'Дедлайн', 'Выполнена', 'Затрачено, мин', 'Комментарии исполнителей', 'Комментарии координатора', 'Комментарии при завершении', 'Напоминания', 'ID'] },
   { title: 'bot_messages', headers: ['owner_user_id', 'id', 'sender', 'text', 'timestamp', 'buttons_json'] },
   { title: 'settings', headers: ['key', 'value_json'] },
   { title: 'audit_log', headers: ['timestamp', 'revision', 'action', 'details'] },
@@ -67,6 +69,14 @@ const bool = (value: unknown) => value === true || String(value).toLowerCase() =
 const numberOrUndefined = (value: unknown) => {
   const parsed = Number(value);
   return value !== '' && value !== undefined && Number.isFinite(parsed) ? parsed : undefined;
+};
+
+const humanDateTime = (value: unknown) => {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  const date = new Date(text);
+  if (Number.isNaN(date.getTime())) return text;
+  return new Intl.DateTimeFormat('ru-RU', { dateStyle: 'short', timeStyle: 'short', timeZone: 'Europe/Moscow' }).format(date);
 };
 
 export function encodeGoogleSheetsDatabaseSnapshot(state: SimulationState, chunkSize = 40_000) {
@@ -131,6 +141,14 @@ export async function initializeGoogleSheetsDatabase(config: GoogleSheetsDatabas
       { updateDimensionProperties: { range: { sheetId: property.sheetId, dimension: 'ROWS', startIndex: 0, endIndex: 1 }, properties: { pixelSize: 36 }, fields: 'pixelSize' } },
       { updateDimensionProperties: { range: { sheetId: property.sheetId, dimension: 'COLUMNS', startIndex: 0, endIndex: sheet.headers.length }, properties: { pixelSize: 150 }, fields: 'pixelSize' } },
     );
+    if (sheet.title === 'task_log') {
+      formatRequests.push(
+        { setBasicFilter: { filter: { range: { sheetId: property.sheetId, startRowIndex: 0, startColumnIndex: 0, endColumnIndex: sheet.headers.length } } } },
+        { repeatCell: { range: { sheetId: property.sheetId, startRowIndex: 1, startColumnIndex: 0, endColumnIndex: sheet.headers.length }, cell: { userEnteredFormat: { verticalAlignment: 'TOP', wrapStrategy: 'WRAP' } }, fields: 'userEnteredFormat.verticalAlignment,userEnteredFormat.wrapStrategy' } },
+        { updateDimensionProperties: { range: { sheetId: property.sheetId, dimension: 'COLUMNS', startIndex: 2, endIndex: 5 }, properties: { pixelSize: 260 }, fields: 'pixelSize' } },
+        { updateDimensionProperties: { range: { sheetId: property.sheetId, dimension: 'COLUMNS', startIndex: 13, endIndex: 17 }, properties: { pixelSize: 240 }, fields: 'pixelSize' } },
+      );
+    }
   }
   await googleSheetsApiRequest(config, '/values:batchUpdate', {
     method: 'POST',
@@ -144,6 +162,12 @@ function stateRows(state: SimulationState) {
   const snapshotRows = encodeGoogleSheetsDatabaseSnapshot(state);
   const eventRows = (state.events || []).map((item) => [item.id, item.name, item.description || '', item.startsAt || '', item.endsAt || '', item.status, item.createdAt, item.createdBy || '']);
   const userRows = state.users.map((user) => [user.id, user.telegramId || '', user.username, user.realName, user.role, Boolean(user.registered), user.birthday || '', json(user.competencies || []), user.primaryCompetency || '', user.facultyId || '', user.joinedAt || '', user.lastSeenAt || '', user.avatarSeed]);
+  const userAvatarRows = state.users.flatMap((user) => {
+    const data = user.avatarDataUrl || '';
+    const rows: unknown[][] = [];
+    for (let offset = 0, index = 0; offset < data.length; offset += 30_000, index += 1) rows.push([user.id, index, data.slice(offset, offset + 30_000)]);
+    return rows;
+  });
   const facultyRows = (state.faculties || []).map((faculty) => [faculty.id, faculty.name]);
   const availabilityWeekRows: unknown[][] = [];
   const availabilitySlotRows: unknown[][] = [];
@@ -165,7 +189,7 @@ function stateRows(state: SimulationState) {
   const commentRows: unknown[][] = [];
   const reminderRows: unknown[][] = [];
   state.tasks.forEach((task) => {
-    taskRows.push([task.id, task.eventId || '', task.facultyId || '', task.title, task.description, task.deadline, task.creatorId || '', task.competency || '', task.sow || '', task.status, task.priority, task.createdAt || '', task.completedAt || '', task.timeSpentMinutes || '', json(task.tips || [])]);
+    taskRows.push([task.id, task.eventId || '', task.facultyId || '', task.title, task.description, task.deadline, task.creatorId || '', task.competency || '', json(task.competencies || (task.competency ? [task.competency] : [])), task.sow || '', task.status, task.priority, task.createdAt || '', task.completedAt || '', task.timeSpentMinutes || '', json(task.tips || [])]);
     const assignees = task.assignedTo || [];
     assignees.forEach((userId) => assigneeRows.push([task.id, userId]));
     const commentUserIds = new Set([...Object.keys(task.assigneeNotes || {}), ...Object.keys(task.completionComments || {})]);
@@ -175,6 +199,25 @@ function stateRows(state: SimulationState) {
     });
     (task.reminders || []).forEach((reminder) => reminderRows.push([task.id, reminder.id, reminder.type, reminder.value, reminder.unit, reminder.sentAt || '', reminder.lastSentAt || '']));
   });
+  const taskLogRows = state.tasks
+    .slice()
+    .sort((left, right) => String(left.createdAt || '').localeCompare(String(right.createdAt || '')))
+    .map((task) => {
+      const event = (state.events || []).find((item) => item.id === task.eventId);
+      const creator = state.users.find((user) => user.id === task.creatorId);
+      const assignees = (task.assignedTo || []).map((id) => state.users.find((user) => user.id === id)?.realName || id);
+      const executorComments = Object.entries(task.assigneeNotes || {}).map(([id, note]) => `${state.users.find((user) => user.id === id)?.realName || id}: ${note.executor || '—'}`).join('\n');
+      const coordinatorComments = Object.entries(task.assigneeNotes || {}).map(([id, note]) => `${state.users.find((user) => user.id === id)?.realName || id}: ${note.coordinator || '—'}`).join('\n');
+      const completionComments = Object.entries(task.completionComments || {}).map(([id, comment]) => `${state.users.find((user) => user.id === id)?.realName || id}: ${comment}`).join('\n');
+      const reminders = (task.reminders || []).map((reminder) => `${reminder.type === 'repeat' ? 'каждые' : 'за'} ${reminder.value} ${reminder.unit === 'hours' ? 'ч' : 'дн'}`).join(', ');
+      return [
+        event?.name || 'Без мероприятия', (task.competencies || (task.competency ? [task.competency] : [])).join(', ') || 'Без блока', task.title, task.description, task.sow || '',
+        task.status === 'completed' ? 'Выполнено' : task.status === 'open' ? 'Открытая' : 'В работе',
+        task.priority === 'critical' ? 'Очень важная' : task.priority === 'important' ? 'Важная' : 'Обычная',
+        creator?.realName || 'Не указан', assignees.join(', ') || 'Не назначены', humanDateTime(task.createdAt), task.deadline || '', humanDateTime(task.completedAt),
+        task.timeSpentMinutes || '', executorComments, coordinatorComments, completionComments, reminders, task.id,
+      ];
+    });
   const messageRows: unknown[][] = [];
   Object.entries(state.messages || {}).forEach(([ownerUserId, messages]) => messages.forEach((message) => messageRows.push([ownerUserId, message.id, message.sender, message.text, message.timestamp, json(message.buttons || [])])));
   const settingRows = [
@@ -183,9 +226,9 @@ function stateRows(state: SimulationState) {
     ['facultyCompetencies', json(state.facultyCompetencies || [])],
   ];
   return new Map<string, unknown[][]>([
-    ['snapshot', snapshotRows], ['events', eventRows], ['users', userRows], ['faculties', facultyRows], ['availability_weeks', availabilityWeekRows],
+    ['snapshot', snapshotRows], ['events', eventRows], ['users', userRows], ['user_avatars', userAvatarRows], ['faculties', facultyRows], ['availability_weeks', availabilityWeekRows],
     ['availability_slots', availabilitySlotRows], ['meetings', meetingRows], ['meeting_participants', meetingParticipantRows],
-    ['tasks', taskRows], ['task_assignees', assigneeRows], ['task_comments', commentRows], ['task_reminders', reminderRows],
+    ['tasks', taskRows], ['task_assignees', assigneeRows], ['task_comments', commentRows], ['task_reminders', reminderRows], ['task_log', taskLogRows],
     ['bot_messages', messageRows], ['settings', settingRows],
   ]);
 }
@@ -253,7 +296,7 @@ export async function importStateFromGoogleSheetsDatabase(config: GoogleSheetsDa
   const meta = Object.fromEntries(metaRows.map((row) => [String(row.key), row.value]));
   if (!bool(meta.data_present)) return { initialized: false, revision: 0, state: null, counts: null };
   if (String(meta.sync_state || '') !== 'ready') return { initialized: false, revision: Number(meta.revision || 0), state: null, counts: null };
-  if (![1, 2, DATABASE_SCHEMA_VERSION].includes(Number(meta.schema_version))) throw new Error(`Unsupported Google Sheets database schema: ${meta.schema_version}`);
+  if (![1, 2, 3, DATABASE_SCHEMA_VERSION].includes(Number(meta.schema_version))) throw new Error(`Unsupported Google Sheets database schema: ${meta.schema_version}`);
 
   const snapshotState = decodeGoogleSheetsDatabaseSnapshot(objects(valuesByTitle.get('snapshot')));
   if (snapshotState) {
@@ -268,11 +311,16 @@ export async function importStateFromGoogleSheetsDatabase(config: GoogleSheetsDa
     };
   }
 
+  const avatarChunks = objects(valuesByTitle.get('user_avatars'));
+  const avatarByUser = new Map<string, string>();
+  [...new Set(avatarChunks.map((row) => String(row.user_id)))].forEach((userId) => {
+    avatarByUser.set(userId, avatarChunks.filter((row) => String(row.user_id) === userId).sort((a, b) => Number(a.chunk_index) - Number(b.chunk_index)).map((row) => String(row.data || '')).join(''));
+  });
   const users = objects(valuesByTitle.get('users')).map((row) => ({
     id: String(row.id), telegramId: String(row.telegram_id || '') || undefined, username: String(row.username || ''), realName: String(row.real_name || ''),
     role: String(row.role || 'organizer') as any, registered: bool(row.registered), birthday: String(row.birthday || '') || undefined,
     competencies: parseJson<string[]>(row.competencies_json, []), primaryCompetency: String(row.primary_competency || ''), facultyId: String(row.faculty_id || ''),
-    joinedAt: String(row.joined_at || ''), lastSeenAt: String(row.last_seen_at || ''), avatarSeed: String(row.avatar_seed || row.id),
+    joinedAt: String(row.joined_at || ''), lastSeenAt: String(row.last_seen_at || ''), avatarSeed: String(row.avatar_seed || row.id), avatarDataUrl: avatarByUser.get(String(row.id)) || undefined,
   }));
   const events = objects(valuesByTitle.get('events')).map((row) => ({
     id: String(row.id), name: String(row.name), description: String(row.description || ''), startsAt: String(row.starts_at || ''), endsAt: String(row.ends_at || ''),
@@ -306,7 +354,7 @@ export async function importStateFromGoogleSheetsDatabase(config: GoogleSheetsDa
     const assignedTo = assignees.filter((item) => item.task_id === row.id).map((item) => String(item.user_id));
     return {
       id: String(row.id), eventId: String(row.event_id || ''), facultyId: String(row.faculty_id || ''), title: String(row.title), description: String(row.description || ''), deadline: String(row.deadline || ''),
-      creatorId: String(row.creator_id || ''), competency: String(row.competency || ''), sow: String(row.sow || ''), status: String(row.status) as Task['status'], priority: String(row.priority) as Task['priority'],
+      creatorId: String(row.creator_id || ''), competency: String(row.competency || ''), competencies: parseJson<string[]>(row.competencies_json, String(row.competency || '') ? [String(row.competency)] : []), sow: String(row.sow || ''), status: String(row.status) as Task['status'], priority: String(row.priority) as Task['priority'],
       createdAt: String(row.created_at || ''), completedAt: String(row.completed_at || ''), timeSpentMinutes: numberOrUndefined(row.time_spent_minutes), tips: parseJson<string[]>(row.tips_json, []),
       assignedTo: assignedTo.length ? assignedTo : null,
       assigneeNotes: Object.fromEntries(taskComments.map((item) => [String(item.user_id), { executor: String(item.executor_comment || ''), coordinator: String(item.coordinator_comment || ''), updatedAt: String(item.updated_at || '') }])),
@@ -326,6 +374,13 @@ export async function importStateFromGoogleSheetsDatabase(config: GoogleSheetsDa
     availabilities, meetings, events, tasks, messages, settings: { ...((settingRows.settings as SimulationState['settings']) || {}), databaseRevision: Number(meta.revision || 0) },
   };
   return { initialized: true, revision: Number(meta.revision || 0), state, counts: { users: users.length, events: events.length, meetings: meetings.length, tasks: tasks.length } };
+}
+
+export async function googleSheetsDatabaseSheetUrl(config: GoogleSheetsDatabaseConfig, title: string) {
+  const sheets = await metadata(config);
+  const sheet = sheets.sheets?.find((item) => item.properties.title === title);
+  if (!sheet) throw new Error(`Google Sheets database sheet not found: ${title}`);
+  return `https://docs.google.com/spreadsheets/d/${config.spreadsheetId}/edit#gid=${sheet.properties.sheetId}`;
 }
 
 export function compareDatabaseStateCounts(left: SimulationState, right: SimulationState) {
