@@ -15,6 +15,7 @@ const telegramCalls = [];
 let nextTelegramMessageId = 1000;
 let sessionCookie = '';
 let failNextTelegramEdit = false;
+let createdEventId = '';
 
 const fixture = {
   users: [
@@ -296,6 +297,23 @@ try {
     primaryCompetency: '',
   });
   assert.equal(restoreBob.response.status, 200);
+
+  const createEvent = await request('/api/event/create', {
+    requesterId: 'u_admin',
+    name: 'Тестовое мероприятие',
+    description: 'Изолирует задачи интеграционного теста',
+    startsAt: '01.01.30',
+    endsAt: '31.12.30',
+  });
+  assert.equal(createEvent.response.status, 200);
+  assert.equal(createEvent.data.event.status, 'active');
+  createdEventId = createEvent.data.event.id;
+  const archiveEvent = await request('/api/event/update', { requesterId: 'u_admin', eventId: createdEventId, status: 'archived' });
+  assert.equal(archiveEvent.response.status, 200);
+  assert.equal(archiveEvent.data.event.status, 'archived');
+  const reactivateEvent = await request('/api/event/update', { requesterId: 'u_admin', eventId: createdEventId, status: 'active' });
+  assert.equal(reactivateEvent.response.status, 200);
+  assert.equal(reactivateEvent.data.event.status, 'active');
 
   telegramCalls.length = 0;
   const horizonNotification = await request('/api/availability/weeks', {
@@ -673,6 +691,7 @@ try {
     creatorId: 'u_admin',
     competency: 'Дизайн',
     priority: 'critical',
+    eventId: createdEventId,
   });
   assert.equal(taskResult.response.status, 200);
   assert.deepEqual(taskResult.data.task.assignedTo, ['u_alice', 'u_bob']);
@@ -688,6 +707,7 @@ try {
     creatorId: 'u_alice',
     competency: 'Дизайн',
     priority: 'important',
+    eventId: createdEventId,
   });
   assert.equal(openTaskResult.response.status, 200);
   telegramCalls.length = 0;
@@ -784,13 +804,24 @@ try {
     type: 'general',
     date: '2030-01-02',
     time: '18:00',
-    duration: 2,
+    duration: 6,
     hostId: 'u_admin',
     participants: 'all',
     topic: 'Проверка',
     description: '',
   });
   assert.equal(meetingResult.response.status, 200);
+  assert.equal(meetingResult.data.meeting.duration, 6);
+  const invalidMeetingDuration = await request('/api/meeting', {
+    title: 'Слишком длинная встреча',
+    type: 'general',
+    date: '2030-01-02',
+    time: '18:00',
+    duration: 6.5,
+    hostId: 'u_admin',
+    participants: 'all',
+  });
+  assert.equal(invalidMeetingDuration.response.status, 400);
   assert.equal(telegramCalls.filter((call) => call.path.endsWith('/sendMessage')).length, 3);
   assert.ok(!telegramCalls.some((call) => call.body.chat_id === '400'));
 
@@ -844,7 +875,9 @@ try {
     headers: { Cookie: sessionCookie },
   });
   assert.equal(taskExportResponse.status, 200);
-  assert.ok((await taskExportResponse.text()).includes('1 ч 35 мин'));
+  const taskExport = await taskExportResponse.text();
+  assert.ok(taskExport.includes('1 ч 35 мин'));
+  assert.ok(taskExport.includes('Тестовое мероприятие'));
 
   const aliceSessionCookie = sessionCookie;
   const facultyAuth = await request('/api/user/get-or-create', {
@@ -873,8 +906,10 @@ try {
     deadline: '2030-01-03',
     assignedTo: ['u_faculty', 'u_alice', 'missing'],
     reminders: [],
+    eventId: createdEventId,
   });
   assert.equal(facultyTask.response.status, 200);
+  assert.equal(facultyTask.data.task.eventId, createdEventId);
   assert.deepEqual(facultyTask.data.task.assignedTo, ['u_faculty']);
   assert.equal(telegramCalls.filter((call) => call.path.endsWith('/sendMessage')).length, 1);
 

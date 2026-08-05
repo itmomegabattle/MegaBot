@@ -68,3 +68,5 @@ The production Mini App uses `https://megaorgiabot.ru`; temporary tunnel hosts a
 Next product work: show synchronization state to users, add retry/error feedback, collect completion telemetry, and run repeatable real-device checks on Telegram Desktop, Android and iOS.
 
 Google Sheets uses one stable operational tab, `ОСНОВА`, addressed by its permanent sheet ID. Weekly rotation backs it up before changing dates or clearing slot values, restores native checkboxes, and preserves older generated week tabs as hidden recovery data instead of creating more tabs.
+
+Tasks are now scoped by simultaneous work events. Administrators create and finish events without deleting their history; ordinary and faculty task forms attach an event, and My/Open/Completed/Backlog views filter independently by event. Task assignment supports search by name, Telegram username and competency. Meeting duration is validated from 30 minutes through 6 hours.

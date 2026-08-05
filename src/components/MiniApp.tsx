@@ -21,7 +21,7 @@ import {
   MagnifyingGlass,
   UserCircle,
 } from '@phosphor-icons/react';
-import { Meeting, SimulationState, Task, User } from '../types';
+import { Meeting, SimulationState, Task, User, WorkEvent } from '../types';
 
 /*
 THESIS: MegaBattle is a compact operations surface, not a generic blue card dashboard.
@@ -89,6 +89,12 @@ const taskAssigneeIds = (task: Task) => {
   if (!task.assignedTo) return [];
   return Array.isArray(task.assignedTo) ? task.assignedTo : [task.assignedTo];
 };
+const workEventStatusClass = (status: WorkEvent['status']) => status === 'active'
+  ? 'bg-emerald-50 text-emerald-700'
+  : 'bg-slate-100 text-slate-500';
+const meetingAudienceOptionClass = (selected: boolean) => selected
+  ? 'border-[#0069E0] bg-blue-50 text-[#005BC4]'
+  : 'border-slate-200 bg-white text-slate-700 hover:border-blue-200 hover:text-[#005BC4]';
 const formatDateShort = (value?: string) => {
   if (!value) return '';
   if (/^\d{2}\.\d{2}\.\d{4}$/.test(value)) return value;
@@ -280,6 +286,8 @@ export default function MiniApp({
   const [taskCompetency, setTaskCompetency] = useState('');
   const [taskDeadline, setTaskDeadline] = useState('');
   const [taskAssignedTo, setTaskAssignedTo] = useState<string[]>([]);
+  const [taskAssigneeSearch, setTaskAssigneeSearch] = useState('');
+  const [taskEventId, setTaskEventId] = useState('');
   const [showAllTaskAssignees, setShowAllTaskAssignees] = useState(false);
   const [taskSow, setTaskSow] = useState('');
   const [taskPriority, setTaskPriority] = useState<Task['priority']>('normal');
@@ -307,7 +315,19 @@ export default function MiniApp({
     if (telegramTheme) return telegramTheme === 'dark';
     return window.matchMedia('(prefers-color-scheme: dark)').matches;
   });
-  const [adminSection, setAdminSection] = useState<'team' | 'slots' | 'meetings' | 'tasks' | 'faculties'>('team');
+  const [adminSection, setAdminSection] = useState<'team' | 'events' | 'slots' | 'meetings' | 'tasks' | 'faculties'>('team');
+  const [showEventForm, setShowEventForm] = useState(false);
+  const [eventName, setEventName] = useState('');
+  const [eventDescription, setEventDescription] = useState('');
+  const [eventStartsAt, setEventStartsAt] = useState('');
+  const [eventEndsAt, setEventEndsAt] = useState('');
+  const [eventSaving, setEventSaving] = useState(false);
+  const [eventError, setEventError] = useState('');
+  const [eventNotice, setEventNotice] = useState('');
+  const [myTaskEventFilter, setMyTaskEventFilter] = useState('all');
+  const [openTaskEventFilter, setOpenTaskEventFilter] = useState('all');
+  const [completedTaskEventFilter, setCompletedTaskEventFilter] = useState('all');
+  const [backlogEventFilter, setBacklogEventFilter] = useState('all');
 
   const [newUserRealName, setNewUserRealName] = useState('');
   const [newUserUsername, setNewUserUsername] = useState('');
@@ -325,7 +345,7 @@ export default function MiniApp({
   const [teamError, setTeamError] = useState('');
   const [savingUserId, setSavingUserId] = useState<string | null>(null);
   const [facultyUserDraft, setFacultyUserDraft] = useState({ realName: '', username: '', role: 'faculty_responsible' as User['role'], facultyId: '', competencies: [] as string[] });
-  const [facultyTaskDraft, setFacultyTaskDraft] = useState({ facultyId: '', competency: '', title: '', description: '', deadline: '', assignedTo: [] as string[], reminders: [] as any[] });
+  const [facultyTaskDraft, setFacultyTaskDraft] = useState({ facultyId: '', competency: '', eventId: '', title: '', description: '', deadline: '', assignedTo: [] as string[], reminders: [] as any[] });
   const [facultyTaskErrors, setFacultyTaskErrors] = useState<Record<string, boolean>>({});
   const [editingFacultyTaskId, setEditingFacultyTaskId] = useState<string | null>(null);
   const [newFacultyCompetency, setNewFacultyCompetency] = useState('');
@@ -362,6 +382,27 @@ export default function MiniApp({
 
   const configuredWeekCount = Math.min(maxSlotWeeks, Math.max(2, Number(state.settings?.availabilityWeekCount || 2)));
   const coreTeamUsers = state.users.filter((user) => user.role === 'admin' || user.role === 'organizer');
+  const activeEvents = (state.events || [])
+    .filter((item) => item.status === 'active')
+    .slice()
+    .sort((a, b) => a.name.localeCompare(b.name, 'ru'));
+  const allEvents = (state.events || []).slice().sort((a, b) => (
+    Number(a.status === 'archived') - Number(b.status === 'archived')
+    || a.name.localeCompare(b.name, 'ru')
+  ));
+  const taskEventOptions = editingTaskId ? allEvents : activeEvents;
+  const normalizedTaskAssigneeSearch = taskAssigneeSearch.trim().toLowerCase();
+  const matchedTaskAssignees = normalizedTaskAssigneeSearch
+    ? coreTeamUsers.filter((user) => `${user.realName} ${user.username} ${(user.competencies || []).join(' ')}`.toLowerCase().includes(normalizedTaskAssigneeSearch))
+    : coreTeamUsers;
+  const visibleTaskAssignees = normalizedTaskAssigneeSearch || showAllTaskAssignees
+    ? matchedTaskAssignees
+    : matchedTaskAssignees.slice(0, 3);
+  const filterTasksByEvent = (tasks: Task[], filter: string) => {
+    if (filter === 'all') return tasks;
+    if (filter === 'none') return tasks.filter((task) => !task.eventId);
+    return tasks.filter((task) => task.eventId === filter);
+  };
   const votedUsers = useMemo(
     () => state.users.filter((user) => {
       if (user.role !== 'admin' && user.role !== 'organizer') return false;
@@ -372,17 +413,20 @@ export default function MiniApp({
   );
   const majority = Math.floor(coreTeamUsers.length / 2) + 1;
   const firstWeekFilled = Array.from({ length: 7 }, (_, dayIndex) => (slots[dayIndex] || []).length > 0).some(Boolean);
-  const myTasks = state.tasks.filter((task) => taskAssigneeIds(task).includes(currentUser.id) && task.status !== 'completed');
-  const openTasks = state.tasks.filter((task) => task.status === 'open');
-  const completedTasks = state.tasks
+  const allMyTasks = state.tasks.filter((task) => taskAssigneeIds(task).includes(currentUser.id) && task.status !== 'completed');
+  const allOpenTasks = state.tasks.filter((task) => task.status === 'open');
+  const allCompletedTasks = state.tasks
     .filter((task) => task.status === 'completed')
     .slice()
     .sort((a, b) => String(b.completedAt || b.createdAt || '').localeCompare(String(a.completedAt || a.createdAt || '')));
+  const myTasks = filterTasksByEvent(allMyTasks, myTaskEventFilter);
+  const openTasks = filterTasksByEvent(allOpenTasks, openTaskEventFilter);
+  const completedTasks = filterTasksByEvent(allCompletedTasks, completedTaskEventFilter);
   const latestCompletedTasks = completedTasks.slice(0, 10);
   const scheduledMeetings = state.meetings.filter((meeting) => meeting.status === 'scheduled');
   const visibleScheduledMeetings = showAllMeetings ? scheduledMeetings : scheduledMeetings.slice(0, 3);
   const profileAssignedTasks = state.tasks.filter((task) => taskAssigneeIds(task).includes(currentUser.id));
-  const profileCompletedTasks = completedTasks.filter((task) => taskAssigneeIds(task).includes(currentUser.id));
+  const profileCompletedTasks = allCompletedTasks.filter((task) => taskAssigneeIds(task).includes(currentUser.id));
   const profileDatedCompletedTasks = profileCompletedTasks.filter((task) => (
     Boolean(task.completedAt) && deadlineTimestamp(task.deadline) !== null
   ));
@@ -396,7 +440,7 @@ export default function MiniApp({
     : null;
   const profileCreatedTasks = state.tasks.filter((task) => task.creatorId === currentUser.id);
   const profileCreatedCompletedTasks = profileCreatedTasks.filter((task) => task.status === 'completed');
-  const profileImportantTasks = myTasks.filter((task) => task.priority === 'important' || task.priority === 'critical');
+  const profileImportantTasks = allMyTasks.filter((task) => task.priority === 'important' || task.priority === 'critical');
   const profileCompletedByCompetency = profileCompletedTasks.reduce<Record<string, number>>((acc, task) => {
     const competency = task.competency || 'Без блока';
     acc[competency] = (acc[competency] || 0) + 1;
@@ -420,7 +464,7 @@ export default function MiniApp({
   const profileAge = ageFromBirthday(currentUser.birthday);
   const facultyTasks = state.tasks.filter((task) => task.facultyId);
   const visibleFacultyTasks = showAllFacultyTasks ? facultyTasks : facultyTasks.slice(0, 3);
-  const tasksByCompetency = state.tasks.reduce<Record<string, Task[]>>((acc, task) => {
+  const tasksByCompetency = filterTasksByEvent(state.tasks, backlogEventFilter).reduce<Record<string, Task[]>>((acc, task) => {
     const key = task.competency || 'Без блока';
     if (!acc[key]) acc[key] = [];
     acc[key].push(task);
@@ -773,6 +817,8 @@ export default function MiniApp({
     setTaskCompetency('');
     setTaskDeadline('');
     setTaskAssignedTo([]);
+    setTaskAssigneeSearch('');
+    setTaskEventId('');
     setShowAllTaskAssignees(false);
     setTaskSow('');
     setTaskPriority('normal');
@@ -793,6 +839,8 @@ export default function MiniApp({
     setTaskCompetency(task.competency || '');
     setTaskDeadline(formatDateShort(task.deadline));
     setTaskAssignedTo(taskAssigneeIds(task));
+    setTaskAssigneeSearch('');
+    setTaskEventId(task.eventId || '');
     setTaskSow(task.sow || '');
     setTaskPriority(task.priority || 'normal');
     setTaskReminders(task.reminders?.map((reminder) => ({ ...reminder })) || []);
@@ -810,6 +858,7 @@ export default function MiniApp({
       title: taskTitle.trim() || 'Без названия',
       description: taskDesc.trim(),
       competency: taskCompetency.trim(),
+      eventId: taskEventId,
       deadline: taskDeadline,
       assignedTo: taskAssignedTo,
       sow: taskSow,
@@ -917,6 +966,66 @@ export default function MiniApp({
     } catch (error: any) {
       setTaskError(error.message || 'Не удалось сохранить комментарий.');
       return false;
+    }
+  };
+
+  const submitWorkEvent = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!isAdmin || eventSaving) return;
+    setEventError('');
+    setEventNotice('');
+    if (!eventName.trim()) {
+      setEventError('Укажи название мероприятия.');
+      return;
+    }
+    setEventSaving(true);
+    try {
+      const response = await fetch('/api/event/create', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          requesterId: currentUser.id,
+          name: eventName,
+          description: eventDescription,
+          startsAt: eventStartsAt,
+          endsAt: eventEndsAt,
+        }),
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || 'Не удалось добавить мероприятие');
+      setEventName('');
+      setEventDescription('');
+      setEventStartsAt('');
+      setEventEndsAt('');
+      setShowEventForm(false);
+      setEventNotice('Мероприятие добавлено и доступно в задачах.');
+      await onRefreshState();
+    } catch (error: any) {
+      setEventError(error.message || 'Не удалось добавить мероприятие.');
+    } finally {
+      setEventSaving(false);
+    }
+  };
+
+  const setWorkEventStatus = async (workEvent: WorkEvent, status: WorkEvent['status']) => {
+    if (!isAdmin || eventSaving) return;
+    setEventSaving(true);
+    setEventError('');
+    setEventNotice('');
+    try {
+      const response = await fetch('/api/event/update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ requesterId: currentUser.id, eventId: workEvent.id, status }),
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || 'Не удалось изменить мероприятие');
+      setEventNotice(status === 'archived' ? 'Мероприятие завершено. Его задачи сохранены в истории.' : 'Мероприятие снова активно.');
+      await onRefreshState();
+    } catch (error: any) {
+      setEventError(error.message || 'Не удалось изменить мероприятие.');
+    } finally {
+      setEventSaving(false);
     }
   };
 
@@ -1083,7 +1192,7 @@ export default function MiniApp({
       body: JSON.stringify({ requesterId: currentUser.id, taskId: editingFacultyTaskId, ...facultyTaskDraft }),
     });
     if (res.ok) {
-      setFacultyTaskDraft({ facultyId: faculties[0]?.id || '', competency: '', title: '', description: '', deadline: '', assignedTo: [], reminders: [] });
+      setFacultyTaskDraft({ facultyId: faculties[0]?.id || '', competency: '', eventId: '', title: '', description: '', deadline: '', assignedTo: [], reminders: [] });
       setFacultyTaskErrors({});
       setCollapsedFacultyReminders([]);
       setEditingFacultyTaskId(null);
@@ -1316,9 +1425,10 @@ export default function MiniApp({
         {isAdminPanel && (
           <section className="space-y-4">
             <div className="rounded-2xl border border-blue-100 bg-white p-1.5 shadow-sm" role="tablist" aria-label="Разделы админской панели">
-              <div className="grid grid-cols-5 gap-1">
+              <div className="grid grid-cols-3 gap-1 sm:grid-cols-6">
                 {([
                   ['team', 'Команда'],
+                  ['events', 'Меро'],
                   ['slots', 'Слоты'],
                   ['meetings', 'Встречи'],
                   ['tasks', 'Задачи'],
@@ -1337,6 +1447,60 @@ export default function MiniApp({
                 ))}
               </div>
             </div>
+
+            {adminSection === 'events' && (
+              <div className="space-y-4">
+                <div className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="min-w-0">
+                      <h2 className="font-black">Мероприятия в работе</h2>
+                      <p className="mt-1 text-sm font-semibold text-slate-500">Мероприятие объединяет задачи и фильтры. Одновременно активными могут быть несколько.</p>
+                    </div>
+                    <button type="button" onClick={() => setShowEventForm((value) => !value)} className={`${primaryCompactButtonClass} w-full sm:w-auto`}>
+                      {showEventForm ? <X className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
+                      {showEventForm ? 'Закрыть' : 'Добавить мероприятие'}
+                    </button>
+                  </div>
+                  {eventNotice && <p role="status" className="mt-3 rounded-2xl bg-emerald-50 px-3 py-2 text-sm font-bold text-emerald-800">{eventNotice}</p>}
+                  {eventError && <p role="alert" className="mt-3 rounded-2xl bg-rose-50 px-3 py-2 text-sm font-bold text-rose-800">{eventError}</p>}
+                </div>
+
+                {showEventForm && (
+                  <form onSubmit={submitWorkEvent} className="space-y-3 rounded-3xl border border-blue-100 bg-white p-4 shadow-sm animate-in fade-in slide-in-from-top-2 duration-200">
+                    <Field label="Название"><input value={eventName} onChange={(event) => setEventName(event.target.value)} className={inputClass} placeholder="Например, MegaBattle 2027" /></Field>
+                    <Field label="Описание"><textarea value={eventDescription} onChange={(event) => setEventDescription(event.target.value)} className={inputClass} rows={3} placeholder="Коротко: что проводим и для кого" /></Field>
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                      <Field label="Начало"><DatePickerField value={eventStartsAt} onChange={setEventStartsAt} placeholder="Не указано" /></Field>
+                      <Field label="Завершение"><DatePickerField value={eventEndsAt} onChange={setEventEndsAt} placeholder="Не указано" /></Field>
+                    </div>
+                    <button disabled={eventSaving} className={`${primaryButtonClass} disabled:opacity-60`}>{eventSaving ? 'Сохраняю...' : 'Создать мероприятие'}</button>
+                  </form>
+                )}
+
+                <div className="space-y-2">
+                  {allEvents.length === 0 ? <EmptyState text="Добавь первое мероприятие, чтобы разделять задачи" /> : allEvents.map((workEvent) => {
+                    const eventTaskCount = state.tasks.filter((task) => task.eventId === workEvent.id).length;
+                    return (
+                      <div key={workEvent.id} className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
+                        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                          <div className="min-w-0">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <h3 className="break-words font-black">{workEvent.name}</h3>
+                              <span className={`rounded-full px-2.5 py-1 text-xs font-black ${workEventStatusClass(workEvent.status)}`}>{workEvent.status === 'active' ? 'В работе' : 'Завершено'}</span>
+                            </div>
+                            {workEvent.description && <p className="mt-2 break-words text-sm text-slate-500">{workEvent.description}</p>}
+                            <p className="mt-2 text-xs font-bold text-slate-500">Задач: {eventTaskCount}{workEvent.startsAt || workEvent.endsAt ? ` · ${workEvent.startsAt || '…'} — ${workEvent.endsAt || '…'}` : ''}</p>
+                          </div>
+                          <button type="button" disabled={eventSaving} onClick={() => setWorkEventStatus(workEvent, workEvent.status === 'active' ? 'archived' : 'active')} className={`${secondaryButtonClass} w-full shrink-0 sm:w-auto disabled:opacity-60`}>
+                            {workEvent.status === 'active' ? 'Завершить' : 'Вернуть в работу'}
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
 
             {adminSection === 'slots' && (
               <div className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
@@ -1374,7 +1538,7 @@ export default function MiniApp({
                       <Field label="Время"><input type="time" value={meetingTime} onChange={(event) => setMeetingTime(event.target.value)} className={inputClass} /></Field>
                       <Field label="Длительность">
                         <select value={meetingDuration} onChange={(event) => setMeetingDuration(event.target.value)} className={selectClass}>
-                          <option value="0.5">30 минут</option><option value="1">1 час</option><option value="1.5">1,5 часа</option><option value="2">2 часа</option>
+                          <option value="0.5">30 минут</option><option value="1">1 час</option><option value="1.5">1,5 часа</option><option value="2">2 часа</option><option value="2.5">2,5 часа</option><option value="3">3 часа</option><option value="4">4 часа</option><option value="5">5 часов</option><option value="6">6 часов</option>
                         </select>
                       </Field>
                     </div>
@@ -1448,7 +1612,7 @@ export default function MiniApp({
                     </button>
                   </div>
                 </div>
-                {showTaskLog && <div className="mt-4"><TaskLogView tasksByCompetency={tasksByCompetency} users={state.users} /></div>}
+                {showTaskLog && <div className="mt-4 space-y-3"><TaskEventFilter label="Бэклог" value={backlogEventFilter} onChange={setBacklogEventFilter} events={allEvents} /><TaskLogView tasksByCompetency={tasksByCompetency} users={state.users} events={allEvents} /></div>}
               </div>
             )}
           </section>
@@ -1476,15 +1640,15 @@ export default function MiniApp({
                     const date = dateForSlotDay(absoluteDayIndex);
                     return (
                       <div key={`${weekIndex}-${day.full}`} className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
-                        <div className="mb-3 flex items-center justify-between gap-3">
-                          <div>
-                            <h2 className="text-base font-black">{day.full}, {formatDayMonth(date)}</h2>
+                        <div className="mb-3 grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
+                          <div className="min-w-0">
+                            <h2 className="whitespace-nowrap text-sm font-black leading-tight sm:text-base"><span className="sm:hidden">{day.short}</span><span className="hidden sm:inline">{day.full}</span>, {formatDayMonth(date)}</h2>
                             <p className="text-xs text-slate-500">
                               {selected.length ? `${selected.length} ч. свободно` : 'Пока ничего не выбрано'}
                             </p>
                           </div>
-                          <div className="flex flex-col gap-2 sm:flex-row">
-                            <button onClick={() => selectWholeDay(absoluteDayIndex)} className={secondaryButtonClass}>
+                          <div className="min-w-0">
+                            <button onClick={() => selectWholeDay(absoluteDayIndex)} className={`${secondaryButtonClass} min-h-11 whitespace-nowrap px-2.5`}>
                               {selected.length === hours.length ? 'Снять' : 'Весь день'}
                             </button>
                           </div>
@@ -1748,7 +1912,7 @@ export default function MiniApp({
                 </Field>
                 <Field label="Длительность">
                   <select value={meetingDuration} onChange={(event) => setMeetingDuration(event.target.value)} className={selectClass}>
-                    <option value="0.5">30 минут</option><option value="1">1 час</option><option value="1.5">1,5 часа</option><option value="2">2 часа</option>
+                    <option value="0.5">30 минут</option><option value="1">1 час</option><option value="1.5">1,5 часа</option><option value="2">2 часа</option><option value="2.5">2,5 часа</option><option value="3">3 часа</option><option value="4">4 часа</option><option value="5">5 часов</option><option value="6">6 часов</option>
                   </select>
                 </Field>
               </div>
@@ -1898,6 +2062,14 @@ export default function MiniApp({
                 <Field label="Описание">
                   <textarea value={taskDesc} onChange={(e) => setTaskDesc(e.target.value)} className={inputClass} rows={3} />
                 </Field>
+                <Field label="Мероприятие">
+                  <select value={taskEventId} onChange={(event) => setTaskEventId(event.target.value)} className={selectClass}>
+                    <option value="">Без мероприятия</option>
+                    {taskEventOptions.map((workEvent) => (
+                      <option key={workEvent.id} value={workEvent.id}>{workEvent.name}{workEvent.status === 'archived' ? ' · завершено' : ''}</option>
+                    ))}
+                  </select>
+                </Field>
                 <Field label="Блок">
                   <select value={taskCompetency} onChange={(e) => selectTaskCompetency(e.target.value)} className={selectClass}>
                     <option value="">Выбери блок задачи</option>
@@ -1922,6 +2094,16 @@ export default function MiniApp({
                 <Field label="Исполнитель">
                   <div className="space-y-2 rounded-2xl border border-slate-200 bg-slate-50 p-2">
                     <div className="px-1 text-xs font-bold text-slate-500">Никого не выбирай, если задача открытая.</div>
+                    <label className="relative block">
+                      <MagnifyingGlass className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                      <input
+                        value={taskAssigneeSearch}
+                        onChange={(event) => setTaskAssigneeSearch(event.target.value)}
+                        className={`${inputClass} pl-10`}
+                        placeholder="Найти по имени, username или блоку"
+                        aria-label="Поиск исполнителя"
+                      />
+                    </label>
                     <button
                       type="button"
                       onClick={() => setTaskAssignedTo(taskAssignedTo.length === coreTeamUsers.length ? [] : coreTeamUsers.map((user) => user.id))}
@@ -1930,14 +2112,14 @@ export default function MiniApp({
                       <UsersThree className="h-4 w-4" />
                       {taskAssignedTo.length === coreTeamUsers.length ? 'Снять выбор со всей команды' : 'Назначить всей команде'}
                     </button>
-                    {coreTeamUsers.length > 3 && (
+                    {!normalizedTaskAssigneeSearch && coreTeamUsers.length > 3 && (
                       <ListDisclosure
                         expanded={showAllTaskAssignees}
                         onToggle={() => setShowAllTaskAssignees((value) => !value)}
                         total={coreTeamUsers.length}
                       />
                     )}
-                    {(showAllTaskAssignees ? coreTeamUsers : coreTeamUsers.slice(0, 3)).map((user) => (
+                    {visibleTaskAssignees.map((user) => (
                       <label key={user.id} className="flex items-center justify-between rounded-xl bg-white px-3 py-2 text-sm font-semibold">
                         <span>{user.realName}</span>
                         <input
@@ -1947,6 +2129,7 @@ export default function MiniApp({
                         />
                       </label>
                     ))}
+                    {normalizedTaskAssigneeSearch && visibleTaskAssignees.length === 0 && <p className="px-2 py-3 text-center text-sm font-bold text-slate-500">Никого не нашли</p>}
                   </div>
                 </Field>
                 <Field label="ТЗ">
@@ -1981,14 +2164,19 @@ export default function MiniApp({
                 </button>
               </form>
             )}
-            <TaskList title="Мои задачи" tasks={myTasks} users={state.users} currentUser={currentUser} actionLabel="Готово" onAction={openCompletionPrompt} onRelease={onReleaseTask} onEdit={startTaskEdit} onNotify={notifyTaskAssignees} onSaveComment={saveTaskComment} />
-            <TaskList title="Открытые задачи" tasks={openTasks} users={state.users} currentUser={currentUser} actionLabel="Взять" onAction={claimTask} onEdit={startTaskEdit} onNotify={notifyTaskAssignees} onSaveComment={saveTaskComment} />
+            <TaskEventFilter label="Мои задачи" value={myTaskEventFilter} onChange={setMyTaskEventFilter} events={allEvents} />
+            <TaskList title="Мои задачи" tasks={myTasks} users={state.users} events={allEvents} currentUser={currentUser} actionLabel="Готово" onAction={openCompletionPrompt} onRelease={onReleaseTask} onEdit={startTaskEdit} onNotify={notifyTaskAssignees} onSaveComment={saveTaskComment} />
+            <TaskEventFilter label="Открытые задачи" value={openTaskEventFilter} onChange={setOpenTaskEventFilter} events={allEvents} />
+            <TaskList title="Открытые задачи" tasks={openTasks} users={state.users} events={allEvents} currentUser={currentUser} actionLabel="Взять" onAction={claimTask} onEdit={startTaskEdit} onNotify={notifyTaskAssignees} onSaveComment={saveTaskComment} />
             <button onClick={() => setShowCompletedTasks((value) => !value)} className={secondaryButtonClass}>
               {showCompletedTasks ? <Minus className="h-4 w-4" /> : <Check className="h-4 w-4" />}
               {showCompletedTasks ? 'Скрыть выполненные задачи' : 'Посмотреть выполненные задачи'}
             </button>
             {showCompletedTasks && (
-              <TaskList title="Последние выполненные" tasks={latestCompletedTasks} users={state.users} currentUser={currentUser} actionLabel="Готово" onAction={() => undefined} onSaveComment={saveTaskComment} />
+              <>
+                <TaskEventFilter label="Выполненные задачи" value={completedTaskEventFilter} onChange={setCompletedTaskEventFilter} events={allEvents} />
+                <TaskList title="Последние выполненные" tasks={latestCompletedTasks} users={state.users} events={allEvents} currentUser={currentUser} actionLabel="Готово" onAction={() => undefined} onSaveComment={saveTaskComment} />
+              </>
             )}
 
             <div className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
@@ -2008,7 +2196,10 @@ export default function MiniApp({
                 </div>
               </div>
               {showTaskLog && (
-                <TaskLogView tasksByCompetency={tasksByCompetency} users={state.users} />
+                <div className="mt-4 space-y-3">
+                  <TaskEventFilter label="Бэклог" value={backlogEventFilter} onChange={setBacklogEventFilter} events={allEvents} />
+                  <TaskLogView tasksByCompetency={tasksByCompetency} users={state.users} events={allEvents} />
+                </div>
               )}
             </div>
           </section>
@@ -2413,6 +2604,12 @@ export default function MiniApp({
 
                 <form onSubmit={createFacultyTask} className="space-y-3 rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
                   <h2 className="font-black">{editingFacultyTaskId ? 'Редактировать задачу' : 'Задача факультету'}</h2>
+                  <Field label="Мероприятие">
+                    <select value={facultyTaskDraft.eventId} onChange={(event) => setFacultyTaskDraft((current) => ({ ...current, eventId: event.target.value }))} className={selectClass}>
+                      <option value="">Без мероприятия</option>
+                      {(editingFacultyTaskId ? allEvents : activeEvents).map((workEvent) => <option key={workEvent.id} value={workEvent.id}>{workEvent.name}{workEvent.status === 'archived' ? ' · завершено' : ''}</option>)}
+                    </select>
+                  </Field>
                   <Field label="Факультет">
                     <select value={facultyTaskDraft.facultyId} onChange={(e) => setFacultyTaskScope(e.target.value)} className={`${selectClass} ${facultyTaskErrors.facultyId ? 'border-rose-300 bg-rose-50 focus:border-rose-500 focus:shadow-[0_0_0_4px_rgba(244,63,94,0.12)]' : ''}`}>
                       <option value="">Выбери факультет</option>
@@ -2515,7 +2712,7 @@ export default function MiniApp({
                   </Field>
                   <button className={primaryButtonClass}>{editingFacultyTaskId ? 'Сохранить изменения' : 'Назначить задачу'}</button>
                   {editingFacultyTaskId && (
-                    <button type="button" onClick={() => { setEditingFacultyTaskId(null); setCollapsedFacultyReminders([]); setFacultyTaskDraft({ facultyId: faculties[0]?.id || '', competency: '', title: '', description: '', deadline: '', assignedTo: [], reminders: [] }); }} className={secondaryButtonClass}>
+                    <button type="button" onClick={() => { setEditingFacultyTaskId(null); setCollapsedFacultyReminders([]); setFacultyTaskDraft({ facultyId: faculties[0]?.id || '', competency: '', eventId: '', title: '', description: '', deadline: '', assignedTo: [], reminders: [] }); }} className={secondaryButtonClass}>
                       Отмена
                     </button>
                   )}
@@ -2560,6 +2757,7 @@ export default function MiniApp({
                                     setFacultyTaskDraft({
                                       facultyId: task.facultyId || '',
                                       competency: task.competency || '',
+                                      eventId: task.eventId || '',
                                       title: task.title,
                                       description: task.description,
                                       deadline: formatDateShort(task.deadline),
@@ -2806,7 +3004,7 @@ function MeetingAudiencePicker({ value, onChange }: { value: 'general' | 'custom
             type="button"
             aria-pressed={value === option.id}
             onClick={() => onChange(option.id)}
-            className={`rounded-2xl border px-3 py-3 text-left transition ${pressClass} ${value === option.id ? 'border-[#0069E0] bg-blue-50 text-[#005BC4]' : 'border-slate-200 bg-white text-slate-700 hover:border-blue-200 hover:text-[#005BC4]'}`}
+            className={`rounded-2xl border px-3 py-3 text-left transition ${pressClass} ${meetingAudienceOptionClass(value === option.id)}`}
           >
             <span className="block text-sm font-black">{option.title}</span>
             <span className="mt-1 block text-xs font-semibold opacity-75">{option.description}</span>
@@ -2817,10 +3015,26 @@ function MeetingAudiencePicker({ value, onChange }: { value: 'general' | 'custom
   );
 }
 
+function TaskEventFilter({ label, value, onChange, events }: { label: string; value: string; onChange: (value: string) => void; events: WorkEvent[] }) {
+  return (
+    <div className="rounded-2xl border border-blue-100 bg-white p-3 shadow-sm">
+      <label className="grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(180px,45%)] sm:items-center">
+        <span className="text-xs font-black uppercase tracking-wide text-slate-500">Фильтр · {label}</span>
+        <select value={value} onChange={(event) => onChange(event.target.value)} className={`${selectClass} min-w-0`} aria-label={`Фильтр по мероприятию: ${label}`}>
+          <option value="all">Все мероприятия</option>
+          <option value="none">Без мероприятия</option>
+          {events.map((workEvent) => <option key={workEvent.id} value={workEvent.id}>{workEvent.name}{workEvent.status === 'archived' ? ' · завершено' : ''}</option>)}
+        </select>
+      </label>
+    </div>
+  );
+}
+
 function TaskList({
   title,
   tasks,
   users,
+  events,
   currentUser,
   actionLabel,
   onAction,
@@ -2832,6 +3046,7 @@ function TaskList({
   title: string;
   tasks: Task[];
   users: User[];
+  events: WorkEvent[];
   currentUser: User;
   actionLabel: string;
   onAction: (taskId: string) => void;
@@ -2860,23 +3075,27 @@ function TaskList({
         visibleTasks.map((task) => {
           const expanded = expandedTaskId === task.id;
           const creator = users.find((user) => user.id === task.creatorId);
+          const workEvent = events.find((item) => item.id === task.eventId);
           const executors = taskAssigneeIds(task).map((id) => users.find((user) => user.id === id)).filter(Boolean) as User[];
           const isMine = taskAssigneeIds(task).includes(currentUser.id);
           const canCoordinate = currentUser.role === 'admin' || task.creatorId === currentUser.id;
           return (
           <div key={task.id} className={`rounded-3xl border border-blue-100 bg-white p-4 shadow-sm ${pressClass}`} onClick={() => setExpandedTaskId(expanded ? null : task.id)}>
-            <div className="flex items-start justify-between gap-3">
+            <div className="flex flex-col items-stretch gap-3 min-[380px]:flex-row min-[380px]:items-start min-[380px]:justify-between">
               <div className="min-w-0">
                 <h3 className="font-black">{task.title}</h3>
                 <p className="mt-1 text-sm text-slate-500">{task.description}</p>
               </div>
               {task.status !== 'completed' && (
-                <button onClick={(event) => { event.stopPropagation(); onAction(task.id); }} className={`mega-primary-button shrink-0 rounded-full bg-[#0069E0] px-3 py-2 text-xs font-black text-white hover:bg-[#1677E8] active:bg-[#0058BD] ${pressClass}`}>
+                <button onClick={(event) => { event.stopPropagation(); onAction(task.id); }} className={`mega-primary-button w-full shrink-0 rounded-full bg-[#0069E0] px-3 py-2 text-xs font-black text-white hover:bg-[#1677E8] active:bg-[#0058BD] min-[380px]:w-auto ${pressClass}`}>
                   {actionLabel}
                 </button>
               )}
             </div>
             <div className="mt-3 flex flex-wrap gap-2 text-xs font-bold text-slate-500">
+              <span className="max-w-full truncate rounded-full bg-slate-950 px-2.5 py-1 text-white">
+                {workEvent?.name || 'Без мероприятия'}
+              </span>
               <span className="rounded-full bg-blue-50 px-2.5 py-1 text-[#0069E0]">
                 {task.competency || 'Без блока'}
               </span>
@@ -2893,6 +3112,7 @@ function TaskList({
             {expanded && (
               <div className="mt-4 space-y-2 border-t border-slate-100 pt-4 text-sm text-slate-600" onClick={(event) => event.stopPropagation()}>
                 {creator && <InfoRow label="Автор" value={creator.realName} href={telegramLink(creator.username)} />}
+                <InfoRow label="Мероприятие" value={workEvent?.name || 'Без мероприятия'} />
                 <InfoRow label="Блок" value={task.competency || 'Без блока'} />
                 <InfoRow label="Статус" value={task.status === 'open' ? 'Открытая' : task.status === 'completed' ? 'Готово' : 'В работе'} />
                 <InfoRow label="Исполнители" value={executors.length ? executors.map((user) => user.realName).join(', ') : 'пока никто'} />
@@ -2978,7 +3198,7 @@ function TaskList({
   );
 }
 
-function TaskLogView({ tasksByCompetency, users }: { tasksByCompetency: Record<string, Task[]>; users: User[] }) {
+function TaskLogView({ tasksByCompetency, users, events }: { tasksByCompetency: Record<string, Task[]>; users: User[]; events: WorkEvent[] }) {
   const blockNames = Object.keys(tasksByCompetency).sort((a, b) => a.localeCompare(b, 'ru'));
   const [expandedBlocks, setExpandedBlocks] = useState<string[]>([]);
   if (blockNames.length === 0) return <EmptyState text="В логе пока нет задач" />;
@@ -3013,6 +3233,7 @@ function TaskLogView({ tasksByCompetency, users }: { tasksByCompetency: Record<s
               .slice(0, expandedBlocks.includes(blockName) ? tasksByCompetency[blockName].length : 3)
               .map((task) => {
                 const creator = users.find((user) => user.id === task.creatorId);
+                const workEvent = events.find((item) => item.id === task.eventId);
                 const executors = taskAssigneeIds(task)
                   .map((id) => users.find((user) => user.id === id)?.realName)
                   .filter(Boolean)
@@ -3022,6 +3243,7 @@ function TaskLogView({ tasksByCompetency, users }: { tasksByCompetency: Record<s
                     <div className="flex items-start justify-between gap-3">
                       <div>
                         <div className="font-black">{task.title}</div>
+                        <div className="mt-1 text-xs font-black text-[#0069E0]">{workEvent?.name || 'Без мероприятия'}</div>
                         <div className="mt-1 text-xs text-slate-500">{task.description}</div>
                       </div>
                       <span className="shrink-0 rounded-full bg-blue-50 px-2.5 py-1 text-xs font-black text-[#0069E0]">

@@ -210,7 +210,21 @@ textarea:focus-visible {
 }
 
 .mega-shell main {
+  width: 100%;
+  padding-inline: clamp(10px, 4vw, 16px);
   padding-bottom: calc(env(safe-area-inset-bottom) + 148px);
+}
+
+.mega-shell :is(main, section, form, fieldset, label, div) {
+  min-width: 0;
+}
+
+.mega-shell :is(section, form, input, select, textarea) {
+  max-width: 100%;
+}
+
+.mega-shell :is(h1, h2, h3, p, span, button, a) {
+  overflow-wrap: anywhere;
 }
 
 .mega-shell section {

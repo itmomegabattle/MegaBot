@@ -50,6 +50,17 @@ export interface TaskAssigneeNote {
   updatedAt?: string;
 }
 
+export interface WorkEvent {
+  id: string;
+  name: string;
+  description?: string;
+  startsAt?: string;
+  endsAt?: string;
+  status: 'active' | 'archived';
+  createdAt: string;
+  createdBy?: string;
+}
+
 export interface TaskReminder {
   id: string;
   type: 'before_deadline' | 'repeat';
@@ -75,6 +86,7 @@ export interface Task {
   completedAt?: string;
   timeSpentMinutes?: number;
   facultyId?: string;
+  eventId?: string;
   reminders?: TaskReminder[];
   assigneeNotes?: Record<string, TaskAssigneeNote>;
   completionComments?: Record<string, string>;
@@ -101,6 +113,7 @@ export interface SimulationState {
   competencies?: string[];
   availabilities: Record<string, Availability>;
   meetings: Meeting[];
+  events?: WorkEvent[];
   tasks: Task[];
   messages: Record<string, BotMessage[]>;
   settings?: {

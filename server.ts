@@ -7,7 +7,7 @@ import fs from 'fs';
 import crypto from 'crypto';
 import { createServer as createViteServer } from 'vite';
 import { ProxyAgent } from 'undici';
-import { SimulationState, User, Availability, Meeting, Task, BotMessage, Faculty, TaskReminder } from './src/types.js';
+import { SimulationState, User, Availability, Meeting, Task, BotMessage, Faculty, TaskReminder, WorkEvent } from './src/types.js';
 import {
   buildUserMappingReport,
   currentMoscowWeekStart,
@@ -93,6 +93,7 @@ function configuredWebAppUrl() {
 const INITIAL_USERS: User[] = [];
 const INITIAL_AVAILABILITIES: Record<string, Availability> = {};
 const INITIAL_MEETINGS: Meeting[] = [];
+const INITIAL_EVENTS: WorkEvent[] = [];
 const INITIAL_TASKS: Task[] = [];
 const INITIAL_MESSAGES: Record<string, BotMessage[]> = {};
 const DEFAULT_FACULTIES: Faculty[] = ['КТУ', 'НОЖ', 'ТИНТ', 'ФТМФ', 'ФТМИ'].map((name) => ({
@@ -108,6 +109,7 @@ function createEmptyState(): SimulationState {
     competencies: [],
     availabilities: { ...INITIAL_AVAILABILITIES },
     meetings: [...INITIAL_MEETINGS],
+    events: [...INITIAL_EVENTS],
     tasks: [...INITIAL_TASKS],
     messages: { ...INITIAL_MESSAGES },
     settings: {},
@@ -357,6 +359,7 @@ function taskDurationLabel(minutes?: number) {
 
 function taskDetailsText(task: Task, state: SimulationState) {
   const creator = state.users.find((user) => user.id === task.creatorId);
+  const workEvent = state.events?.find((item) => item.id === task.eventId);
   const executors = assignedIds(task)
     .map((id) => state.users.find((user) => user.id === id))
     .filter(Boolean) as User[];
@@ -377,7 +380,7 @@ function taskDetailsText(task: Task, state: SimulationState) {
   const completionNotes = Object.entries(task.completionComments || {})
     .filter(([, comment]) => String(comment || '').trim())
     .map(([id, comment]) => `• ${state.users.find((user) => user.id === id)?.realName || 'Исполнитель'}: ${comment}`);
-  return `*${task.title}*\n\n${task.description}\n\n*Блок:* ${task.competency || 'не указан'}\n*Приоритет:* ${taskPriorityLabel(task.priority)}\n*Автор:* ${userMention(creator)}\n*Срок:* ${formatShortDate(task.deadline)}\n*Исполнитель:* ${executorText}${task.timeSpentMinutes ? `\n*Затрачено:* ${taskDurationLabel(task.timeSpentMinutes)}` : ''}${task.sow ? `\n\n*ТЗ:* ${task.sow}` : ''}${progressNotes.length ? `\n\n*Комментарии по работе:*\n${progressNotes.join('\n')}` : ''}${completionNotes.length ? `\n\n*Комментарий при завершении:*\n${completionNotes.join('\n')}` : ''}${task.tips?.length ? `\n\n*Подсказки:*\n${task.tips.map((tip) => `• ${tip}`).join('\n')}` : ''}`;
+  return `*${task.title}*\n\n${task.description}\n\n*Мероприятие:* ${workEvent?.name || 'без мероприятия'}\n*Блок:* ${task.competency || 'не указан'}\n*Приоритет:* ${taskPriorityLabel(task.priority)}\n*Автор:* ${userMention(creator)}\n*Срок:* ${formatShortDate(task.deadline)}\n*Исполнитель:* ${executorText}${task.timeSpentMinutes ? `\n*Затрачено:* ${taskDurationLabel(task.timeSpentMinutes)}` : ''}${task.sow ? `\n\n*ТЗ:* ${task.sow}` : ''}${progressNotes.length ? `\n\n*Комментарии по работе:*\n${progressNotes.join('\n')}` : ''}${completionNotes.length ? `\n\n*Комментарий при завершении:*\n${completionNotes.join('\n')}` : ''}${task.tips?.length ? `\n\n*Подсказки:*\n${task.tips.map((tip) => `• ${tip}`).join('\n')}` : ''}`;
 }
 
 function meetingDetailsText(meeting: Meeting, state: SimulationState) {
@@ -583,6 +586,7 @@ function loadDatabase(): SimulationState {
   if (!Array.isArray(state.facultyCompetencies)) state.facultyCompetencies = [];
   if (!state.availabilities) state.availabilities = {};
   if (!Array.isArray(state.meetings)) state.meetings = [];
+  if (!Array.isArray(state.events)) state.events = [];
   if (!Array.isArray(state.tasks)) state.tasks = [];
   if (!state.messages) state.messages = {};
   if (!state.settings) state.settings = {};
@@ -620,6 +624,7 @@ function loadDatabase(): SimulationState {
       task.timeSpentMinutes = Number.isFinite(minutes) && minutes > 0 ? Math.round(minutes) : undefined;
     }
     if (task.facultyId === undefined) task.facultyId = '';
+    if (task.eventId === undefined) task.eventId = '';
     if (!Array.isArray(task.reminders)) task.reminders = [];
     if (!task.assigneeNotes || typeof task.assigneeNotes !== 'object') task.assigneeNotes = {};
     if (!task.completionComments || typeof task.completionComments !== 'object') task.completionComments = {};
@@ -735,6 +740,8 @@ async function startServer() {
       '/meeting/update': 'requesterId',
       '/meeting/delete': 'requesterId',
       '/meeting/rsvp': 'requesterId',
+      '/event/create': 'requesterId',
+      '/event/update': 'requesterId',
       '/task/create': 'creatorId',
       '/task/update': 'requesterId',
       '/task/comment': 'requesterId',
@@ -783,6 +790,7 @@ async function startServer() {
     taskDeadline?: string;
     taskCompetency?: string;
     taskPriority?: Task['priority'];
+    taskEventId?: string;
     completionTaskId?: string;
     completionTimeMinutes?: number;
   }>();
@@ -2727,6 +2735,22 @@ async function startServer() {
         return res.json({ ok: true });
       }
 
+      if (session?.flow === 'task_create_event') {
+        const activeEvents = (state.events || []).filter((item) => item.status === 'active');
+        const workEvent = activeEvents.find((item) => item.name.toLowerCase() === normalizedText);
+        if (!workEvent && normalizedText !== 'без мероприятия') {
+          await sendTelegramKeyboard(chatId, 'Выбери мероприятие кнопкой.', [
+            ...activeEvents.map((item) => [item.name]),
+            ['Без мероприятия'],
+            ['Назад'],
+          ], false, user);
+          return res.json({ ok: true });
+        }
+        chatSessions.set(chatKey, { ...session, flow: 'task_create_title', taskEventId: workEvent?.id || '' });
+        await sendTelegramKeyboard(chatId, 'Напиши название задачи.', [['Назад']], false, user);
+        return res.json({ ok: true });
+      }
+
       if (session?.flow === 'task_create_title') {
         chatSessions.set(chatKey, { ...session, flow: 'task_create_description', taskTitle: text.trim() });
         await sendTelegramKeyboard(chatId, 'Напиши короткое описание задачи.', [['Назад']], false, user);
@@ -2803,6 +2827,7 @@ async function startServer() {
           assignedTo: assigneeIds.length ? assigneeIds : null,
           creatorId: user.id,
           competency: session.taskCompetency || '',
+          eventId: session.taskEventId || '',
           sow: '',
           tips: [],
           status: assigneeIds.length ? 'assigned' : 'open',
@@ -2904,8 +2929,18 @@ async function startServer() {
         );
         return res.json({ ok: true });
       } else if (normalizedText === 'создать задачу') {
-        chatSessions.set(chatKey, { flow: 'task_create_title' });
-        await sendTelegramKeyboard(chatId, 'Напиши название задачи.', [['Назад']], false, user);
+        const activeEvents = (state.events || []).filter((item) => item.status === 'active');
+        if (activeEvents.length) {
+          chatSessions.set(chatKey, { flow: 'task_create_event' });
+          await sendTelegramKeyboard(chatId, 'Для какого мероприятия создаём задачу?', [
+            ...activeEvents.map((item) => [item.name]),
+            ['Без мероприятия'],
+            ['Назад'],
+          ], false, user);
+        } else {
+          chatSessions.set(chatKey, { flow: 'task_create_title', taskEventId: '' });
+          await sendTelegramKeyboard(chatId, 'Напиши название задачи.', [['Назад']], false, user);
+        }
         return res.json({ ok: true });
       } else if (cmd === 'команда') {
         await showTeamPanel(chatId, user, state);
@@ -3250,7 +3285,7 @@ async function startServer() {
   });
 
   app.post('/api/faculty/task/create', async (req, res) => {
-    const { requesterId, facultyId, title, description, deadline, assignedTo, reminders, competency } = req.body;
+    const { requesterId, facultyId, title, description, deadline, assignedTo, reminders, competency, eventId } = req.body;
     const state = loadDatabase();
     if (!isAdminUser(state, requesterId) && !state.users.some((u) => u.id === requesterId && u.role === 'organizer')) {
       return res.status(403).json({ error: 'Создавать задачи факультетам могут только мегаорги' });
@@ -3261,6 +3296,10 @@ async function startServer() {
       : [];
     if (!facultyId || !title || !description || !deadline || assigneeIds.length === 0) {
       return res.status(400).json({ error: 'Заполни факультет, название, описание, дедлайн и исполнителей' });
+    }
+    const cleanEventId = String(eventId || '').trim();
+    if (cleanEventId && !state.events?.some((item) => item.id === cleanEventId && item.status === 'active')) {
+      return res.status(400).json({ error: 'Выбранное мероприятие не найдено или уже завершено' });
     }
     const cleanReminders: TaskReminder[] = Array.isArray(reminders)
       ? reminders.filter((item: any) => Number(item.value) > 0).slice(0, 3).map((item: any, index: number) => ({
@@ -3278,6 +3317,7 @@ async function startServer() {
       assignedTo: assigneeIds,
       creatorId: requesterId,
       facultyId,
+      eventId: cleanEventId,
       competency: String(competency || '').trim() || 'Факультет',
       sow: '',
       tips: [],
@@ -3309,7 +3349,7 @@ async function startServer() {
   });
 
   app.post('/api/faculty/task/update', async (req, res) => {
-    const { requesterId, taskId, title, description, deadline, assignedTo, reminders, facultyId, competency } = req.body;
+    const { requesterId, taskId, title, description, deadline, assignedTo, reminders, facultyId, competency, eventId } = req.body;
     const state = loadDatabase();
     const task = state.tasks.find((item) => item.id === taskId);
     if (!task) return res.status(404).json({ error: 'Задача не найдена' });
@@ -3322,6 +3362,11 @@ async function startServer() {
     if (deadline !== undefined) task.deadline = deadline;
     if (facultyId !== undefined) task.facultyId = facultyId;
     if (competency !== undefined) task.competency = String(competency || '').trim() || 'Факультет';
+    if (eventId !== undefined) {
+      const cleanEventId = String(eventId || '').trim();
+      if (cleanEventId && !state.events?.some((item) => item.id === cleanEventId)) return res.status(400).json({ error: 'Мероприятие не найдено' });
+      task.eventId = cleanEventId;
+    }
     if (Array.isArray(assignedTo)) {
       const assigneeIds = [...new Set(assignedTo.filter(Boolean))]
         .filter((id) => state.users.some((user) => user.id === id && isFacultyUser(user)));
@@ -3402,6 +3447,52 @@ async function startServer() {
     return res.json({ success: true, weeks: weekCount, notified, googleSheets: googleSheetsWeeks });
   });
 
+  app.post('/api/event/create', (req, res) => {
+    const { requesterId, name, description, startsAt, endsAt } = req.body || {};
+    const state = loadDatabase();
+    if (!isAdminUser(state, requesterId)) return res.status(403).json({ error: 'Добавлять мероприятия может только администратор' });
+    const cleanName = String(name || '').trim();
+    if (!cleanName) return res.status(400).json({ error: 'Укажи название мероприятия' });
+    if (state.events?.some((item) => item.status === 'active' && item.name.toLowerCase() === cleanName.toLowerCase())) {
+      return res.status(409).json({ error: 'Активное мероприятие с таким названием уже существует' });
+    }
+    const workEvent: WorkEvent = {
+      id: `event_${Date.now()}_${crypto.randomUUID().slice(0, 8)}`,
+      name: cleanName,
+      description: String(description || '').trim(),
+      startsAt: String(startsAt || '').trim(),
+      endsAt: String(endsAt || '').trim(),
+      status: 'active',
+      createdAt: new Date().toISOString(),
+      createdBy: requesterId,
+    };
+    state.events = [...(state.events || []), workEvent];
+    saveDatabase(state);
+    return res.json({ success: true, event: workEvent });
+  });
+
+  app.post('/api/event/update', (req, res) => {
+    const { requesterId, eventId, name, description, startsAt, endsAt, status } = req.body || {};
+    const state = loadDatabase();
+    if (!isAdminUser(state, requesterId)) return res.status(403).json({ error: 'Изменять мероприятия может только администратор' });
+    const workEvent = state.events?.find((item) => item.id === eventId);
+    if (!workEvent) return res.status(404).json({ error: 'Мероприятие не найдено' });
+    if (name !== undefined) {
+      const cleanName = String(name || '').trim();
+      if (!cleanName) return res.status(400).json({ error: 'Название мероприятия не может быть пустым' });
+      workEvent.name = cleanName;
+    }
+    if (description !== undefined) workEvent.description = String(description || '').trim();
+    if (startsAt !== undefined) workEvent.startsAt = String(startsAt || '').trim();
+    if (endsAt !== undefined) workEvent.endsAt = String(endsAt || '').trim();
+    if (status !== undefined) {
+      if (status !== 'active' && status !== 'archived') return res.status(400).json({ error: 'Неизвестный статус мероприятия' });
+      workEvent.status = status;
+    }
+    saveDatabase(state);
+    return res.json({ success: true, event: workEvent });
+  });
+
   // Save/Update User Availability
   app.post('/api/availability', async (req, res) => {
     const { userId, slots, weekStart, hardUnavailableDays } = req.body;
@@ -3450,6 +3541,10 @@ async function startServer() {
     if (!String(title || '').trim()) return res.status(400).json({ error: 'Укажи название собрания' });
     if (!parseShortDate(String(date || ''))) return res.status(400).json({ error: 'Укажи корректную дату собрания' });
     if (!/^\d{1,2}:\d{2}$/.test(String(time || ''))) return res.status(400).json({ error: 'Укажи время собрания' });
+    const cleanDuration = Number(duration || 1);
+    if (!Number.isFinite(cleanDuration) || cleanDuration < 0.5 || cleanDuration > 6) {
+      return res.status(400).json({ error: 'Длительность собрания должна быть от 30 минут до 6 часов' });
+    }
 
     const cleanParticipants = participants === 'all'
       ? 'all'
@@ -3463,7 +3558,7 @@ async function startServer() {
       type,
       date,
       time,
-      duration,
+      duration: cleanDuration,
       hostId,
       participants: cleanParticipants,
       topic,
@@ -3490,7 +3585,13 @@ async function startServer() {
     if (type) meeting.type = type;
     if (date) meeting.date = date;
     if (time) meeting.time = time;
-    if (duration) meeting.duration = duration;
+    if (duration !== undefined) {
+      const cleanDuration = Number(duration);
+      if (!Number.isFinite(cleanDuration) || cleanDuration < 0.5 || cleanDuration > 6) {
+        return res.status(400).json({ error: 'Длительность собрания должна быть от 30 минут до 6 часов' });
+      }
+      meeting.duration = cleanDuration;
+    }
     if (participants !== undefined) {
       meeting.participants = participants === 'all'
         ? 'all'
@@ -3556,7 +3657,7 @@ async function startServer() {
 
   // Create a new task
   app.post('/api/task/create', async (req, res) => {
-    const { title, description, deadline, assignedTo, sow, tips, priority, creatorId, competency, reminders } = req.body;
+    const { title, description, deadline, assignedTo, sow, tips, priority, creatorId, competency, reminders, eventId } = req.body;
     const state = loadDatabase();
 
     if (!isRegisteredUser(state, creatorId)) {
@@ -3564,6 +3665,10 @@ async function startServer() {
     }
 
     const cleanPriority: Task['priority'] = ['normal', 'important', 'critical'].includes(priority) ? priority : 'normal';
+    const cleanEventId = String(eventId || '').trim();
+    if (cleanEventId && !state.events?.some((item) => item.id === cleanEventId && item.status === 'active')) {
+      return res.status(400).json({ error: 'Выбранное мероприятие не найдено или уже завершено' });
+    }
     const requestedAssigneeIds = Array.isArray(assignedTo) ? assignedTo.filter(Boolean) : assignedTo ? [assignedTo] : [];
     const assigneeIds = [...new Set(requestedAssigneeIds)]
       .filter((id) => state.users.some((user) => user.id === id && !isFacultyUser(user)));
@@ -3576,6 +3681,7 @@ async function startServer() {
       assignedTo: assigneeIds.length === 0 ? null : assigneeIds,
       creatorId,
       competency: String(competency || '').trim(),
+      eventId: cleanEventId,
       sow: sow || '',
       tips: tips || [],
       status: assigneeIds.length ? 'assigned' : 'open',
@@ -3641,7 +3747,7 @@ async function startServer() {
   });
 
   app.post('/api/task/update', async (req, res) => {
-    const { requesterId, taskId, title, description, deadline, assignedTo, sow, priority, competency, reminders } = req.body || {};
+    const { requesterId, taskId, title, description, deadline, assignedTo, sow, priority, competency, reminders, eventId } = req.body || {};
     const state = loadDatabase();
     const task = state.tasks.find((item) => item.id === taskId);
     if (!task) return res.status(404).json({ error: 'Задача не найдена' });
@@ -3654,6 +3760,13 @@ async function startServer() {
     if (description !== undefined) task.description = String(description || '').trim();
     if (deadline !== undefined) task.deadline = String(deadline || '').trim();
     if (competency !== undefined) task.competency = String(competency || '').trim();
+    if (eventId !== undefined) {
+      const cleanEventId = String(eventId || '').trim();
+      if (cleanEventId && !state.events?.some((item) => item.id === cleanEventId)) {
+        return res.status(400).json({ error: 'Мероприятие не найдено' });
+      }
+      task.eventId = cleanEventId;
+    }
     if (sow !== undefined) task.sow = String(sow || '').trim();
     if (priority !== undefined && ['normal', 'important', 'critical'].includes(priority)) task.priority = priority;
     if (reminders !== undefined) task.reminders = normalizeTaskReminders(reminders);
@@ -3928,12 +4041,14 @@ async function startServer() {
       .sort((a, b) => String(a.competency || '').localeCompare(String(b.competency || ''), 'ru') || String(a.createdAt || '').localeCompare(String(b.createdAt || '')))
       .map((task) => {
         const creator = state.users.find((u) => u.id === task.creatorId);
+        const workEvent = state.events?.find((item) => item.id === task.eventId);
         const executors = assignedIds(task)
           .map((id) => state.users.find((u) => u.id === id)?.realName)
           .filter(Boolean)
           .join(', ');
         return `
           <tr>
+            <td>${escapeHtml(workEvent?.name || 'Без мероприятия')}</td>
             <td>${escapeHtml(task.competency || 'Без блока')}</td>
             <td>${escapeHtml(taskStatusLabel(task.status))}</td>
             <td>${escapeHtml(task.title)}</td>
@@ -3958,6 +4073,7 @@ async function startServer() {
           <table border="1">
             <thead>
               <tr>
+                <th>Мероприятие</th>
                 <th>Блок</th>
                 <th>Статус</th>
                 <th>Название</th>
