@@ -22,6 +22,7 @@ import {
   UserCircle,
 } from '@phosphor-icons/react';
 import { Meeting, SimulationState, Task, User, WorkEvent } from '../types';
+import { normalizeAvailabilityConfig } from '../availabilityConfig';
 
 /*
 THESIS: MegaBattle is a compact operations surface, not a generic blue card dashboard.
@@ -67,7 +68,6 @@ const dayLabels = [
   { short: 'Вс', full: 'Воскресенье' },
 ];
 
-const hours = [16, 17, 18, 19, 20, 21, 22, 23];
 const maxSlotWeeks = 5;
 const telegramLink = (username: string) => `https://t.me/${username.replace('@', '')}`;
 const openTelegramProfile = (event: React.MouseEvent<HTMLAnchorElement>, url: string) => {
@@ -252,6 +252,10 @@ export default function MiniApp({
   const [slots, setSlots] = useState<Record<number, number[]>>({});
   const [visibleWeeks, setVisibleWeeks] = useState(2);
   const [savingWeekCount, setSavingWeekCount] = useState(false);
+  const [slotSettingsWeeks, setSlotSettingsWeeks] = useState(2);
+  const [slotSettingsDays, setSlotSettingsDays] = useState<number[]>([0, 1, 2, 3, 4]);
+  const [slotSettingsStartHour, setSlotSettingsStartHour] = useState(17);
+  const [slotSettingsEndHour, setSlotSettingsEndHour] = useState(23);
   const [suggestions, setSuggestions] = useState<MeetingSuggestion[]>([]);
   const [suggesting, setSuggesting] = useState(false);
   const [savingWeek, setSavingWeek] = useState(false);
@@ -379,6 +383,9 @@ export default function MiniApp({
     setShowMeetingForm(false);
   }, [activeTab, isAdmin, setActiveTab]);
 
+  const availabilityConfig = useMemo(() => normalizeAvailabilityConfig(state.settings), [state.settings]);
+  const { activeDays, hours } = availabilityConfig;
+  const activeDayLabels = activeDays.map((dayIndex) => ({ ...dayLabels[dayIndex], dayIndex }));
   const configuredWeekCount = Math.min(maxSlotWeeks, Math.max(2, Number(state.settings?.availabilityWeekCount || 2)));
   const coreTeamUsers = state.users.filter((user) => user.role === 'admin' || user.role === 'organizer');
   const activeEvents = (state.events || [])
@@ -411,7 +418,7 @@ export default function MiniApp({
     [state.availabilities, state.users],
   );
   const majority = Math.floor(coreTeamUsers.length / 2) + 1;
-  const firstWeekFilled = Array.from({ length: 7 }, (_, dayIndex) => (slots[dayIndex] || []).length > 0).some(Boolean);
+  const firstWeekFilled = activeDays.some((dayIndex) => (slots[dayIndex] || []).length > 0);
   const allMyTasks = state.tasks.filter((task) => taskAssigneeIds(task).includes(currentUser.id) && task.status !== 'completed');
   const allOpenTasks = state.tasks.filter((task) => task.status === 'open');
   const allCompletedTasks = state.tasks
@@ -448,18 +455,18 @@ export default function MiniApp({
   const profileTopCompetency = Object.entries(profileCompletedByCompetency)
     .sort((a, b) => b[1] - a[1])[0]?.[0] || 'пока нет данных';
   const profileAvailability = alignedSlots(state.availabilities[currentUser.id]);
-  const profileAvailableHours = Array.from({ length: 7 }, (_, dayIndex) => profileAvailability[dayIndex] || [])
+  const profileAvailableHours = activeDays.map((dayIndex) => profileAvailability[dayIndex] || [])
     .reduce((sum, dayHours) => sum + dayHours.length, 0);
-  const profileAvailableDays = Array.from({ length: 7 }, (_, dayIndex) => profileAvailability[dayIndex] || [])
+  const profileAvailableDays = activeDays.map((dayIndex) => profileAvailability[dayIndex] || [])
     .filter((dayHours) => dayHours.length > 0).length;
-  const profileBestAvailability = Array.from({ length: 7 }, (_, dayIndex) => ({
+  const profileBestAvailability = activeDays.map((dayIndex) => ({
     day: dayLabels[dayIndex].full,
     hours: (profileAvailability[dayIndex] || []).length,
   })).sort((a, b) => b.hours - a.hours)[0];
   const profileUnavailableDays = new Set(alignedUnavailableDays(state.availabilities[currentUser.id]).filter((day) => day < 7));
-  const profileSlotsCompleted = Array.from({ length: 7 }, (_, dayIndex) => (
+  const profileSlotsCompleted = activeDays.some((dayIndex) => (
     (profileAvailability[dayIndex] || []).length > 0 || profileUnavailableDays.has(dayIndex)
-  )).some(Boolean);
+  ));
   const profileAge = ageFromBirthday(currentUser.birthday);
   const facultyTasks = state.tasks.filter((task) => task.facultyId);
   const visibleFacultyTasks = showAllFacultyTasks ? facultyTasks : facultyTasks.slice(0, 3);
@@ -506,6 +513,7 @@ export default function MiniApp({
     () =>
       dayLabels.map((day, dayIndex) => ({
         ...day,
+        dayIndex,
         users: coreTeamUsers
           .map((user) => ({
             ...user,
@@ -541,11 +549,11 @@ export default function MiniApp({
   };
 
   const downloadAvailabilityCsv = () => {
-    const header = ['Имя', 'Telegram', ...dayLabels.map((day) => day.full)];
+    const header = ['Имя', 'Telegram', ...activeDayLabels.map((day) => day.full)];
     const rows = coreTeamUsers.map((user) => [
       user.realName,
       user.username,
-      ...dayLabels.map((_, dayIndex) => formatHours(alignedSlots(state.availabilities[user.id])?.[dayIndex] || [])),
+      ...activeDays.map((dayIndex) => formatHours(alignedSlots(state.availabilities[user.id])?.[dayIndex] || [])),
     ]);
     const csv = [header, ...rows]
       .map((row) => row.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(';'))
@@ -574,7 +582,14 @@ export default function MiniApp({
     setSlots(nextSlots);
   }, [configuredWeekCount, currentUser.id, state.availabilities]);
 
-  const updateAvailabilityWeekCount = async (weeks: number, notifyTeam = false) => {
+  useEffect(() => {
+    setSlotSettingsWeeks(configuredWeekCount);
+    setSlotSettingsDays(activeDays);
+    setSlotSettingsStartHour(availabilityConfig.startHour);
+    setSlotSettingsEndHour(availabilityConfig.endHour);
+  }, [activeDays, availabilityConfig.endHour, availabilityConfig.startHour, configuredWeekCount]);
+
+  const updateAvailabilitySettings = async (notifyTeam = false) => {
     setSavingWeekCount(true);
     setSlotError('');
     setSlotNotice('');
@@ -582,14 +597,21 @@ export default function MiniApp({
       const response = await fetch('/api/availability/weeks', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ requesterId: currentUser.id, weeks, notifyTeam }),
+        body: JSON.stringify({
+          requesterId: currentUser.id,
+          weeks: slotSettingsWeeks,
+          activeDays: slotSettingsDays,
+          startHour: slotSettingsStartHour,
+          endHour: slotSettingsEndHour,
+          notifyTeam,
+        }),
       });
       const body = await response.json();
       if (!response.ok) throw new Error(body.error || 'Не удалось изменить количество недель');
       await onRefreshState();
       setSlotNotice(notifyTeam
         ? `Уведомление отправлено: ${body.notified || 0} получателей.`
-        : `Теперь команда заполняет ${body.weeks} недели вперёд.`);
+        : `Настройки сохранены: ${body.activeDays.length} дн., ${String(body.startHour).padStart(2, '0')}:00–${String(body.endHour).padStart(2, '0')}:00.`);
     } catch (error: any) {
       setSlotError(error.message || 'Не удалось изменить количество недель');
     } finally {
@@ -1401,7 +1423,7 @@ export default function MiniApp({
               <p className="mt-1 text-sm font-semibold text-slate-500">Как распределены доступность и нагрузка</p>
               <div className="mt-4 grid grid-cols-2 gap-px overflow-hidden rounded-2xl border border-blue-100 bg-blue-100">
                 {[
-                  ['Дней со слотами', `${profileAvailableDays} из 7`],
+                  ['Дней со слотами', `${profileAvailableDays} из ${activeDays.length}`],
                   ['Свободных часов', profileAvailableHours],
                   ['Самый свободный день', profileBestAvailability?.hours ? profileBestAvailability.day : '—'],
                   ['Среднее время задачи', profileAverageMinutes ? taskDurationText(profileAverageMinutes) : '—'],
@@ -1503,17 +1525,60 @@ export default function MiniApp({
 
             {adminSection === 'slots' && (
               <div className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
-                <h2 className="font-black">Горизонт заполнения</h2>
-                <p className="mt-1 text-sm font-semibold text-slate-500">Управляй количеством недель в таблице и приложении, затем сообщи команде о новом горизонте.</p>
-                <div className="mt-3 flex flex-wrap gap-2">
-                  <button disabled={savingWeekCount || configuredWeekCount <= 2} onClick={() => updateAvailabilityWeekCount(configuredWeekCount - 1)} className={secondaryButtonClass}>
-                    <Minus className="h-4 w-4" /> Убрать неделю
+                <h2 className="font-black">Правила заполнения слотов</h2>
+                <p className="mt-1 text-sm font-semibold text-slate-500">Эти дни и часы одновременно применяются в Mini App, чате и подборе времени встреч.</p>
+
+                <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
+                  <Field label="Недель вперёд">
+                    <select value={slotSettingsWeeks} onChange={(event) => setSlotSettingsWeeks(Number(event.target.value))} className={inputClass}>
+                      {[2, 3, 4, 5].map((count) => <option key={count} value={count}>{count}</option>)}
+                    </select>
+                  </Field>
+                  <div className="grid grid-cols-2 gap-3">
+                    <Field label="С">
+                      <select value={slotSettingsStartHour} onChange={(event) => {
+                        const hour = Number(event.target.value);
+                        setSlotSettingsStartHour(hour);
+                        setSlotSettingsEndHour((current) => Math.max(current, hour));
+                      }} className={inputClass}>
+                        {Array.from({ length: 24 }, (_, hour) => <option key={hour} value={hour}>{String(hour).padStart(2, '0')}:00</option>)}
+                      </select>
+                    </Field>
+                    <Field label="До">
+                      <select value={slotSettingsEndHour} onChange={(event) => setSlotSettingsEndHour(Number(event.target.value))} className={inputClass}>
+                        {Array.from({ length: 24 - slotSettingsStartHour }, (_, index) => slotSettingsStartHour + index).map((hour) => <option key={hour} value={hour}>{String(hour).padStart(2, '0')}:00</option>)}
+                      </select>
+                    </Field>
+                  </div>
+                </div>
+
+                <fieldset className="mt-4">
+                  <legend className="text-xs font-black text-slate-600">Рабочие дни</legend>
+                  <div className="mt-2 grid grid-cols-4 gap-2 sm:grid-cols-7">
+                    {dayLabels.map((day, dayIndex) => {
+                      const selected = slotSettingsDays.includes(dayIndex);
+                      return (
+                        <button
+                          key={day.short}
+                          type="button"
+                          aria-pressed={selected}
+                          onClick={() => setSlotSettingsDays((current) => selected ? current.filter((value) => value !== dayIndex) : [...current, dayIndex].sort((a, b) => a - b))}
+                          className={`min-h-11 rounded-xl border text-xs font-black ${pressClass} ${selected ? 'border-[#0069E0] bg-[#0069E0] text-white' : 'border-slate-200 bg-slate-50 text-slate-600 hover:bg-blue-50 hover:text-blue-800'}`}
+                        >
+                          {day.short}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </fieldset>
+
+                <p className="mt-3 text-xs font-semibold text-slate-500">Сейчас: {slotSettingsDays.length} дн. · {String(slotSettingsStartHour).padStart(2, '0')}:00–{String(slotSettingsEndHour).padStart(2, '0')}:00</p>
+                <div className="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                  <button disabled={savingWeekCount || !slotSettingsDays.length || slotSettingsEndHour < slotSettingsStartHour} onClick={() => updateAvailabilitySettings(false)} className={`${secondaryButtonClass} w-full disabled:opacity-50`}>
+                    {savingWeekCount ? 'Сохраняю…' : 'Сохранить правила'}
                   </button>
-                  <button disabled={savingWeekCount || configuredWeekCount >= maxSlotWeeks} onClick={() => updateAvailabilityWeekCount(configuredWeekCount + 1)} className={secondaryButtonClass}>
-                    <Plus className="h-4 w-4" /> Добавить неделю
-                  </button>
-                  <button disabled={savingWeekCount} onClick={() => updateAvailabilityWeekCount(configuredWeekCount, true)} className={primaryButtonClass}>
-                    Уведомить команду · {configuredWeekCount}
+                  <button disabled={savingWeekCount || !slotSettingsDays.length || slotSettingsEndHour < slotSettingsStartHour} onClick={() => updateAvailabilitySettings(true)} className={`${primaryButtonClass} w-full disabled:opacity-50`}>
+                    Сохранить и уведомить
                   </button>
                 </div>
                 {slotNotice && <p role="status" className="mt-3 rounded-2xl bg-emerald-50 px-3 py-2 text-sm font-bold text-emerald-800">{slotNotice}</p>}
@@ -1534,7 +1599,7 @@ export default function MiniApp({
                     <Field label="Название"><input value={meetingTitle} onChange={(event) => setMeetingTitle(event.target.value)} className={inputClass} /></Field>
                     <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
                       <Field label="Дата"><DatePickerField value={meetingDate} onChange={setMeetingDate} placeholder="Выбери дату" /></Field>
-                      <Field label="Время"><input type="time" value={meetingTime} onChange={(event) => setMeetingTime(event.target.value)} className={inputClass} /></Field>
+                      <Field label="Время"><input type="time" min={`${String(availabilityConfig.startHour).padStart(2, '0')}:00`} max={`${String(availabilityConfig.endHour).padStart(2, '0')}:00`} value={meetingTime} onChange={(event) => setMeetingTime(event.target.value)} className={inputClass} /></Field>
                       <Field label="Длительность">
                         <select value={meetingDuration} onChange={(event) => setMeetingDuration(event.target.value)} className={selectClass}>
                           <option value="0.5">30 минут</option><option value="1">1 час</option><option value="1.5">1,5 часа</option><option value="2">2 часа</option><option value="2.5">2,5 часа</option><option value="3">3 часа</option><option value="4">4 часа</option><option value="5">5 часов</option><option value="6">6 часов</option>
@@ -1628,13 +1693,13 @@ export default function MiniApp({
                     <div>
                       <h2 className="font-black">{weekIndex === 0 ? 'Эта неделя' : `Неделя ${weekIndex + 1}`}</h2>
                       <p className="text-xs font-semibold text-slate-500">
-                        {formatDayMonth(dateForSlotDay(weekIndex * 7))} - {formatDayMonth(dateForSlotDay(weekIndex * 7 + 6))}
+                        {formatDayMonth(dateForSlotDay(weekIndex * 7 + activeDays[0]))} – {formatDayMonth(dateForSlotDay(weekIndex * 7 + activeDays[activeDays.length - 1]))}
                       </p>
                     </div>
                   </div>
 
-                  {dayLabels.map((day, dayIndex) => {
-                    const absoluteDayIndex = weekIndex * 7 + dayIndex;
+                  {activeDayLabels.map((day) => {
+                    const absoluteDayIndex = weekIndex * 7 + day.dayIndex;
                     const selected = slots[absoluteDayIndex] || [];
                     const date = dateForSlotDay(absoluteDayIndex);
                     return (
@@ -1708,12 +1773,12 @@ export default function MiniApp({
                 <ListDisclosure expanded={showFullCalendar} onToggle={() => setShowFullCalendar((value) => !value)} total={calendarUsers.length} className="mt-3" />
               )}
               <div className="mt-4 overflow-x-auto rounded-2xl border border-slate-100">
-                <table className="w-full min-w-[720px] border-collapse text-left text-xs">
+                <table className="w-full min-w-[560px] border-collapse text-left text-xs">
                   <thead className="bg-slate-50 text-slate-500">
                     <tr>
                       <th className="sticky left-0 z-10 bg-slate-50 px-3 py-2 font-black">Участник</th>
-                      {dayLabels.map((day, dayIndex) => (
-                        <th key={day.short} className="px-3 py-2 text-center font-black">{day.short} {formatDayMonth(dateForSlotDay(dayIndex))}</th>
+                      {activeDayLabels.map((day) => (
+                        <th key={day.short} className="px-3 py-2 text-center font-black">{day.short} {formatDayMonth(dateForSlotDay(day.dayIndex))}</th>
                       ))}
                     </tr>
                   </thead>
@@ -1724,11 +1789,11 @@ export default function MiniApp({
                           <div className="font-black">{user.realName}</div>
                           <div className="font-bold text-[#0069E0]">{user.username}</div>
                         </td>
-                        {dayLabels.map((_, dayIndex) => {
-                          const text = formatHours(alignedSlots(state.availabilities[user.id])?.[dayIndex] || []);
+                        {activeDayLabels.map((day) => {
+                          const text = formatHours(alignedSlots(state.availabilities[user.id])?.[day.dayIndex] || []);
                           const filled = text !== '—';
                           return (
-                            <td key={dayIndex} className="px-2 py-2 align-top">
+                            <td key={day.dayIndex} className="px-2 py-2 align-top">
                               <div className={`min-h-10 rounded-xl px-2 py-1.5 text-center font-bold ${filled ? 'bg-blue-50 text-[#0069E0]' : 'bg-slate-50 text-[#718293]'}`}>{text}</div>
                             </td>
                           );
@@ -1742,8 +1807,8 @@ export default function MiniApp({
 
             <div className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
               <h2 className="font-black">Календарь свободных дней</h2>
-              <div className="mt-3 grid grid-cols-7 gap-1.5">
-                {availabilityByDay.map((day) => {
+              <div className="mt-3 grid gap-1.5" style={{ gridTemplateColumns: `repeat(${activeDays.length}, minmax(0, 1fr))` }}>
+                {availabilityByDay.filter((day) => activeDays.includes(day.dayIndex)).map((day) => {
                   const ratio = coreTeamUsers.length ? day.count / coreTeamUsers.length : 0;
                   const expanded = expandedAvailabilityDay === dayLabels.findIndex((item) => item.short === day.short);
                   const dayIndex = dayLabels.findIndex((item) => item.short === day.short);
@@ -1907,7 +1972,7 @@ export default function MiniApp({
                   <DatePickerField value={meetingDate} onChange={setMeetingDate} placeholder="Выбери дату" />
                 </Field>
                 <Field label="Время">
-                  <input type="time" value={meetingTime} onChange={(e) => setMeetingTime(e.target.value)} className={inputClass} />
+                  <input type="time" min={`${String(availabilityConfig.startHour).padStart(2, '0')}:00`} max={`${String(availabilityConfig.endHour).padStart(2, '0')}:00`} value={meetingTime} onChange={(e) => setMeetingTime(e.target.value)} className={inputClass} />
                 </Field>
                 <Field label="Длительность">
                   <select value={meetingDuration} onChange={(event) => setMeetingDuration(event.target.value)} className={selectClass}>

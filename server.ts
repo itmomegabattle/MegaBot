@@ -13,6 +13,7 @@ import {
   currentMoscowWeekStart,
   ensureTemplateSheet,
   ensurePrimaryWeekSheet,
+  exportAvailabilitiesToSheet,
   exportAvailabilityToSheet,
   googleSheetsConfigFromEnv,
   importAvailabilitiesFromSheet,
@@ -24,6 +25,8 @@ import {
   importStateFromGoogleSheetsDatabase,
 } from './src/googleSheetsDatabase.js';
 import { sanitizeSimulationState } from './src/stateMaintenance.js';
+import { filterSlotsByAvailabilityConfig, normalizeAvailabilityConfig } from './src/availabilityConfig.js';
+import { birthdayGiftCollectionText } from './src/birthdayGift.js';
 
 const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
 const telegramProxyAgent = proxyUrl ? new ProxyAgent(proxyUrl) : null;
@@ -344,6 +347,23 @@ function assignedIds(task: Task) {
   return task.assignedTo || [];
 }
 
+function meetingScheduleError(dateValue: string, timeValue: string, duration: number, settings: SimulationState['settings']) {
+  const date = parseShortDate(dateValue);
+  const timeMatch = String(timeValue || '').match(/^(\d{1,2}):(\d{2})$/);
+  if (!date || !timeMatch) return 'Проверь дату и время собрания';
+  if (Number(timeMatch[1]) > 23 || Number(timeMatch[2]) > 59) return 'Проверь время собрания';
+  const config = normalizeAvailabilityConfig(settings);
+  const dayIndex = date.getDay() === 0 ? 6 : date.getDay() - 1;
+  if (!config.activeDays.includes(dayIndex)) return 'В этот день встречи отключены в настройках слотов';
+  const startMinutes = Number(timeMatch[1]) * 60 + Number(timeMatch[2]);
+  const allowedStart = config.startHour * 60;
+  const allowedEnd = (config.endHour + 1) * 60;
+  if (startMinutes < allowedStart || startMinutes + duration * 60 > allowedEnd) {
+    return `Встреча должна полностью помещаться в диапазон ${String(config.startHour).padStart(2, '0')}:00–${String(config.endHour).padStart(2, '0')}:59`;
+  }
+  return '';
+}
+
 function userMention(user?: User) {
   if (!user) return 'не указан';
   return `${user.realName} (${user.username})`;
@@ -437,9 +457,10 @@ function profileSummaryText(user: User, state: SimulationState) {
 function slotsSummaryText(user: User, state: SimulationState, overrideSlots?: Record<number, number[]>) {
   const availability = overrideSlots || alignedAvailabilitySlots(state.availabilities[user.id]);
   const dayNames = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
-  const rows = dayNames.map((day, index) => {
+  const { activeDays } = normalizeAvailabilityConfig(state.settings);
+  const rows = activeDays.map((index) => {
     const hours = availability[index] || [];
-    return `${day}: ${hours.length ? hours.map((hour) => `${hour}:00`).join(', ') : '—'}`;
+    return `${dayNames[index]}: ${hours.length ? hours.map((hour) => `${hour}:00`).join(', ') : '—'}`;
   });
   return `*Мои слоты на эту неделю*\n\n${rows.join('\n')}`;
 }
@@ -519,12 +540,12 @@ function alignedHardUnavailableDays(availability?: Availability) {
     .filter((day) => Number.isFinite(day) && day >= 0 && day < 35);
 }
 
-function hasSubmittedAvailabilityForWeek(availability?: Availability, weekIndex = 0) {
+function hasSubmittedAvailabilityForWeek(availability: Availability | undefined, settings: SimulationState['settings'], weekIndex = 0) {
   if (!availability) return false;
   const slots = alignedAvailabilitySlots(availability);
   const unavailableDays = new Set(alignedHardUnavailableDays(availability));
   const firstDay = weekIndex * 7;
-  return Array.from({ length: 7 }, (_, dayOffset) => firstDay + dayOffset).some((dayIndex) => (
+  return normalizeAvailabilityConfig(settings).activeDays.map((dayOffset) => firstDay + dayOffset).some((dayIndex) => (
     (slots[dayIndex] || []).length > 0 || unavailableDays.has(dayIndex)
   ));
 }
@@ -1464,29 +1485,20 @@ async function startServer() {
     );
   }
 
-  const CHAT_SLOT_HOURS = [16, 17, 18, 19, 20, 21, 22, 23];
-
-  function cloneValidSlotSelection(source?: Record<number, number[]>) {
-    const result: Record<number, number[]> = {};
-    for (const [dayValue, hoursValue] of Object.entries(source || {})) {
-      const dayIndex = Number(dayValue);
-      if (!Number.isInteger(dayIndex) || dayIndex < 0 || dayIndex >= 35 || !Array.isArray(hoursValue)) continue;
-      result[dayIndex] = [...new Set(hoursValue.map(Number).filter((hour) => CHAT_SLOT_HOURS.includes(hour)))]
-        .sort((a, b) => a - b);
-    }
-    return result;
+  function cloneValidSlotSelection(state: SimulationState, source?: Record<number, number[]>) {
+    return filterSlotsByAvailabilityConfig(source, state.settings);
   }
 
   function currentSlotDraft(chatKey: string, user: User, state: SimulationState) {
     const savedDraft = chatSlotDrafts.get(chatKey);
     if (savedDraft?.userId === user.id && savedDraft.weekStart === currentWeekStartIso()) {
-      return cloneValidSlotSelection(savedDraft.slots);
+      return cloneValidSlotSelection(state, savedDraft.slots);
     }
-    return cloneValidSlotSelection(alignedAvailabilitySlots(state.availabilities[user.id]));
+    return cloneValidSlotSelection(state, alignedAvailabilitySlots(state.availabilities[user.id]));
   }
 
-  function storeSlotDraft(chatKey: string, user: User, slots: Record<number, number[]>, slotDay?: number) {
-    const safeSlots = cloneValidSlotSelection(slots);
+  function storeSlotDraft(chatKey: string, user: User, state: SimulationState, slots: Record<number, number[]>, slotDay?: number) {
+    const safeSlots = cloneValidSlotSelection(state, slots);
     chatSessions.set(chatKey, { flow: 'slots_edit', slotDay, pendingSlots: safeSlots });
     chatSlotDrafts.set(chatKey, { userId: user.id, weekStart: currentWeekStartIso(), slots: safeSlots });
     persistChatPanelMessageIds();
@@ -1495,8 +1507,9 @@ async function startServer() {
 
   function slotDayPanel(user: User, state: SimulationState, dayIndex: number, pendingSlots: Record<number, number[]>) {
     const dayNames = ['Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота', 'Воскресенье'];
+    const { hours } = normalizeAvailabilityConfig(state.settings);
     const selected = pendingSlots[dayIndex] || [];
-    const keyboard = CHAT_SLOT_HOURS.reduce<{ text: string; callback_data: string }[][]>((rows, hour, index) => {
+    const keyboard = hours.reduce<{ text: string; callback_data: string }[][]>((rows, hour, index) => {
       if (index % 2 === 0) rows.push([]);
       rows[rows.length - 1].push({
         text: `${selected.includes(hour) ? '✓ ' : ''}${hour}:00`,
@@ -1505,7 +1518,7 @@ async function startServer() {
       return rows;
     }, []);
     keyboard.push([{
-      text: selected.length === CHAT_SLOT_HOURS.length ? 'Снять весь день' : 'Выбрать весь день',
+      text: selected.length === hours.length ? 'Снять весь день' : 'Выбрать весь день',
       callback_data: `slot_toggle_day:${dayIndex}`,
     }]);
     keyboard.push([
@@ -1526,24 +1539,26 @@ async function startServer() {
     messageId?: number,
   ) {
     const dayNames = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
+    const { activeDays, hours } = normalizeAvailabilityConfig(state.settings);
     const chatKey = String(chatId);
     const savedDraft = chatSlotDrafts.get(chatKey);
-    const availability = cloneValidSlotSelection(overrideSlots
+    const availability = cloneValidSlotSelection(state, overrideSlots
       || (savedDraft?.userId === user.id && savedDraft.weekStart === currentWeekStartIso() ? savedDraft.slots : undefined)
       || alignedAvailabilitySlots(state.availabilities[user.id]));
-    storeSlotDraft(chatKey, user, availability);
-    const wholeWeekSelected = Array.from({ length: 7 }, (_, dayIndex) => (
-      (availability[dayIndex] || []).length === CHAT_SLOT_HOURS.length
-    )).every(Boolean);
+    storeSlotDraft(chatKey, user, state, availability);
+    const wholeWeekSelected = activeDays.every((dayIndex) => (
+      (availability[dayIndex] || []).length === hours.length
+    ));
+    const dayButtons = activeDays.map((dayIndex) => ({
+      text: `${dayNames[dayIndex]} · ${(availability[dayIndex] || []).length}/${hours.length}`,
+      callback_data: `slots_day:${dayIndex}`,
+    }));
     const keyboard = [
-      dayNames.slice(0, 4).map((day, index) => ({
-        text: `${day} · ${(availability[index] || []).length}/8`,
-        callback_data: `slots_day:${index}`,
-      })),
-      dayNames.slice(4).map((day, offset) => ({
-        text: `${day} · ${(availability[offset + 4] || []).length}/8`,
-        callback_data: `slots_day:${offset + 4}`,
-      })),
+      ...dayButtons.reduce<{ text: string; callback_data: string }[][]>((rows, button, index) => {
+        if (index % 3 === 0) rows.push([]);
+        rows[rows.length - 1].push(button);
+        return rows;
+      }, []),
       [{
         text: wholeWeekSelected ? 'Снять все слоты' : 'Выбрать все слоты',
         callback_data: 'slot_toggle_week',
@@ -1623,8 +1638,6 @@ async function startServer() {
     targetDate.setDate(targetDate.getDate() + 1);
     const targetBday = `${String(targetDate.getDate()).padStart(2, '0')}.${String(targetDate.getMonth() + 1).padStart(2, '0')}`;
     const markerYear = targetDate.getFullYear();
-    const paymentPhone = process.env.BIRTHDAY_PAYMENT_PHONE || '+7 (921) 123-45-67';
-    const paymentBank = process.env.BIRTHDAY_PAYMENT_BANK || 'Т-Банк';
     let changed = false;
 
     for (const birthdayUser of state.users) {
@@ -1638,9 +1651,7 @@ async function startServer() {
         if (!state.messages[recipient.id]) state.messages[recipient.id] = [];
         if (state.messages[recipient.id].some((message) => message.id === notificationId)) continue;
 
-        const paymentText = process.env.BIRTHDAY_PAYMENT_PHONE && process.env.BIRTHDAY_PAYMENT_BANK
-          ? `\n\nСбор на подарок: ${paymentPhone}, ${paymentBank}.`
-          : '';
+        const paymentText = `\n\n${birthdayGiftCollectionText()}`;
         const text = `🎂 Завтра день рождения у ${birthdayUser.realName}!`
           + `${nextAge !== null ? ` Исполняется ${nextAge} лет.` : ''}`
           + `\n\nНе забудьте поздравить 🎉${paymentText}`;
@@ -1673,7 +1684,7 @@ async function startServer() {
     let changed = false;
 
     for (const user of state.users) {
-      if (hasSubmittedAvailabilityForWeek(state.availabilities[user.id], 1)) continue;
+      if (hasSubmittedAvailabilityForWeek(state.availabilities[user.id], state.settings, 1)) continue;
       const notificationId = `sunday_slots_${dateKey}_${user.id}`;
       if (!state.messages[user.id]) state.messages[user.id] = [];
       if (state.messages[user.id].some((message) => message.id === notificationId)) continue;
@@ -1918,12 +1929,13 @@ async function startServer() {
 
       if (action.startsWith('slots_day:')) {
         const dayIndex = Number(action.split(':')[1]);
-        if (!Number.isInteger(dayIndex) || dayIndex < 0 || dayIndex > 6) {
+        const { activeDays } = normalizeAvailabilityConfig(state.settings);
+        if (!Number.isInteger(dayIndex) || !activeDays.includes(dayIndex)) {
           await answerCallback(callback.id, 'Неизвестный день');
           return res.json({ ok: true });
         }
         const chatKey = String(chatId);
-        const pendingSlots = storeSlotDraft(chatKey, user, currentSlotDraft(chatKey, user, state), dayIndex);
+        const pendingSlots = storeSlotDraft(chatKey, user, state, currentSlotDraft(chatKey, user, state), dayIndex);
         const panel = slotDayPanel(user, state, dayIndex, pendingSlots);
         await answerCallback(callback.id);
         await updateInlinePanel(chatId, callbackMessageId, panel.text, panel.keyboard);
@@ -1934,7 +1946,8 @@ async function startServer() {
         const [, dayValue, hourValue] = action.split(':');
         const dayIndex = Number(dayValue);
         const hour = Number(hourValue);
-        if (!Number.isInteger(dayIndex) || dayIndex < 0 || dayIndex > 6 || !CHAT_SLOT_HOURS.includes(hour)) {
+        const { activeDays, hours } = normalizeAvailabilityConfig(state.settings);
+        if (!Number.isInteger(dayIndex) || !activeDays.includes(dayIndex) || !hours.includes(hour)) {
           await answerCallback(callback.id, 'Неизвестный слот');
           return res.json({ ok: true });
         }
@@ -1944,7 +1957,7 @@ async function startServer() {
         if (selected.has(hour)) selected.delete(hour);
         else selected.add(hour);
         pendingSlots[dayIndex] = [...selected].sort((a, b) => a - b);
-        storeSlotDraft(chatKey, user, pendingSlots, dayIndex);
+        storeSlotDraft(chatKey, user, state, pendingSlots, dayIndex);
         const panel = slotDayPanel(user, state, dayIndex, pendingSlots);
         await answerCallback(callback.id, selected.has(hour) ? `${hour}:00 добавлено` : `${hour}:00 снято`);
         await updateInlinePanel(chatId, callbackMessageId, panel.text, panel.keyboard);
@@ -1953,16 +1966,17 @@ async function startServer() {
 
       if (action.startsWith('slot_toggle_day:')) {
         const dayIndex = Number(action.split(':')[1]);
-        if (!Number.isInteger(dayIndex) || dayIndex < 0 || dayIndex > 6) {
+        const { activeDays, hours } = normalizeAvailabilityConfig(state.settings);
+        if (!Number.isInteger(dayIndex) || !activeDays.includes(dayIndex)) {
           await answerCallback(callback.id, 'Неизвестный день');
           return res.json({ ok: true });
         }
         const chatKey = String(chatId);
         const pendingSlots = currentSlotDraft(chatKey, user, state);
-        const fullDay = [...CHAT_SLOT_HOURS];
+        const fullDay = [...hours];
         const wasFull = (pendingSlots[dayIndex] || []).length === fullDay.length;
         pendingSlots[dayIndex] = wasFull ? [] : fullDay;
-        storeSlotDraft(chatKey, user, pendingSlots, dayIndex);
+        storeSlotDraft(chatKey, user, state, pendingSlots, dayIndex);
         const panel = slotDayPanel(user, state, dayIndex, pendingSlots);
         await answerCallback(callback.id, wasFull ? 'День очищен' : 'Выбран весь день');
         await updateInlinePanel(chatId, callbackMessageId, panel.text, panel.keyboard);
@@ -1972,13 +1986,13 @@ async function startServer() {
       if (action === 'slot_toggle_week') {
         const chatKey = String(chatId);
         const pendingSlots = currentSlotDraft(chatKey, user, state);
-        const wasFull = Array.from({ length: 7 }, (_, dayIndex) => (
-          (pendingSlots[dayIndex] || []).length === CHAT_SLOT_HOURS.length
-        )).every(Boolean);
-        for (let dayIndex = 0; dayIndex < 7; dayIndex += 1) {
-          pendingSlots[dayIndex] = wasFull ? [] : [...CHAT_SLOT_HOURS];
+        const { activeDays, hours } = normalizeAvailabilityConfig(state.settings);
+        const wasFull = activeDays.every((dayIndex) => (pendingSlots[dayIndex] || []).length === hours.length);
+        for (let dayIndex = 0; dayIndex < 7; dayIndex += 1) delete pendingSlots[dayIndex];
+        for (const dayIndex of activeDays) {
+          if (!wasFull) pendingSlots[dayIndex] = [...hours];
         }
-        storeSlotDraft(chatKey, user, pendingSlots);
+        storeSlotDraft(chatKey, user, state, pendingSlots);
         await answerCallback(callback.id, wasFull ? 'Все слоты сняты' : 'Выбраны все слоты недели');
         await showSlotsPanel(chatId, user, state, pendingSlots, callbackMessageId);
         return res.json({ ok: true });
@@ -2255,7 +2269,7 @@ async function startServer() {
 
         if (groupCommand === '/slots') {
           const team = state.users.filter((member) => !isFacultyUser(member));
-          const missing = team.filter((member) => !hasSubmittedAvailabilityForWeek(state.availabilities[member.id]));
+          const missing = team.filter((member) => !hasSubmittedAvailabilityForWeek(state.availabilities[member.id], state.settings));
           await sendGroupMessage(chatId, missing.length
             ? `*Ещё не отметили слоты (${missing.length}):*\n${missing.map((member) => member.username).join(' ')}`
             : 'Все участники отметили слоты на неделю.');
@@ -3427,18 +3441,39 @@ async function startServer() {
   });
 
   app.post('/api/availability/weeks', async (req, res) => {
-    const { requesterId, weeks, notifyTeam = false } = req.body || {};
+    const { requesterId, weeks, activeDays, startHour, endHour, notifyTeam = false } = req.body || {};
     const state = loadDatabase();
     if (!isAdminUser(state, requesterId)) return res.status(403).json({ error: 'Admin access required' });
     const weekCount = Number(weeks);
     if (!Number.isInteger(weekCount) || weekCount < 2 || weekCount > 5) {
       return res.status(400).json({ error: 'Количество недель должно быть от 2 до 5' });
     }
-    state.settings = { ...(state.settings || {}), availabilityWeekCount: weekCount };
+    const requestedActiveDays = Array.isArray(activeDays)
+      ? [...new Set(activeDays.map(Number).filter((day) => Number.isInteger(day) && day >= 0 && day <= 6))].sort((a, b) => a - b)
+      : normalizeAvailabilityConfig(state.settings).activeDays;
+    const requestedStartHour = Number(startHour ?? normalizeAvailabilityConfig(state.settings).startHour);
+    const requestedEndHour = Number(endHour ?? normalizeAvailabilityConfig(state.settings).endHour);
+    if (!requestedActiveDays.length) return res.status(400).json({ error: 'Выбери хотя бы один день недели' });
+    if (!Number.isInteger(requestedStartHour) || !Number.isInteger(requestedEndHour)
+      || requestedStartHour < 0 || requestedEndHour > 23 || requestedEndHour < requestedStartHour) {
+      return res.status(400).json({ error: 'Проверь диапазон времени: начало и конец должны быть от 00:00 до 23:00' });
+    }
+    state.settings = {
+      ...(state.settings || {}),
+      availabilityWeekCount: weekCount,
+      availabilityActiveDays: requestedActiveDays,
+      availabilityStartHour: requestedStartHour,
+      availabilityEndHour: requestedEndHour,
+    };
     saveDatabase(state);
+    chatSlotDrafts.clear();
+    persistChatPanelMessageIds();
     let googleSheetsWeeks: unknown = null;
     if (sheetsConfig) {
-      try { googleSheetsWeeks = await ensurePrimaryWeekSheet(sheetsConfig, state.users); }
+      try {
+        googleSheetsWeeks = await ensurePrimaryWeekSheet(sheetsConfig, state.users);
+        await exportAvailabilitiesToSheet(sheetsConfig, state.users, state.availabilities);
+      }
       catch (error: any) {
         console.error('Google Sheets primary week update failed:', error);
         return res.status(502).json({ error: error.message || 'Не удалось обновить текущую неделю на листе ОСНОВА' });
@@ -3447,7 +3482,10 @@ async function startServer() {
     let notified = 0;
     if (notifyTeam) {
       const weekWord = weekCount >= 5 ? 'недель' : 'недели';
-      const text = `Пожалуйста, заполните свободные слоты сразу на ${weekCount} ${weekWord} вперёд в Mini App.`;
+      const dayNames = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
+      const text = `Пожалуйста, заполните свободные слоты на ${weekCount} ${weekWord} вперёд в Mini App.`
+        + `\nДни: ${requestedActiveDays.map((day) => dayNames[day]).join(', ')}.`
+        + `\nВремя: ${String(requestedStartHour).padStart(2, '0')}:00–${String(requestedEndHour).padStart(2, '0')}:00.`;
       const recipients = state.users.filter((user) => !isFacultyUser(user) && user.registered && user.telegramId);
       recipients.forEach((user) => {
         if (!state.messages[user.id]) state.messages[user.id] = [];
@@ -3464,7 +3502,7 @@ async function startServer() {
       const results = await Promise.allSettled(recipients.map((user) => sendTelegramMessage(user.telegramId!, text, [{ text: 'Заполнить слоты', action: 'open_tma' }], false, user)));
       notified = results.filter((result) => result.status === 'fulfilled' && result.value).length;
     }
-    return res.json({ success: true, weeks: weekCount, notified, googleSheets: googleSheetsWeeks });
+    return res.json({ success: true, weeks: weekCount, activeDays: requestedActiveDays, startHour: requestedStartHour, endHour: requestedEndHour, notified, googleSheets: googleSheetsWeeks });
   });
 
   app.post('/api/event/create', (req, res) => {
@@ -3522,9 +3560,10 @@ async function startServer() {
       return res.status(403).json({ error: 'Сначала нужно зарегистрироваться в чате с ботом' });
     }
 
+    const cleanSlots = filterSlotsByAvailabilityConfig(slots && typeof slots === 'object' ? slots : {}, state.settings);
     state.availabilities[userId] = {
       userId,
-      slots,
+      slots: cleanSlots,
       hardUnavailableDays: Array.isArray(hardUnavailableDays)
         ? [...new Set(hardUnavailableDays.map(Number).filter((day) => Number.isInteger(day) && day >= 0 && day < 35))]
         : [],
@@ -3565,6 +3604,8 @@ async function startServer() {
     if (!Number.isFinite(cleanDuration) || cleanDuration < 0.5 || cleanDuration > 6) {
       return res.status(400).json({ error: 'Длительность собрания должна быть от 30 минут до 6 часов' });
     }
+    const scheduleError = meetingScheduleError(String(date), String(time), cleanDuration, state.settings);
+    if (scheduleError) return res.status(400).json({ error: scheduleError });
 
     const cleanParticipants = participants === 'all'
       ? 'all'
@@ -3601,16 +3642,20 @@ async function startServer() {
     }
 
     const previousRecipientIds = meetingRecipientIds(state, meeting.participants, meeting.hostId);
+    const nextDuration = duration === undefined ? meeting.duration : Number(duration);
+    const nextDate = String(date || meeting.date);
+    const nextTime = String(time || meeting.time);
+    if (!Number.isFinite(nextDuration) || nextDuration < 0.5 || nextDuration > 6) {
+      return res.status(400).json({ error: 'Длительность собрания должна быть от 30 минут до 6 часов' });
+    }
+    const scheduleError = meetingScheduleError(nextDate, nextTime, nextDuration, state.settings);
+    if (scheduleError) return res.status(400).json({ error: scheduleError });
     if (title) meeting.title = title;
     if (type) meeting.type = type;
     if (date) meeting.date = date;
     if (time) meeting.time = time;
     if (duration !== undefined) {
-      const cleanDuration = Number(duration);
-      if (!Number.isFinite(cleanDuration) || cleanDuration < 0.5 || cleanDuration > 6) {
-        return res.status(400).json({ error: 'Длительность собрания должна быть от 30 минут до 6 часов' });
-      }
-      meeting.duration = cleanDuration;
+      meeting.duration = nextDuration;
     }
     if (participants !== undefined) {
       meeting.participants = participants === 'all'
@@ -4122,6 +4167,7 @@ async function startServer() {
   app.post('/api/meeting/suggest', async (req, res) => {
     const state = loadDatabase();
     const teamUsers = state.users.filter((user) => !isFacultyUser(user));
+    const availabilityConfig = normalizeAvailabilityConfig(state.settings);
 
     const windowScores: {
       day: number;
@@ -4134,9 +4180,9 @@ async function startServer() {
     }[] = [];
 
     const durations = [3, 4, 5, 2, 1];
-    for (let d = 0; d < 7; d++) {
+    for (const d of availabilityConfig.activeDays) {
       for (const duration of durations) {
-        for (let h = 16; h <= 24 - duration; h++) {
+        for (let h = availabilityConfig.startHour; h <= availabilityConfig.endHour - duration + 1; h++) {
           const hoursWindow = Array.from({ length: duration }, (_, index) => h + index);
           const availableUsers = teamUsers
             .filter(u => {

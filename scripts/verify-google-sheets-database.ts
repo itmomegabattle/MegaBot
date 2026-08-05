@@ -6,6 +6,22 @@ import {
 } from '../src/googleSheetsDatabase.js';
 import type { SimulationState } from '../src/types.js';
 import { resetOperationalData, sanitizeSimulationState } from '../src/stateMaintenance.js';
+import { birthdayGiftCollectionText } from '../src/birthdayGift.js';
+
+assert.equal(
+  birthdayGiftCollectionText({}),
+  '🎁 Сбор на подарок: переводите на Т-Банк по номеру 89105408050.\nДо 400 ₽ с человека — это максимальная сумма, можно отправить меньше.',
+  'birthday collection defaults must match the production message',
+);
+assert.equal(
+  birthdayGiftCollectionText({
+    BIRTHDAY_PAYMENT_PHONE: '80000000000',
+    BIRTHDAY_PAYMENT_BANK: 'Другой банк',
+    BIRTHDAY_GIFT_MAX_AMOUNT: '250',
+  }),
+  '🎁 Сбор на подарок: переводите на Другой банк по номеру 80000000000.\nДо 250 ₽ с человека — это максимальная сумма, можно отправить меньше.',
+  'birthday collection message must remain configurable through environment variables',
+);
 
 const state: SimulationState = {
   users: [{ id: 'u1', username: 'nikita', realName: 'Никита 🚀', role: 'admin', avatarSeed: 'seed' }],
@@ -30,6 +46,10 @@ assert.equal(compareDatabaseStateCounts(state, decoded!).passed, true);
 const sanitized = sanitizeSimulationState(decoded!);
 assert.equal('legacyField' in sanitized.tasks[0], false, 'obsolete task fields must be removed from active state');
 assert.equal('obsoleteFlag' in sanitized.users[0], false, 'obsolete user fields must be removed from active state');
+assert.deepEqual(sanitized.availabilities.u1.slots, {}, 'hours outside the configured availability window must be removed');
+assert.deepEqual(sanitized.settings?.availabilityActiveDays, [0, 1, 2, 3, 4]);
+assert.equal(sanitized.settings?.availabilityStartHour, 17);
+assert.equal(sanitized.settings?.availabilityEndHour, 23);
 const reset = resetOperationalData(decoded!);
 assert.equal(reset.users.length, 1, 'production reset must preserve team members');
 assert.equal(reset.users[0].joinedAt, '', 'production reset must clear test-era join timestamps');

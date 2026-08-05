@@ -116,6 +116,7 @@ export default function App() {
         triggerToast(`Встреча "${meetingData.title}" запланирована`, 'success');
         return true;
       }
+      triggerToast(data.error || 'Не удалось назначить встречу', 'warning');
     } catch (err) {
       console.error(err);
     }

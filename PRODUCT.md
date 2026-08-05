@@ -61,7 +61,7 @@ Interpretation: balanced composition, restrained state-led motion, and a dense o
 
 ## Current implementation update — 2026-08-03
 
-Availability in Telegram chat is now a single-message workflow: choose a day, toggle hours, a whole day, or the whole week, return to the week, save, and reopen the same values later. Day buttons expose exact counts such as `Ср · 7/8`. Drafts survive a process restart, stale and duplicate buttons are rejected, rapid taps are serialized, failed message edits recover into one replacement panel, and successful saves are written atomically to the application database before synchronization.
+Availability in Telegram chat is a single-message workflow: choose an active day, toggle hours, a whole day, or the whole configured week, return, save, and reopen the same values later. Day buttons expose exact dynamic counts. Administrators control the active weekdays, hour range and two-to-five-week horizon; the current default is Monday–Friday, 17:00–23:00. Drafts survive a process restart, stale and duplicate buttons are rejected, rapid taps are serialized, and failed message edits recover into one replacement panel.
 
 The production Mini App uses `https://megaorgiabot.ru`; temporary tunnel hosts are rejected. Telegram usernames open through the Mini App API so supported clients keep the application alive while showing a teammate’s chat.
 

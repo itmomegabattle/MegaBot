@@ -275,7 +275,7 @@ Saving at least one available slot submits the entire week. Days and hours witho
 ## Telegram chat states — 2026-08-03
 
 - Treat one user operation as one persistent panel. Edit its text and inline keyboard instead of replacing messages during intermediate steps.
-- Display availability as measurable state (`day · selected/8`), not only color or a checkmark.
+- Display availability as measurable state (`day · selected/available`), not only color or a checkmark; the denominator follows the configured hour range.
 - Put the whole-day action directly inside the selected day and keep `Save` available without hiding the way back.
 - After save, show explicit confirmation plus `Edit slots` and `Profile`; the next service panel replaces it.
 - Reserve lasting chat messages for broadcasts and operational notifications. Navigation panels are temporary UI.

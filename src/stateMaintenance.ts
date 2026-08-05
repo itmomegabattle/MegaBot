@@ -1,4 +1,5 @@
 import type { SimulationState, Task, User } from './types.js';
+import { filterSlotsByAvailabilityConfig, normalizeAvailabilityConfig } from './availabilityConfig.js';
 
 const text = (value: unknown) => value == null ? '' : String(value);
 const optionalText = (value: unknown) => text(value) || undefined;
@@ -57,6 +58,16 @@ function cleanTask(task: Task): Task {
 export function sanitizeSimulationState(input: SimulationState): SimulationState {
   const users = (input.users || []).map(cleanUser);
   const userIds = new Set(users.map((user) => user.id));
+  const availabilityConfig = normalizeAvailabilityConfig(input.settings);
+  const requestedWeekCount = Number(input.settings?.availabilityWeekCount);
+  const cleanSettings: SimulationState['settings'] = {
+    teamChatId: optionalText(input.settings?.teamChatId),
+    availabilityWeekCount: Number.isInteger(requestedWeekCount) && requestedWeekCount >= 2 && requestedWeekCount <= 5 ? requestedWeekCount : 2,
+    availabilityActiveDays: availabilityConfig.activeDays,
+    availabilityStartHour: availabilityConfig.startHour,
+    availabilityEndHour: availabilityConfig.endHour,
+    databaseRevision: Math.max(0, Number(input.settings?.databaseRevision || 0)),
+  };
   return {
     users,
     faculties: (input.faculties || []).map((faculty) => ({ id: text(faculty.id), name: text(faculty.name) })),
@@ -66,7 +77,7 @@ export function sanitizeSimulationState(input: SimulationState): SimulationState
       .filter(([userId]) => userIds.has(userId))
       .map(([userId, availability]) => [userId, {
         userId,
-        slots: Object.fromEntries(Object.entries(availability.slots || {}).map(([day, hours]) => [Number(day), [...new Set((hours || []).map(Number).filter(Number.isFinite))].sort((a, b) => a - b)])),
+        slots: filterSlotsByAvailabilityConfig(availability.slots, cleanSettings),
         hardUnavailableDays: [...new Set((availability.hardUnavailableDays || []).map(Number).filter(Number.isFinite))].sort((a, b) => a - b),
         updatedAt: text(availability.updatedAt),
         weekStart: optionalText(availability.weekStart),
@@ -87,11 +98,7 @@ export function sanitizeSimulationState(input: SimulationState): SimulationState
       id: text(message.id), userId, sender: message.sender, text: text(message.text), timestamp: text(message.timestamp),
       buttons: (message.buttons || []).map((button) => ({ text: text(button.text), action: text(button.action) })),
     }))])),
-    settings: {
-      teamChatId: optionalText(input.settings?.teamChatId),
-      availabilityWeekCount: Math.max(2, Number(input.settings?.availabilityWeekCount || 2)),
-      databaseRevision: Math.max(0, Number(input.settings?.databaseRevision || 0)),
-    },
+    settings: cleanSettings,
   };
 }
 

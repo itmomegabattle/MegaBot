@@ -274,6 +274,7 @@ try {
   });
   assert.equal(adminAuth.response.status, 200);
   sessionCookie = adminAuth.response.headers.get('set-cookie').split(';')[0];
+  const adminSessionCookie = sessionCookie;
   const promoteBob = await request('/api/user/update', {
     requesterId: 'u_admin',
     userId: 'u_bob',
@@ -468,7 +469,7 @@ try {
   const wholeDayEdit = telegramCalls.find((call) => call.path.endsWith('/editMessageText'));
   assert.ok(wholeDayEdit);
   const slotDraftState = JSON.parse(await readFile(`${testDatabasePath}.chat-panels.json`, 'utf8'));
-  assert.deepEqual(slotDraftState.slotDrafts['200'].slots['2'], [16, 17, 18, 19, 20, 21, 22, 23]);
+  assert.deepEqual(slotDraftState.slotDrafts['200'].slots['2'], [17, 18, 19, 20, 21, 22, 23]);
   assert.ok(wholeDayEdit.body.reply_markup.inline_keyboard.flat().some((button) => button.text === 'Снять весь день'));
 
   telegramCalls.length = 0;
@@ -495,7 +496,8 @@ try {
   });
   const slotsDaysCall = telegramCalls.find((call) => call.path.endsWith('/editMessageText'));
   assert.ok(slotsDaysCall);
-  assert.ok(slotsDaysCall.body.reply_markup.inline_keyboard.flat().some((button) => button.callback_data === 'slots_day:2' && button.text === 'Ср · 7/8'));
+  assert.ok(slotsDaysCall.body.reply_markup.inline_keyboard.flat().some((button) => button.callback_data === 'slots_day:2' && button.text === 'Ср · 6/7'));
+  assert.ok(!slotsDaysCall.body.reply_markup.inline_keyboard.flat().some((button) => ['slots_day:5', 'slots_day:6'].includes(button.callback_data)));
   assert.ok(String(slotsDaysCall.body.text || '').includes('Ср:'));
 
   telegramCalls.length = 0;
@@ -514,7 +516,7 @@ try {
   assert.ok(slotsSavedButtons.includes('Профиль'));
   assert.ok(slotsSavedButtons.includes('Изменить слоты'));
   const slotsSavedDatabase = JSON.parse(await readFile(testDatabasePath, 'utf8'));
-  assert.deepEqual(slotsSavedDatabase.availabilities.u_alice.slots['2'], [16, 17, 18, 19, 20, 21, 22]);
+  assert.deepEqual(slotsSavedDatabase.availabilities.u_alice.slots['2'], [17, 18, 19, 20, 21, 22]);
   const slotsSavedUiState = JSON.parse(await readFile(`${testDatabasePath}.chat-panels.json`, 'utf8'));
   assert.equal(slotsSavedUiState.slotDrafts['200'], undefined);
 
@@ -530,8 +532,8 @@ try {
   });
   const reopenedSlots = telegramCalls.find((call) => call.path.endsWith('/sendMessage') && call.body.reply_markup?.inline_keyboard);
   assert.ok(reopenedSlots);
-  assert.ok(reopenedSlots.body.reply_markup.inline_keyboard.flat().some((button) => button.text === 'Ср · 7/8'));
-  assert.ok(String(reopenedSlots.body.text).includes('Ср: 16:00, 17:00, 18:00, 19:00, 20:00, 21:00, 22:00'));
+  assert.ok(reopenedSlots.body.reply_markup.inline_keyboard.flat().some((button) => button.text === 'Ср · 6/7'));
+  assert.ok(String(reopenedSlots.body.text).includes('Ср: 17:00, 18:00, 19:00, 20:00, 21:00, 22:00'));
   assert.ok(reopenedSlots.body.reply_markup.inline_keyboard.flat().some((button) => (
     button.text === 'Выбрать все слоты' && button.callback_data === 'slot_toggle_week'
   )));
@@ -548,9 +550,11 @@ try {
     },
   });
   const wholeWeekDraft = JSON.parse(await readFile(`${testDatabasePath}.chat-panels.json`, 'utf8'));
-  for (let dayIndex = 0; dayIndex < 7; dayIndex += 1) {
-    assert.deepEqual(wholeWeekDraft.slotDrafts['200'].slots[String(dayIndex)], [16, 17, 18, 19, 20, 21, 22, 23]);
+  for (let dayIndex = 0; dayIndex < 5; dayIndex += 1) {
+    assert.deepEqual(wholeWeekDraft.slotDrafts['200'].slots[String(dayIndex)], [17, 18, 19, 20, 21, 22, 23]);
   }
+  assert.equal(wholeWeekDraft.slotDrafts['200'].slots['5'], undefined);
+  assert.equal(wholeWeekDraft.slotDrafts['200'].slots['6'], undefined);
   assert.ok(telegramCalls.some((call) => (
     call.path.endsWith('/editMessageText')
     && call.body.reply_markup.inline_keyboard.flat().some((button) => button.text === 'Снять все слоты')
@@ -567,7 +571,7 @@ try {
     },
   });
   const duplicateProtectedDraft = JSON.parse(await readFile(`${testDatabasePath}.chat-panels.json`, 'utf8'));
-  assert.deepEqual(duplicateProtectedDraft.slotDrafts['200'].slots['0'], [16, 17, 18, 19, 20, 21, 22, 23]);
+  assert.deepEqual(duplicateProtectedDraft.slotDrafts['200'].slots['0'], [17, 18, 19, 20, 21, 22, 23]);
   assert.ok(!telegramCalls.some((call) => call.path.endsWith('/editMessageText')));
 
   telegramCalls.length = 0;
@@ -640,7 +644,7 @@ try {
   });
   const savedAfterRecovery = JSON.parse(await readFile(testDatabasePath, 'utf8'));
   assert.deepEqual(savedAfterRecovery.availabilities.u_alice.slots['0'], [19, 20, 21, 22, 23]);
-  assert.deepEqual(savedAfterRecovery.availabilities.u_alice.slots['2'], [16, 17, 18, 19, 20, 21, 22, 23]);
+  assert.deepEqual(savedAfterRecovery.availabilities.u_alice.slots['2'], [17, 18, 19, 20, 21, 22, 23]);
   assert.equal((JSON.parse(await readFile(`${testDatabasePath}.chat-panels.json`, 'utf8'))).slotDrafts['200'], undefined);
 
   telegramCalls.length = 0;
@@ -655,8 +659,8 @@ try {
   });
   const reopenedAfterRecovery = telegramCalls.find((call) => call.path.endsWith('/sendMessage') && call.body.reply_markup?.inline_keyboard);
   assert.ok(reopenedAfterRecovery);
-  assert.ok(reopenedAfterRecovery.body.reply_markup.inline_keyboard.flat().some((button) => button.text === 'Пн · 5/8'));
-  assert.ok(reopenedAfterRecovery.body.reply_markup.inline_keyboard.flat().some((button) => button.text === 'Ср · 8/8'));
+  assert.ok(reopenedAfterRecovery.body.reply_markup.inline_keyboard.flat().some((button) => button.text === 'Пн · 5/7'));
+  assert.ok(reopenedAfterRecovery.body.reply_markup.inline_keyboard.flat().some((button) => button.text === 'Ср · 7/7'));
 
   telegramCalls.length = 0;
   await request('/api/telegram-webhook', {
@@ -822,6 +826,10 @@ try {
     participants: 'all',
   });
   assert.equal(invalidMeetingDuration.response.status, 400);
+  const weekendMeeting = await request('/api/meeting', {
+    title: 'Встреча в выходной', type: 'general', date: '2030-01-05', time: '18:00', duration: 1, hostId: 'u_admin', participants: 'all',
+  });
+  assert.equal(weekendMeeting.response.status, 400);
   assert.equal(telegramCalls.filter((call) => call.path.endsWith('/sendMessage')).length, 3);
   assert.ok(!telegramCalls.some((call) => call.body.chat_id === '400'));
 
@@ -845,7 +853,7 @@ try {
   const meetingUpdate = await request('/api/meeting/update', {
     requesterId: 'u_admin',
     meetingId: meetingResult.data.meeting.id,
-    time: '19:00',
+    time: '17:00',
     participants: ['u_alice'],
   });
   assert.equal(meetingUpdate.response.status, 200);
@@ -1021,19 +1029,38 @@ try {
   });
   assert.ok(telegramCalls.some((call) => call.path.endsWith('/editMessageText')));
 
+  const activeSessionCookie = sessionCookie;
+  sessionCookie = adminSessionCookie;
+  const availabilitySettings = await request('/api/availability/weeks', {
+    requesterId: 'u_admin',
+    weeks: 3,
+    activeDays: [0, 2, 4],
+    startHour: 18,
+    endHour: 21,
+    notifyTeam: false,
+  });
+  assert.equal(availabilitySettings.response.status, 200);
+  assert.deepEqual(availabilitySettings.data.activeDays, [0, 2, 4]);
+  assert.equal(availabilitySettings.data.startHour, 18);
+  assert.equal(availabilitySettings.data.endHour, 21);
+  sessionCookie = activeSessionCookie;
+
   const database = JSON.parse(await readFile(testDatabasePath, 'utf8'));
   assert.equal(database.users.length, fixture.users.length);
   assert.equal(database.users.find((user) => user.id === 'u_alice').telegramId, '200');
   assert.equal(database.users.some((user) => user.telegramId === '999'), false);
   assert.equal(database.settings.teamChatId, '-100500');
+  assert.equal(database.settings.availabilityWeekCount, 3);
+  assert.deepEqual(database.settings.availabilityActiveDays, [0, 2, 4]);
+  assert.equal(database.settings.availabilityStartHour, 18);
+  assert.equal(database.settings.availabilityEndHour, 21);
   assert.ok(database.messages.u_alice.length > 0);
   assert.ok(database.messages.u_admin.some((message) => message.text.includes('Задача выполнена')));
   const persistedPanels = JSON.parse(await readFile(`${testDatabasePath}.chat-panels.json`, 'utf8'));
   assert.equal(persistedPanels.version, 2);
   assert.ok(Number.isInteger(persistedPanels.panels['200'].current));
   assert.ok(Array.isArray(persistedPanels.panels['200'].known));
-  assert.deepEqual(persistedPanels.slotDrafts['200'].slots['0'], [19, 20, 21, 22, 23]);
-  assert.deepEqual(persistedPanels.slotDrafts['200'].slots['2'], [16, 17, 18, 19, 20, 21, 22, 23]);
+  assert.equal(persistedPanels.slotDrafts['200'], undefined, 'changing availability rules must invalidate stale chat drafts');
   assert.match(serverErrors, /Temporary WEBAPP_URL dead-tunnel\.lhr\.life is not allowed in production/);
 
   console.log('Core flow verification passed: chat buttons, resilient slot editing, registration, access binding, task notifications, meeting notifications, and task completion.');

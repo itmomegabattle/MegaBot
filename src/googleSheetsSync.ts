@@ -388,6 +388,37 @@ export async function exportAvailabilityToSheet(config: GoogleSheetsConfig, user
   return { updatedCells: data.length, sheetRow: matchedRow };
 }
 
+export async function exportAvailabilitiesToSheet(config: GoogleSheetsConfig, users: SheetUser[], availabilities: Record<string, SheetAvailability>) {
+  const grids = await readActiveWeekGrids(config);
+  const weekStart = currentMoscowWeekStart();
+  const data: { range: string; values: boolean[][] }[] = [];
+  for (const grid of grids) {
+    const layout = discover(grid, users, weekStart, config.nameAliases);
+    for (const row of layout.rows) {
+      if (!row.user) continue;
+      const availability = availabilities[row.user.id];
+      for (let col = 0; col < layout.columnHours.length; col += 1) {
+        const hour = layout.columnHours[col];
+        const date = layout.columnDates[col];
+        if (hour === null || !date) continue;
+        const dayIndex = dayIndexFor(date, availability?.weekStart || weekStart);
+        if (dayIndex < 0 || dayIndex >= 35) continue;
+        data.push({
+          range: `${quotedSheet(grid.title)}!${columnName(col)}${row.rowIndex + 1}`,
+          values: [[Boolean(availability?.slots[dayIndex]?.includes(hour))]],
+        });
+      }
+    }
+  }
+  for (let offset = 0; offset < data.length; offset += 500) {
+    await googleRequest(config, '/values:batchUpdate', {
+      method: 'POST',
+      body: JSON.stringify({ valueInputOption: 'USER_ENTERED', data: data.slice(offset, offset + 500) }),
+    });
+  }
+  return { updatedCells: data.length };
+}
+
 export async function buildUserMappingReport(config: GoogleSheetsConfig, users: SheetUser[]) {
   const grid = await readGrid(config);
   const layout = discover(grid, users, currentMoscowWeekStart(), config.nameAliases);
