@@ -1009,7 +1009,7 @@ try {
   assert.ok(boundChatCommandsCall);
   assert.deepEqual(
     boundChatCommandsCall.body.commands.map((command) => command.command),
-    ['all', 'meeting', 'deadlines', 'slots', 'birthdays', 'checkin', 'help'],
+    ['all', 'all_design', 'all_production', 'meeting', 'deadlines', 'slots', 'birthdays', 'checkin', 'help'],
   );
   assert.ok(!boundChatCommandsCall.body.commands.some((command) => command.command === 'start'));
 
@@ -1051,6 +1051,96 @@ try {
     && String(call.body.text || '').includes('@admin')
     && String(call.body.text || '').includes('@alice')
   )));
+
+  telegramCalls.length = 0;
+  await request('/api/telegram-webhook', {
+    update_id: 211,
+    message: {
+      message_id: 211,
+      chat: { id: -100500, type: 'supergroup' },
+      from: { id: 500, username: 'chat_only', first_name: 'Только в чате' },
+      text: 'Обычное сообщение участника',
+    },
+  });
+  assert.equal(telegramCalls.filter((call) => call.path.endsWith('/sendMessage')).length, 0);
+
+  await request('/api/telegram-webhook', {
+    update_id: 212,
+    chat_member: {
+      chat: { id: -100500, type: 'supergroup' },
+      new_chat_member: {
+        status: 'member',
+        user: { id: 600, first_name: 'Без username', is_bot: false },
+      },
+    },
+  });
+
+  telegramCalls.length = 0;
+  await request('/api/telegram-webhook', {
+    update_id: 213,
+    message: {
+      message_id: 213,
+      chat: { id: -100500, type: 'supergroup' },
+      from: { id: 100, username: 'admin', first_name: 'Админ' },
+      text: '/all@megaorgi_bot',
+    },
+  });
+  const allPrompt = telegramCalls.find((call) => call.path.endsWith('/sendMessage'));
+  assert.ok(String(allPrompt?.body.text || '').includes('следующим сообщением'));
+  assert.ok(!String(allPrompt?.body.text || '').includes('@chat_only'));
+
+  telegramCalls.length = 0;
+  await request('/api/telegram-webhook', {
+    update_id: 214,
+    message: {
+      message_id: 214,
+      chat: { id: -100500, type: 'supergroup' },
+      from: { id: 100, username: 'admin', first_name: 'Админ' },
+      text: 'Срочно собираемся',
+    },
+  });
+  const allParticipantsMessage = telegramCalls.find((call) => call.path.endsWith('/sendMessage'));
+  assert.ok(String(allParticipantsMessage?.body.text || '').includes('Срочно собираемся'));
+  assert.ok(String(allParticipantsMessage?.body.text || '').includes('@chat_only'));
+  assert.ok(String(allParticipantsMessage?.body.text || '').includes('tg://user?id=600'));
+
+  telegramCalls.length = 0;
+  await request('/api/telegram-webhook', {
+    update_id: 215,
+    message: {
+      message_id: 215,
+      chat: { id: -100500, type: 'supergroup' },
+      from: { id: 100, username: 'admin', first_name: 'Админ' },
+      text: '/all_design Проверка дизайна',
+    },
+  });
+  const designMessage = telegramCalls.find((call) => call.path.endsWith('/sendMessage'));
+  assert.ok(String(designMessage?.body.text || '').includes('Проверка дизайна'));
+  assert.ok(String(designMessage?.body.text || '').includes('@alice'));
+  assert.ok(!String(designMessage?.body.text || '').includes('@bob'));
+
+  await request('/api/telegram-webhook', {
+    update_id: 216,
+    chat_member: {
+      chat: { id: -100500, type: 'supergroup' },
+      new_chat_member: {
+        status: 'left',
+        user: { id: 600, first_name: 'Без username', is_bot: false },
+      },
+    },
+  });
+  telegramCalls.length = 0;
+  await request('/api/telegram-webhook', {
+    update_id: 217,
+    message: {
+      message_id: 217,
+      chat: { id: -100500, type: 'supergroup' },
+      from: { id: 100, username: 'admin', first_name: 'Админ' },
+      text: '/all Проверка выхода',
+    },
+  });
+  const afterLeaveMessage = telegramCalls.find((call) => call.path.endsWith('/sendMessage'));
+  assert.ok(!String(afterLeaveMessage?.body.text || '').includes('tg://user?id=600'));
 
   telegramCalls.length = 0;
   await request('/api/telegram-webhook', {

@@ -585,8 +585,33 @@ function escapeHtml(value: unknown) {
 
 function renderTelegramHtml(text: string) {
   return escapeHtml(text)
+    .replace(/\[\[tg:(\d+)\|([^\]\n]+)\]\]/g, '<a href="tg://user?id=$1">$2</a>')
     .replace(/`([^`\n]+)`/g, '<code>$1</code>')
     .replace(/\*([^*\n]+)\*/g, '<b>$1</b>');
+}
+
+function telegramCommandSlug(value: string) {
+  const normalized = value.trim().toLowerCase();
+  const knownAliases: Array<[RegExp, string]> = [
+    [/^(?:partners?|партн[её]ры|партн[её]рка|партн[её]рство)$/i, 'partners'],
+    [/^(?:sound|audio|звук)$/i, 'sound'],
+    [/^(?:design|дизайн)$/i, 'design'],
+    [/^(?:production|продакшн)$/i, 'production'],
+    [/^(?:smm|смм)$/i, 'smm'],
+  ];
+  const known = knownAliases.find(([pattern]) => pattern.test(normalized));
+  if (known) return known[1];
+  const transliteration: Record<string, string> = {
+    а: 'a', б: 'b', в: 'v', г: 'g', д: 'd', е: 'e', ё: 'e', ж: 'zh', з: 'z', и: 'i', й: 'i',
+    к: 'k', л: 'l', м: 'm', н: 'n', о: 'o', п: 'p', р: 'r', с: 's', т: 't', у: 'u', ф: 'f',
+    х: 'h', ц: 'ts', ч: 'ch', ш: 'sh', щ: 'sch', ъ: '', ы: 'y', ь: '', э: 'e', ю: 'yu', я: 'ya',
+  };
+  return [...normalized]
+    .map((character) => transliteration[character] ?? character)
+    .join('')
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 27) || 'block';
 }
 
 function taskStatusLabel(status: Task['status']) {
@@ -877,6 +902,13 @@ async function startServer() {
     version: 2;
     panels: Record<string, { current?: number; known: number[] }>;
     pendingSheetExports: string[];
+    groupMembers?: Record<string, Record<string, {
+      telegramId: string;
+      username?: string;
+      displayName: string;
+      active: boolean;
+      updatedAt: string;
+    }>>;
     slotDrafts: Record<string, {
       userId: string;
       weekStart: string;
@@ -913,6 +945,11 @@ async function startServer() {
   );
   const chatSlotDrafts = new Map(Object.entries(chatUiState.slotDrafts || {}));
   const pendingSheetAvailabilityExports = new Set(chatUiState.pendingSheetExports || []);
+  const groupMembers = new Map(Object.entries(chatUiState.groupMembers || {}).map(([chatId, members]) => [
+    chatId,
+    new Map(Object.entries(members)),
+  ]));
+  const pendingGroupMentions = new Map<string, { competency?: string; expiresAt: number }>();
   const processedCallbackIds = new Set<string>();
   const telegramChatUpdateQueues = new Map<string, Promise<void>>();
   const persistChatPanelMessageIds = () => {
@@ -926,6 +963,10 @@ async function startServer() {
         version: 2,
         panels,
         pendingSheetExports: [...pendingSheetAvailabilityExports],
+        groupMembers: Object.fromEntries([...groupMembers.entries()].map(([chatId, members]) => [
+          chatId,
+          Object.fromEntries(members),
+        ])),
         slotDrafts: Object.fromEntries(chatSlotDrafts),
       }, null, 2), 'utf8');
       fs.renameSync(temporaryFile, CHAT_PANEL_FILE);
@@ -939,6 +980,26 @@ async function startServer() {
       }
       return false;
     }
+  };
+  const rememberGroupMember = (chatId: string | number, telegramUser: any, active = true) => {
+    if (!telegramUser?.id || telegramUser.is_bot) return;
+    const chatKey = String(chatId);
+    const telegramId = String(telegramUser.id);
+    const members = groupMembers.get(chatKey) || new Map();
+    const previous = members.get(telegramId);
+    const displayName = [telegramUser.first_name, telegramUser.last_name].filter(Boolean).join(' ').trim()
+      || previous?.displayName
+      || telegramUser.username
+      || `Участник ${telegramId}`;
+    members.set(telegramId, {
+      telegramId,
+      username: telegramUser.username ? `@${String(telegramUser.username).replace(/^@/, '')}` : previous?.username,
+      displayName,
+      active,
+      updatedAt: new Date().toISOString(),
+    });
+    groupMembers.set(chatKey, members);
+    persistChatPanelMessageIds();
   };
   const rememberChatPanelMessage = (chatId: string | number, messageId?: number) => {
     const chatKey = String(chatId);
@@ -1284,15 +1345,46 @@ async function startServer() {
     }
   }
 
-  const groupBotCommands = [
-    { command: 'all', description: 'Текст — упомянуть всю команду' },
+  function groupBotCommands(state = loadDatabase()) {
+    const used = new Set<string>();
+    const blockCommands = (state.competencies || []).slice(0, 92).map((competency) => {
+      const base = `all_${telegramCommandSlug(competency)}`.slice(0, 32);
+      let command = base;
+      let suffix = 2;
+      while (used.has(command)) {
+        const addition = `_${suffix++}`;
+        command = `${base.slice(0, 32 - addition.length)}${addition}`;
+      }
+      used.add(command);
+      return { command, description: `Уведомить блок «${competency}»`, competency };
+    });
+    return [
+    { command: 'all', description: 'Уведомить всех участников беседы' },
+    ...blockCommands,
     { command: 'meeting', description: 'Показать ближайшую встречу' },
     { command: 'deadlines', description: 'Показать ближайшие дедлайны' },
     { command: 'slots', description: 'Показать, кто не отметил слоты' },
     { command: 'birthdays', description: 'Показать ближайшие дни рождения' },
     { command: 'checkin', description: 'Название — запустить перекличку' },
     { command: 'help', description: 'Показать команды MegaBot' },
-  ];
+    ];
+  }
+
+  function groupCommandCompetencies(state = loadDatabase()) {
+    return new Map(groupBotCommands(state)
+      .filter((item): item is { command: string; description: string; competency: string } => 'competency' in item)
+      .map((item) => [item.command, item.competency]));
+  }
+
+  function refreshGroupCommandMenus() {
+    const state = loadDatabase();
+    const scopes: Record<string, string | number>[] = [
+      { type: 'all_group_chats' },
+      { type: 'all_chat_administrators' },
+    ];
+    if (state.settings?.teamChatId) scopes.push({ type: 'chat', chat_id: state.settings.teamChatId });
+    void Promise.allSettled(scopes.map((scope) => configureGroupCommandMenu(scope)));
+  }
 
   async function configureGroupCommandMenu(scope: Record<string, string | number> = { type: 'all_group_chats' }) {
     const botToken = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
@@ -1302,7 +1394,10 @@ async function startServer() {
       const response = await telegramFetch(`${tgApiBase}/bot${botToken}/setMyCommands`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ scope, commands: groupBotCommands }),
+        body: JSON.stringify({
+          scope,
+          commands: groupBotCommands().map(({ command, description }) => ({ command, description })),
+        }),
       });
       if (!response.ok) {
         console.error('Telegram group command menu configuration failed:', response.status, await response.text());
@@ -1415,6 +1510,70 @@ async function startServer() {
       console.error(`Google Calendar sync failed for meeting ${meeting.id}:`, error.message || error);
       return false;
     }
+  }
+
+  function groupMentionToken(target: { telegramId?: string; username?: string; displayName: string }) {
+    if (target.username) return `@${target.username.replace(/^@/, '')}`;
+    if (!target.telegramId) return target.displayName;
+    const safeName = target.displayName.replace(/[\]\n]/g, ' ').trim() || 'Участник';
+    return `[[tg:${target.telegramId}|${safeName}]]`;
+  }
+
+  function resolveGroupMentionTargets(state: SimulationState, chatId: string | number, competency?: string) {
+    const knownMembers = groupMembers.get(String(chatId)) || new Map();
+    const targets = new Map<string, { telegramId?: string; username?: string; displayName: string }>();
+    const addTarget = (target: { telegramId?: string; username?: string; displayName: string }) => {
+      const key = target.telegramId || target.username?.toLowerCase();
+      if (key && !targets.has(key)) targets.set(key, target);
+    };
+
+    state.users
+      .filter((member) => !isFacultyUser(member))
+      .filter((member) => !competency || member.primaryCompetency === competency || member.competencies?.includes(competency))
+      .forEach((member) => {
+        const observed = member.telegramId ? knownMembers.get(String(member.telegramId)) : undefined;
+        if (observed?.active === false) return;
+        addTarget({
+          telegramId: member.telegramId,
+          username: member.username,
+          displayName: member.realName || observed?.displayName || member.username || 'Участник',
+        });
+      });
+
+    if (!competency) {
+      knownMembers.forEach((member) => {
+        if (!member.active) return;
+        addTarget(member);
+      });
+    }
+
+    return [...targets.values()].sort((a, b) => a.displayName.localeCompare(b.displayName, 'ru'));
+  }
+
+  async function sendGroupMentionNotification(chatId: string | number, note: string, competency?: string) {
+    const state = loadDatabase();
+    const targets = resolveGroupMentionTargets(state, chatId, competency);
+    if (targets.length === 0) {
+      await sendGroupMessage(chatId, competency
+        ? `В блоке «${competency}» пока нет участников с привязанным Telegram.`
+        : 'Бот пока не знает ни одного участника этой беседы.');
+      return;
+    }
+    const heading = competency ? `*Уведомление для блока «${competency}»*` : '*Уведомление для всех*';
+    const cleanNote = note.trim().slice(0, 3000);
+    const prefix = `${heading}${cleanNote ? `\n\n${cleanNote}` : ''}\n\n`;
+    const chunks: string[] = [];
+    let current = prefix;
+    for (const target of targets) {
+      const mention = groupMentionToken(target);
+      if (current.length + mention.length + 1 > 3900) {
+        chunks.push(current.trim());
+        current = '*Продолжение списка*\n\n';
+      }
+      current += `${mention} `;
+    }
+    if (current.trim()) chunks.push(current.trim());
+    for (const chunk of chunks) await sendGroupMessage(chatId, chunk);
   }
 
   async function reconcileMeetingCalendar() {
@@ -1964,7 +2123,8 @@ async function startServer() {
     const webhookUrl = `${webAppUrl}/api/telegram-webhook`;
     try {
       const tgApiBase = process.env.TELEGRAM_API_BASE || 'https://api.telegram.org';
-      const response = await telegramFetch(`${tgApiBase}/bot${botToken}/setWebhook?url=${encodeURIComponent(webhookUrl)}`);
+      const allowedUpdates = encodeURIComponent(JSON.stringify(['message', 'callback_query', 'chat_member', 'my_chat_member']));
+      const response = await telegramFetch(`${tgApiBase}/bot${botToken}/setWebhook?url=${encodeURIComponent(webhookUrl)}&allowed_updates=${allowedUpdates}`);
       const data = await response.json();
       return res.json({
         success: true,
@@ -1984,6 +2144,8 @@ async function startServer() {
       update.callback_query?.message?.chat?.id
       || update.callback_query?.from?.id
       || update.message?.chat?.id
+      || update.chat_member?.chat?.id
+      || update.my_chat_member?.chat?.id
       || 'unknown',
     );
     const previous = telegramChatUpdateQueues.get(chatKey) || Promise.resolve();
@@ -2007,6 +2169,34 @@ async function startServer() {
     next();
   }, async (req, res) => {
     const update = req.body;
+
+    const membershipUpdate = update.chat_member || update.my_chat_member;
+    if (membershipUpdate?.chat && membershipUpdate?.new_chat_member?.user) {
+      const status = String(membershipUpdate.new_chat_member.status || '');
+      rememberGroupMember(
+        membershipUpdate.chat.id,
+        membershipUpdate.new_chat_member.user,
+        status !== 'left' && status !== 'kicked',
+      );
+      return res.json({ ok: true });
+    }
+
+    if (update.message?.chat) {
+      const messageChatType = String(update.message.chat.type || 'private');
+      if (messageChatType === 'group' || messageChatType === 'supergroup') {
+        rememberGroupMember(update.message.chat.id, update.message.from, true);
+        (update.message.new_chat_members || []).forEach((member: any) => rememberGroupMember(update.message.chat.id, member, true));
+        if (update.message.left_chat_member) rememberGroupMember(update.message.chat.id, update.message.left_chat_member, false);
+        if (!update.message.text) return res.json({ ok: true });
+      }
+    }
+
+    if (update.callback_query?.message?.chat && update.callback_query?.from) {
+      const callbackChatType = String(update.callback_query.message.chat.type || 'private');
+      if (callbackChatType === 'group' || callbackChatType === 'supergroup') {
+        rememberGroupMember(update.callback_query.message.chat.id, update.callback_query.from, true);
+      }
+    }
 
     if (update.callback_query) {
       const callback = update.callback_query;
@@ -2336,10 +2526,29 @@ async function startServer() {
       const isGroupChat = chatType === 'group' || chatType === 'supergroup';
 
       if (isGroupChat) {
-        const groupCommand = text.toLowerCase().split('@')[0];
-        const supportedGroupCommand = ['/all', '/meeting', '/deadlines', '/slots', '/birthdays', '/checkin', '/bindteamchat', '/help'].some(
-          (command) => groupCommand === command || groupCommand.startsWith(`${command} `),
-        );
+        const commandMatch = text.match(/^\/([a-z0-9_]+)(?:@\w+)?(?:\s+([\s\S]*))?$/i);
+        const commandName = commandMatch?.[1]?.toLowerCase() || '';
+        const commandText = commandMatch?.[2]?.trim() || '';
+        const blockCommands = groupCommandCompetencies(state);
+        const pendingKey = `${chatId}:${fromUser.id}`;
+        const pendingMention = pendingGroupMentions.get(pendingKey);
+
+        if (pendingMention && pendingMention.expiresAt <= Date.now()) pendingGroupMentions.delete(pendingKey);
+        if (pendingMention && pendingMention.expiresAt > Date.now() && !commandMatch) {
+          pendingGroupMentions.delete(pendingKey);
+          await deleteTelegramMessage(chatId, update.message.message_id);
+          if (!user?.registered) {
+            await sendGroupMessage(chatId, 'Эта команда доступна участникам, привязанным к MegaBot.');
+            return res.json({ ok: true });
+          }
+          await sendGroupMentionNotification(chatId, text, pendingMention.competency);
+          return res.json({ ok: true });
+        }
+
+        const supportedGroupCommand = new Set([
+          'all', 'meeting', 'deadlines', 'slots', 'birthdays', 'checkin', 'bindteamchat', 'help', 'cancel',
+          ...blockCommands.keys(),
+        ]).has(commandName);
         if (!supportedGroupCommand) return res.json({ ok: true });
         await deleteTelegramMessage(chatId, update.message.message_id);
         if (!user?.registered) {
@@ -2349,7 +2558,7 @@ async function startServer() {
         user.lastSeenAt = new Date().toISOString();
         saveDatabase(state);
 
-        if (groupCommand === '/bindteamchat') {
+        if (commandName === 'bindteamchat') {
           if (user.role !== 'admin') {
             await sendGroupMessage(chatId, 'Привязать командный чат может только администратор.');
           } else {
@@ -2367,17 +2576,31 @@ async function startServer() {
           return res.json({ ok: true });
         }
 
-        if (groupCommand.startsWith('/all')) {
-          const note = text.replace(/^\/all(?:@\w+)?/i, '').trim();
-          const mentions = state.users
-            .filter((member) => !isFacultyUser(member) && member.registered && member.username)
-            .map((member) => member.username)
-            .join(' ');
-          await sendGroupMessage(chatId, `${note ? `*${note}*\n\n` : ''}${mentions || 'Нет привязанных участников.'}`);
+        if (commandName === 'cancel') {
+          const hadPending = pendingGroupMentions.delete(pendingKey);
+          await sendGroupMessage(chatId, hadPending ? 'Уведомление отменено.' : 'Нет ожидающего уведомления.');
           return res.json({ ok: true });
         }
 
-        if (groupCommand === '/meeting') {
+        const selectedCompetency = blockCommands.get(commandName);
+        if (commandName === 'all' || selectedCompetency) {
+          if (!commandText) {
+            pendingGroupMentions.set(pendingKey, {
+              competency: selectedCompetency,
+              expiresAt: Date.now() + 10 * 60 * 1000,
+            });
+            await sendGroupMessage(
+              chatId,
+              `${selectedCompetency ? `Выбран блок «${selectedCompetency}». ` : ''}Напиши текст уведомления следующим сообщением. Бот добавит актуальные упоминания автоматически.\n\nДля отмены: /cancel`,
+            );
+            return res.json({ ok: true });
+          }
+          pendingGroupMentions.delete(pendingKey);
+          await sendGroupMentionNotification(chatId, commandText, selectedCompetency);
+          return res.json({ ok: true });
+        }
+
+        if (commandName === 'meeting') {
           const nextMeeting = state.meetings
             .filter((meeting) => meeting.status === 'scheduled' && meetingDateTime(meeting) >= Date.now())
             .slice()
@@ -2388,7 +2611,7 @@ async function startServer() {
           return res.json({ ok: true });
         }
 
-        if (groupCommand === '/deadlines') {
+        if (commandName === 'deadlines') {
           const tasks = state.tasks
             .filter((task) => task.status !== 'completed')
             .slice()
@@ -2403,7 +2626,7 @@ async function startServer() {
           return res.json({ ok: true });
         }
 
-        if (groupCommand === '/slots') {
+        if (commandName === 'slots') {
           const team = state.users.filter((member) => !isFacultyUser(member));
           const missing = team.filter((member) => !hasSubmittedAvailabilityForWeek(state.availabilities[member.id], state.settings));
           await sendGroupMessage(chatId, missing.length
@@ -2412,7 +2635,7 @@ async function startServer() {
           return res.json({ ok: true });
         }
 
-        if (groupCommand === '/birthdays') {
+        if (commandName === 'birthdays') {
           const upcoming = state.users
             .map((member) => ({ member, days: daysUntilBirthday(member.birthday) }))
             .filter((item): item is { member: User; days: number } => item.days !== null)
@@ -2426,8 +2649,8 @@ async function startServer() {
           return res.json({ ok: true });
         }
 
-        if (groupCommand.startsWith('/checkin')) {
-          const title = text.replace(/^\/checkin(?:@\w+)?/i, '').trim() || 'Перекличка команды';
+        if (commandName === 'checkin') {
+          const title = commandText || 'Перекличка команды';
           await sendInlinePanel(chatId, `*${title}*\n\nОтметились: 0\nПока никто`, [[
             { text: 'Я здесь · 0', callback_data: 'group_checkin' },
           ]]);
@@ -2439,7 +2662,8 @@ async function startServer() {
         await sendGroupMessage(
           chatId,
           '*Команды MegaBot*\n\n'
-            + '/all текст — упомянуть всю команду\n'
+            + '/all — уведомить всех участников беседы\n'
+            + `${[...blockCommands.entries()].map(([command, competency]) => `/${command} — уведомить блок «${competency}»`).join('\n')}\n`
             + '/meeting — ближайшая встреча\n'
             + '/deadlines — ближайшие дедлайны\n'
             + '/slots — кто не отметил слоты\n'
@@ -3321,6 +3545,7 @@ async function startServer() {
       state.competencies.push(cleanName);
     }
     saveDatabase(state);
+    refreshGroupCommandMenus();
     res.json({ success: true, competencies: state.competencies });
   });
 
@@ -3337,6 +3562,7 @@ async function startServer() {
       if (user.primaryCompetency === cleanName) user.primaryCompetency = '';
     });
     saveDatabase(state);
+    refreshGroupCommandMenus();
     res.json({ success: true, competencies: state.competencies });
   });
 
@@ -4568,7 +4794,8 @@ async function startServer() {
 
     const poll = async () => {
       try {
-        const response = await telegramFetch(`${tgApiBase}/bot${botToken}/getUpdates?offset=${offset}&timeout=30`);
+        const allowedUpdates = encodeURIComponent(JSON.stringify(['message', 'callback_query', 'chat_member', 'my_chat_member']));
+        const response = await telegramFetch(`${tgApiBase}/bot${botToken}/getUpdates?offset=${offset}&timeout=30&allowed_updates=${allowedUpdates}`);
         if (!response.ok) {
           throw new Error(`HTTP status ${response.status}`);
         }
