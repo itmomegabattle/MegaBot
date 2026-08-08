@@ -751,7 +751,7 @@ try {
   const executorComment = await request('/api/task/comment', {
     requesterId: 'u_alice',
     taskId: openTaskResult.data.task.id,
-    assigneeId: 'u_alice',
+    assigneeId: 'stale-client-assignee-id',
     side: 'executor',
     text: 'Собираю материалы',
   });
@@ -773,6 +773,32 @@ try {
   });
   assert.equal(manualReminder.response.status, 200);
   assert.equal(manualReminder.data.queued, 2);
+
+  telegramCalls.length = 0;
+  const blockBroadcast = await request('/api/team/broadcast', {
+    requesterId: 'u_admin',
+    recipientMode: 'blocks',
+    competencies: ['Дизайн'],
+    recipientIds: [],
+    title: 'Проверка рассылки',
+    body: 'Сообщение участникам выбранного блока',
+  });
+  assert.equal(blockBroadcast.response.status, 200);
+  assert.equal(blockBroadcast.data.recipients, 2);
+  assert.equal(blockBroadcast.data.delivered, 2);
+  assert.ok(telegramCalls.every((call) => !call.path.endsWith('/sendMessage') || ['100', '200'].includes(String(call.body.chat_id))));
+
+  telegramCalls.length = 0;
+  const peopleBroadcast = await request('/api/team/broadcast', {
+    requesterId: 'u_admin',
+    recipientMode: 'people',
+    recipientIds: ['u_bob', 'missing'],
+    body: 'Персональная рассылка',
+  });
+  assert.equal(peopleBroadcast.response.status, 200);
+  assert.equal(peopleBroadcast.data.recipients, 1);
+  assert.equal(peopleBroadcast.data.delivered, 1);
+  assert.equal(String(telegramCalls.find((call) => call.path.endsWith('/sendMessage')).body.chat_id), '300');
 
   telegramCalls.length = 0;
   await request('/api/telegram-webhook', {
@@ -904,6 +930,10 @@ try {
   assert.equal(correctedCompletion.response.status, 200);
   assert.equal(correctedCompletion.data.task.timeSpentMinutes, 80);
   assert.equal(correctedCompletion.data.task.completionComments.u_alice, 'Исправленный комментарий');
+  const commentAfterCompletion = await request('/api/task/comment', {
+    requesterId: 'u_alice', taskId: taskResult.data.task.id, assigneeId: 'u_alice', side: 'executor', text: 'Поздний комментарий',
+  });
+  assert.equal(commentAfterCompletion.response.status, 409);
   const taskExportResponse = await fetch(`http://127.0.0.1:${appPort}/api/task/export`, {
     headers: { Cookie: sessionCookie },
   });

@@ -254,6 +254,12 @@ Each hour is a 44px compact control. Selected time uses Battle Blue, white text,
 
 Saving at least one available slot submits the entire week. Days and hours without selected slots are treated as unavailable, so submission status, team summaries, and reminders must never require a participant to mark every day separately.
 
+Configured hours use a two-row balanced grid. The column count is `ceil(hours / 2)`, so an even schedule splits evenly and an odd schedule leaves exactly one fewer control in the second row. Every hour stretches to its grid track instead of using fixed widths.
+
+### Event Scope and Broadcasts
+
+The Tasks event selector uses two equal columns for compact labels. An odd final item spans both columns; long label pairs switch the entire selector to one column so names do not become cramped. Team broadcasts follow the task-assignment disclosure pattern: audience mode first, then collapsed block and people selectors, then optional title and required message body. Only the send action receives primary emphasis.
+
 ## Do's and Don'ts
 
 ### Do:

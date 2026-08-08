@@ -71,4 +71,8 @@ Google Sheets uses one stable operational tab, `ОСНОВА`, addressed by its 
 
 Tasks use one page-level active-event selector shared by personal, open, completed, and backlog views. Creation inherits that event and supports multiple executor blocks. The database workbook exposes a readable `task_log` sheet, while profiles support locally cropped and compressed avatars.
 
+Task coordination now includes a dedicated "Назначенные мной" view with per-executor comments. Executor comments resolve against the authenticated user, completed tasks expose comments as read-only, and state refresh is an explicit no-cache action in the persistent header. Administrators can send team broadcasts to everyone, selected competency blocks, or specific people from the Team section; long recipient collections stay collapsed until requested.
+
+Availability hours always form two balanced rows inside each day: the first row contains one more item only when the configured hour count is odd. Active-event controls use two equal columns for short names, stretch an unpaired final event across the row, and switch to one column when labels cannot share a row cleanly.
+
 Tasks are now scoped by simultaneous work events. Administrators create and finish events without deleting their history; ordinary and faculty task forms attach an event, and My/Open/Completed/Backlog views filter independently by event. Task assignment supports search by name, Telegram username and competency. Meeting duration is validated from 30 minutes through 6 hours.

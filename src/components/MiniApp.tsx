@@ -23,6 +23,8 @@ import {
   UserCircle,
   CaretUp,
   CaretDown,
+  ArrowClockwise,
+  PaperPlaneTilt,
 } from '@phosphor-icons/react';
 import { Meeting, SimulationState, Task, User, WorkEvent } from '../types';
 import { normalizeAvailabilityConfig } from '../availabilityConfig';
@@ -47,7 +49,7 @@ interface MiniAppProps {
   onClaimTask: (taskId: string) => Promise<boolean>;
   onCompleteTask: (taskId: string, timeSpentMinutes?: number, completionComment?: string) => Promise<boolean>;
   onReleaseTask: (taskId: string) => void;
-  onRefreshState: () => void | Promise<void>;
+  onRefreshState: () => boolean | Promise<boolean>;
 }
 
 type MeetingSuggestion = {
@@ -269,6 +271,8 @@ export default function MiniApp({
   const [slotNotice, setSlotNotice] = useState('');
   const [taskError, setTaskError] = useState('');
   const [taskNotice, setTaskNotice] = useState('');
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshNotice, setRefreshNotice] = useState('');
 
   const [showMeetingForm, setShowMeetingForm] = useState(false);
   const [savingMeeting, setSavingMeeting] = useState(false);
@@ -351,6 +355,17 @@ export default function MiniApp({
   const [newCompetency, setNewCompetency] = useState('');
   const [showAllCompetencies, setShowAllCompetencies] = useState(false);
   const [teamError, setTeamError] = useState('');
+  const [broadcastOpen, setBroadcastOpen] = useState(false);
+  const [broadcastMode, setBroadcastMode] = useState<'all' | 'blocks' | 'people'>('all');
+  const [broadcastTitle, setBroadcastTitle] = useState('');
+  const [broadcastBody, setBroadcastBody] = useState('');
+  const [broadcastBlocks, setBroadcastBlocks] = useState<string[]>([]);
+  const [broadcastRecipients, setBroadcastRecipients] = useState<string[]>([]);
+  const [broadcastSearch, setBroadcastSearch] = useState('');
+  const [showBroadcastBlocks, setShowBroadcastBlocks] = useState(false);
+  const [showBroadcastPeople, setShowBroadcastPeople] = useState(false);
+  const [broadcastSaving, setBroadcastSaving] = useState(false);
+  const [broadcastNotice, setBroadcastNotice] = useState('');
   const [savingUserId, setSavingUserId] = useState<string | null>(null);
   const [facultyUserDraft, setFacultyUserDraft] = useState({ realName: '', username: '', role: 'faculty_responsible' as User['role'], facultyId: '', competencies: [] as string[] });
   const [facultyTaskDraft, setFacultyTaskDraft] = useState({ facultyId: '', competency: '', eventId: '', title: '', description: '', deadline: '', assignedTo: [] as string[], reminders: [] as any[] });
@@ -414,6 +429,10 @@ export default function MiniApp({
   const visibleTaskAssignees = normalizedTaskAssigneeSearch || showAllTaskAssignees
     ? matchedTaskAssignees
     : matchedTaskAssignees.slice(0, 3);
+  const normalizedBroadcastSearch = broadcastSearch.trim().toLowerCase();
+  const matchedBroadcastUsers = normalizedBroadcastSearch
+    ? coreTeamUsers.filter((user) => `${user.realName} ${user.username} ${(user.competencies || []).join(' ')}`.toLowerCase().includes(normalizedBroadcastSearch))
+    : coreTeamUsers;
   const filterTasksBySelectedEvent = (tasks: Task[]) => selectedTaskEventId ? tasks.filter((task) => task.eventId === selectedTaskEventId) : [];
   const votedUsers = useMemo(
     () => state.users.filter((user) => {
@@ -433,6 +452,9 @@ export default function MiniApp({
   const myTasks = filterTasksBySelectedEvent(allMyTasks);
   const openTasks = filterTasksBySelectedEvent(allOpenTasks);
   const completedTasks = filterTasksBySelectedEvent(allCompletedTasks);
+  const assignedByMeTasks = filterTasksBySelectedEvent(state.tasks.filter((task) => (
+    task.creatorId === currentUser.id && task.status !== 'completed' && taskAssigneeIds(task).length > 0
+  )));
   const latestCompletedTasks = completedTasks.slice(0, 10);
   const editingCompletedTask = Boolean(completingTaskId && state.tasks.find((task) => task.id === completingTaskId)?.status === 'completed');
   const scheduledMeetings = state.meetings.filter((meeting) => meeting.status === 'scheduled');
@@ -1025,6 +1047,88 @@ export default function MiniApp({
     }
   };
 
+  const refreshPage = async () => {
+    if (refreshing) return;
+    setRefreshing(true);
+    setRefreshNotice('');
+    const refreshed = await onRefreshState();
+    setRefreshNotice(refreshed ? 'Данные обновлены' : 'Не удалось обновить');
+    setRefreshing(false);
+    window.setTimeout(() => setRefreshNotice(''), 2500);
+  };
+
+  const setBroadcastRecipientMode = (mode: 'all' | 'blocks' | 'people') => {
+    setBroadcastMode(mode);
+    setBroadcastSearch('');
+    setShowBroadcastBlocks(false);
+    setShowBroadcastPeople(false);
+    if (mode === 'all') {
+      setBroadcastBlocks([]);
+      setBroadcastRecipients([]);
+    } else if (mode === 'people') {
+      setBroadcastBlocks([]);
+    }
+  };
+
+  const toggleBroadcastBlock = (name: string) => {
+    setBroadcastBlocks((current) => {
+      const next = current.includes(name) ? current.filter((item) => item !== name) : [...current, name];
+      setBroadcastRecipients(coreTeamUsers
+        .filter((user) => next.some((block) => user.primaryCompetency === block || user.competencies?.includes(block)))
+        .map((user) => user.id));
+      return next;
+    });
+  };
+
+  const submitBroadcast = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!isAdmin || broadcastSaving) return;
+    setTeamError('');
+    setBroadcastNotice('');
+    if (!broadcastBody.trim()) {
+      setTeamError('Напиши текст рассылки.');
+      return;
+    }
+    if (broadcastMode === 'blocks' && !broadcastBlocks.length) {
+      setTeamError('Выбери хотя бы один блок получателей.');
+      return;
+    }
+    if (broadcastMode === 'people' && !broadcastRecipients.length) {
+      setTeamError('Выбери хотя бы одного получателя.');
+      return;
+    }
+    setBroadcastSaving(true);
+    try {
+      const response = await fetch('/api/team/broadcast', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          requesterId: currentUser.id,
+          recipientMode: broadcastMode,
+          competencies: broadcastBlocks,
+          recipientIds: broadcastRecipients,
+          title: broadcastTitle,
+          body: broadcastBody,
+        }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || 'Не удалось отправить рассылку');
+      setBroadcastNotice(`Рассылка отправлена: ${result.delivered || 0} из ${result.recipients || 0}.`);
+      setBroadcastTitle('');
+      setBroadcastBody('');
+      setBroadcastBlocks([]);
+      setBroadcastRecipients([]);
+      setBroadcastSearch('');
+      setShowBroadcastBlocks(false);
+      setShowBroadcastPeople(false);
+      await onRefreshState();
+    } catch (error: any) {
+      setTeamError(error.message || 'Не удалось отправить рассылку. Проверь соединение и повтори.');
+    } finally {
+      setBroadcastSaving(false);
+    }
+  };
+
   const submitWorkEvent = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!isAdmin || eventSaving) return;
@@ -1417,6 +1521,17 @@ export default function MiniApp({
               <h1 className="mega-page-title truncate">{pageTitle}</h1>
             </button>
             <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => void refreshPage()}
+                disabled={refreshing}
+                className={`${iconButtonClass} h-11 w-11 disabled:opacity-60`}
+                title="Обновить данные"
+                aria-label="Обновить данные страницы"
+                aria-busy={refreshing}
+              >
+                <ArrowClockwise className={`h-5 w-5 ${refreshing ? 'animate-spin' : ''}`} weight="bold" />
+              </button>
               <button onClick={() => setDarkTheme((value) => !value)} className={`${iconButtonClass} h-11 w-11`} title="Тема" aria-label={darkTheme ? 'Включить светлую тему' : 'Включить тёмную тему'}>
                 {darkTheme ? <Sun className="h-5 w-5" weight="regular" /> : <Moon className="h-5 w-5" weight="regular" />}
               </button>
@@ -1436,6 +1551,11 @@ export default function MiniApp({
       </header>
 
       <main className="mega-main mx-auto flex w-full max-w-3xl flex-col gap-4 px-4 pb-24 pt-4">
+        {refreshNotice && (
+          <div role="status" className={`rounded-2xl px-3 py-2 text-center text-sm font-black ${refreshNotice === 'Данные обновлены' ? 'bg-emerald-50 text-emerald-800' : 'bg-rose-50 text-rose-800'}`}>
+            {refreshNotice}
+          </div>
+        )}
         {activeTab === 'profile' && (
           <section className="space-y-4">
             <div className="rounded-3xl border border-blue-100 bg-white p-5 shadow-sm">
@@ -1815,7 +1935,7 @@ export default function MiniApp({
                             </button>
                           </div>
                         </div>
-                        <div className="grid grid-cols-4 gap-2 sm:grid-cols-8">
+                        <div className="grid gap-2" style={{ gridTemplateColumns: `repeat(${Math.max(1, Math.ceil(hours.length / 2))}, minmax(0, 1fr))` }}>
                           {hours.map((hour) => {
                             const active = selected.includes(hour);
                             return (
@@ -2353,6 +2473,7 @@ export default function MiniApp({
               </form>
             )}
             <TaskList title="Мои задачи" tasks={myTasks} users={state.users} events={allEvents} currentUser={currentUser} actionLabel="Готово" onAction={openCompletionPrompt} onRelease={onReleaseTask} onEdit={startTaskEdit} onNotify={notifyTaskAssignees} onSaveComment={saveTaskComment} />
+            <TaskList title="Назначенные мной" tasks={assignedByMeTasks} users={state.users} events={allEvents} currentUser={currentUser} onEdit={startTaskEdit} onNotify={notifyTaskAssignees} onSaveComment={saveTaskComment} />
             <TaskList title="Открытые задачи" tasks={openTasks} users={state.users} events={allEvents} currentUser={currentUser} actionLabel="Взять" onAction={claimTask} onEdit={startTaskEdit} onNotify={notifyTaskAssignees} onSaveComment={saveTaskComment} />
             <button onClick={() => setShowCompletedTasks((value) => !value)} className={secondaryButtonClass}>
               {showCompletedTasks ? <Minus className="h-4 w-4" /> : <Check className="h-4 w-4" />}
@@ -2392,6 +2513,77 @@ export default function MiniApp({
         {(activeTab === 'team' || (isAdminPanel && adminSection === 'team')) && (
           <section className="space-y-4">
             {teamError && <div role="alert" className="rounded-2xl border border-rose-200 bg-rose-50 p-3 text-sm font-bold text-rose-800">{teamError}</div>}
+            {isAdmin && (
+              <div className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
+                <button type="button" onClick={() => setBroadcastOpen((value) => !value)} className={`${secondaryButtonClass} w-full justify-between`} aria-expanded={broadcastOpen}>
+                  <span className="flex items-center gap-2"><PaperPlaneTilt className="h-4 w-4" /> Создать рассылку</span>
+                  {broadcastOpen ? <CaretUp className="h-4 w-4" /> : <CaretDown className="h-4 w-4" />}
+                </button>
+                {broadcastOpen && (
+                  <form onSubmit={submitBroadcast} className="mt-4 space-y-3">
+                    <Field label="Получатели">
+                      <div className="grid grid-cols-3 gap-1.5 rounded-2xl bg-slate-100 p-1.5">
+                        {([['all', 'Все'], ['blocks', 'По блоку'], ['people', 'Конкретные люди']] as const).map(([mode, label]) => (
+                          <button key={mode} type="button" aria-pressed={broadcastMode === mode} onClick={() => setBroadcastRecipientMode(mode)} className={`min-h-11 min-w-0 rounded-xl px-1.5 py-2 text-xs font-black leading-tight ${pressClass} ${broadcastMode === mode ? 'bg-[#0069E0] text-white shadow-sm' : 'bg-white text-slate-700'}`}>
+                            {label}
+                          </button>
+                        ))}
+                      </div>
+                    </Field>
+
+                    {broadcastMode === 'blocks' && (
+                      <div className="rounded-2xl border border-slate-200 bg-slate-50 p-2">
+                        <button type="button" onClick={() => setShowBroadcastBlocks((value) => !value)} className={`${secondaryButtonClass} w-full justify-between`} aria-expanded={showBroadcastBlocks}>
+                          <span>{broadcastBlocks.length ? `Выбрано блоков: ${broadcastBlocks.length}` : 'Выбрать блоки'}</span>
+                          {showBroadcastBlocks ? <CaretUp className="h-4 w-4" /> : <CaretDown className="h-4 w-4" />}
+                        </button>
+                        {showBroadcastBlocks && (
+                          <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                            {competencies.map((name) => {
+                              const selected = broadcastBlocks.includes(name);
+                              return <button key={name} type="button" aria-pressed={selected} onClick={() => toggleBroadcastBlock(name)} className={`min-h-11 rounded-xl border px-3 py-2 text-left text-sm font-black ${pressClass} ${selected ? 'border-[#0069E0] bg-[#0069E0] text-white' : 'border-slate-200 bg-white text-slate-700'}`}>{selected ? '✓ ' : ''}{name}</button>;
+                            })}
+                            {!competencies.length && <p className="px-2 py-3 text-sm font-bold text-slate-500">Сначала добавь блоки команды.</p>}
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {broadcastMode !== 'all' && (
+                      <div className="rounded-2xl border border-slate-200 bg-slate-50 p-2">
+                        <button type="button" onClick={() => setShowBroadcastPeople((value) => !value)} className={`${secondaryButtonClass} w-full justify-between`} aria-expanded={showBroadcastPeople}>
+                          <span>{broadcastRecipients.length ? `Выбрано людей: ${broadcastRecipients.length}` : 'Выбрать людей'}</span>
+                          {showBroadcastPeople ? <CaretUp className="h-4 w-4" /> : <CaretDown className="h-4 w-4" />}
+                        </button>
+                        {showBroadcastPeople && (
+                          <div className="mt-2 space-y-2">
+                            <label className="relative block min-w-0">
+                              <MagnifyingGlass className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                              <input type="search" value={broadcastSearch} onChange={(event) => setBroadcastSearch(event.target.value)} className={`${inputClass} pl-10`} placeholder="Поиск по имени" aria-label="Поиск получателя рассылки" />
+                            </label>
+                            <button type="button" onClick={() => setBroadcastRecipients(broadcastRecipients.length === coreTeamUsers.length ? [] : coreTeamUsers.map((user) => user.id))} className={`${secondaryButtonClass} w-full`}>
+                              <UsersThree className="h-4 w-4" /> {broadcastRecipients.length === coreTeamUsers.length ? 'Снять всех' : 'Выбрать всех'}
+                            </button>
+                            {matchedBroadcastUsers.map((user) => (
+                              <label key={user.id} className="flex min-h-11 items-center justify-between gap-3 rounded-xl bg-white px-3 py-2 text-sm font-semibold">
+                                <span className="min-w-0 truncate">{user.realName}{user.id === currentUser.id ? ' · это вы' : ''}</span>
+                                <input type="checkbox" checked={broadcastRecipients.includes(user.id)} onChange={() => setBroadcastRecipients((current) => current.includes(user.id) ? current.filter((id) => id !== user.id) : [...current, user.id])} />
+                              </label>
+                            ))}
+                            {!matchedBroadcastUsers.length && <p className="px-2 py-3 text-center text-sm font-bold text-slate-500">Никого не нашли</p>}
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    <Field label="Заголовок — необязательно"><input value={broadcastTitle} onChange={(event) => setBroadcastTitle(event.target.value)} className={inputClass} maxLength={120} placeholder="Например, Важное обновление" /></Field>
+                    <Field label="Текст рассылки"><textarea required value={broadcastBody} onChange={(event) => setBroadcastBody(event.target.value)} className={inputClass} rows={4} maxLength={4000} placeholder="Что нужно сообщить команде" /></Field>
+                    <button disabled={broadcastSaving} className={`${primaryButtonClass} disabled:opacity-60`}><PaperPlaneTilt className="h-4 w-4" /> {broadcastSaving ? 'Отправляю...' : 'Отправить рассылку'}</button>
+                    {broadcastNotice && <p role="status" className="rounded-2xl bg-emerald-50 px-3 py-2 text-sm font-black text-emerald-800">{broadcastNotice}</p>}
+                  </form>
+                )}
+              </div>
+            )}
             {isAdminPanel && (
               <button onClick={() => setShowAddUserForm((value) => !value)} className={primaryButtonClass}>
                 {showAddUserForm ? <Minus className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
@@ -3236,14 +3428,17 @@ function EventScopePicker({ events, value, onChange }: { events: WorkEvent[]; va
   if (!events.length) {
     return <div className="rounded-3xl border border-amber-200 bg-amber-50 p-4 text-sm font-bold text-amber-900">Нет активных мероприятий. Администратору нужно добавить или вернуть мероприятие в работу.</div>;
   }
+  const useSingleColumn = events.some((workEvent) => workEvent.name.length > 24)
+    || events.some((workEvent, index) => index % 2 === 1 && workEvent.name.length + events[index - 1].name.length > 38);
   return (
     <div className="rounded-3xl border border-blue-100 bg-white p-3 shadow-sm">
       <div className="mb-2 px-1 text-xs font-black uppercase tracking-wide text-slate-500">Мероприятие</div>
-      <div className="grid gap-2 [grid-template-columns:repeat(auto-fit,minmax(min(100%,10rem),1fr))]" role="radiogroup" aria-label="Фильтр задач по мероприятию">
-        {events.map((workEvent) => {
+      <div className={`grid gap-2 ${useSingleColumn ? 'grid-cols-1' : 'grid-cols-2'}`} role="radiogroup" aria-label="Фильтр задач по мероприятию">
+        {events.map((workEvent, index) => {
           const selected = value === workEvent.id;
+          const fillsOddLastRow = !useSingleColumn && events.length % 2 === 1 && index === events.length - 1;
           return (
-            <button key={workEvent.id} type="button" role="radio" aria-checked={selected} onClick={() => onChange(workEvent.id)} className={`min-h-12 min-w-0 break-words rounded-2xl border px-3 py-2 text-sm font-black leading-tight ${pressClass} ${selected ? 'border-[#0069E0] bg-[#0069E0] text-white shadow-[0_8px_20px_rgba(0,105,224,0.2)]' : 'border-blue-100 bg-blue-50 text-[#005BC4] hover:bg-blue-100'}`}>
+            <button key={workEvent.id} type="button" role="radio" aria-checked={selected} onClick={() => onChange(workEvent.id)} className={`min-h-12 min-w-0 break-words rounded-2xl border px-3 py-2 text-sm font-black leading-tight ${fillsOddLastRow ? 'col-span-2' : ''} ${pressClass} ${selected ? 'border-[#0069E0] bg-[#0069E0] text-white shadow-[0_8px_20px_rgba(0,105,224,0.2)]' : 'border-blue-100 bg-blue-50 text-[#005BC4] hover:bg-blue-100'}`}>
               {workEvent.name}
             </button>
           );
@@ -3326,8 +3521,8 @@ function TaskList({
   users: User[];
   events: WorkEvent[];
   currentUser: User;
-  actionLabel: string;
-  onAction: (taskId: string) => void;
+  actionLabel?: string;
+  onAction?: (taskId: string) => void;
   onRelease?: (taskId: string) => void;
   onEdit?: (task: Task) => void;
   onNotify?: (taskId: string) => void;
@@ -3366,7 +3561,7 @@ function TaskList({
                 <h3 className="font-black">{task.title}</h3>
                 <p className="mt-1 text-sm text-slate-500">{task.description}</p>
               </div>
-              {task.status !== 'completed' && (
+              {task.status !== 'completed' && onAction && actionLabel && (
                 <button onClick={(event) => { event.stopPropagation(); onAction(task.id); }} className={`mega-primary-button w-full shrink-0 rounded-full bg-[#0069E0] px-3 py-2 text-xs font-black text-white hover:bg-[#1677E8] active:bg-[#0058BD] min-[380px]:w-auto ${pressClass}`}>
                   {actionLabel}
                 </button>
@@ -3415,7 +3610,7 @@ function TaskList({
                             <InfoRow label="От исполнителя" value={note.executor || 'пока не написал'} />
                             <InfoRow label="От координатора" value={note.coordinator || 'пока не написал'} />
                             {completionComment && <InfoRow label="При завершении" value={completionComment} />}
-                            {side && onSaveComment && (
+                            {task.status !== 'completed' && side && onSaveComment && (
                               <div className="space-y-2 pt-1">
                                 <textarea
                                   value={noteDrafts[draftKey] ?? storedText}

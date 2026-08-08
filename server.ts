@@ -4030,22 +4030,68 @@ async function startServer() {
     const state = loadDatabase();
     const task = state.tasks.find((item) => item.id === taskId);
     const requester = state.users.find((user) => user.id === requesterId && user.registered);
-    if (!task || !requester) return res.status(404).json({ error: 'Задача или пользователь не найдены' });
-    if (!assignedIds(task).includes(assigneeId)) return res.status(400).json({ error: 'Исполнитель не назначен на эту задачу' });
+    if (!task) return res.status(404).json({ error: 'Задача не найдена. Обнови страницу и попробуй снова.' });
+    if (!requester) return res.status(403).json({ error: 'Пользователь не найден или доступ ещё не активирован' });
+    if (task.status === 'completed') return res.status(409).json({ error: 'Выполненная задача доступна только для просмотра. Сначала верни её в работу.' });
+    if (side !== 'coordinator' && side !== 'executor') return res.status(400).json({ error: 'Неизвестный тип комментария' });
+    const targetAssigneeId = side === 'executor' ? requester.id : String(assigneeId || '');
+    if (!assignedIds(task).includes(targetAssigneeId)) return res.status(400).json({ error: 'Исполнитель больше не назначен на эту задачу. Обнови страницу.' });
     const isCoordinator = task.creatorId === requester.id || requester.role === 'admin';
-    const isExecutor = assigneeId === requester.id;
+    const isExecutor = targetAssigneeId === requester.id;
     if ((side === 'coordinator' && !isCoordinator) || (side === 'executor' && !isExecutor)) {
       return res.status(403).json({ error: 'Нет доступа к этому комментарию' });
     }
-    if (side !== 'coordinator' && side !== 'executor') return res.status(400).json({ error: 'Неизвестный тип комментария' });
     task.assigneeNotes = task.assigneeNotes || {};
-    task.assigneeNotes[assigneeId] = {
-      ...(task.assigneeNotes[assigneeId] || {}),
-      [side]: String(text || '').trim(),
+    task.assigneeNotes[targetAssigneeId] = {
+      ...(task.assigneeNotes[targetAssigneeId] || {}),
+      [side]: String(text || '').trim().slice(0, 2_000),
       updatedAt: new Date().toISOString(),
     };
     saveDatabase(state);
     return res.json({ success: true, task });
+  });
+
+  app.post('/api/team/broadcast', async (req, res) => {
+    const { requesterId, recipientMode, competencies, recipientIds, title, body } = req.body || {};
+    const state = loadDatabase();
+    if (!isAdminUser(state, requesterId)) return res.status(403).json({ error: 'Создавать рассылки может только администратор' });
+    const cleanBody = String(body || '').trim().slice(0, 4_000);
+    const cleanTitle = String(title || '').trim().slice(0, 120);
+    if (!cleanBody) return res.status(400).json({ error: 'Текст рассылки обязателен' });
+    if (!['all', 'blocks', 'people'].includes(recipientMode)) return res.status(400).json({ error: 'Выбери получателей рассылки' });
+
+    const teamUsers = state.users.filter((user) => user.registered && !isFacultyUser(user));
+    const cleanCompetencies = [...new Set((Array.isArray(competencies) ? competencies : []).map(String).filter((name) => state.competencies?.includes(name)))];
+    const requestedIds = new Set((Array.isArray(recipientIds) ? recipientIds : []).map(String));
+    let recipients: User[] = [];
+    if (recipientMode === 'all') recipients = teamUsers;
+    if (recipientMode === 'blocks') {
+      if (!cleanCompetencies.length) return res.status(400).json({ error: 'Выбери хотя бы один блок получателей' });
+      recipients = teamUsers.filter((user) => cleanCompetencies.some((name) => user.primaryCompetency === name || user.competencies?.includes(name)) || requestedIds.has(user.id));
+    }
+    if (recipientMode === 'people') recipients = teamUsers.filter((user) => requestedIds.has(user.id));
+    recipients = [...new Map(recipients.map((user) => [user.id, user])).values()];
+    if (!recipients.length) return res.status(400).json({ error: 'Не найдено ни одного доступного получателя' });
+
+    const messageText = cleanTitle ? `*${cleanTitle}*\n\n${cleanBody}` : cleanBody;
+    const timestamp = new Date().toISOString();
+    const sendJobs: Promise<boolean>[] = [];
+    for (const recipient of recipients) {
+      if (!state.messages[recipient.id]) state.messages[recipient.id] = [];
+      state.messages[recipient.id].push({
+        id: `team_broadcast_${Date.now()}_${recipient.id}`,
+        userId: recipient.id,
+        sender: 'bot',
+        text: messageText,
+        timestamp,
+        buttons: [{ text: 'Открыть Mini App', action: 'open_tma' }],
+      });
+      if (recipient.telegramId) sendJobs.push(sendTelegramMessage(recipient.telegramId, messageText, [{ text: 'Открыть Mini App', action: 'open_tma' }], false, recipient));
+    }
+    saveDatabase(state);
+    const delivery = await Promise.allSettled(sendJobs);
+    const delivered = delivery.filter((result) => result.status === 'fulfilled' && result.value).length;
+    return res.json({ success: true, recipients: recipients.length, queued: sendJobs.length, delivered });
   });
 
   app.post('/api/task/notify', async (req, res) => {

@@ -15,7 +15,7 @@ export default function App() {
 
   const fetchState = async () => {
     try {
-      const res = await fetch('/api/state');
+      const res = await fetch('/api/state', { cache: 'no-store' });
       if (!res.ok) throw new Error(`State request failed: ${res.status}`);
       const data = await res.json();
       setState(data);
@@ -24,8 +24,10 @@ export default function App() {
         const previewUser = data.users?.find((user: any) => user.registered && (user.role === 'admin' || user.role === 'organizer'));
         if (previewUser) setCurrentUserId(previewUser.id);
       }
+      return true;
     } catch (err) {
       console.error('Error fetching app state:', err);
+      return false;
     } finally {
       setLoading(false);
     }
