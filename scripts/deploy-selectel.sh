@@ -25,7 +25,8 @@ npm run lint
 npm run build
 npm run db:sheets:backup
 
-APP_REVISION="$(git rev-parse HEAD)" pm2 startOrReload ecosystem.config.cjs --update-env
+export APP_REVISION="$(git rev-parse HEAD)"
+pm2 startOrReload ecosystem.config.cjs --update-env
 pm2 save
 
 for attempt in {1..20}; do

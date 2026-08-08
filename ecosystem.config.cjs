@@ -14,6 +14,7 @@ module.exports = {
       time: true,
       env: {
         NODE_ENV: 'production',
+        APP_REVISION: process.env.APP_REVISION || 'unknown',
       },
     },
   ],
