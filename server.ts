@@ -758,6 +758,7 @@ async function startServer() {
     res.json({
       ok: true,
       service: 'megabot',
+      revision: process.env.APP_REVISION || 'unknown',
       uptimeSeconds: Math.floor(process.uptime()),
       telegramConfigured: Boolean(process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN),
       webAppConfigured: Boolean(configuredWebAppUrl()),
@@ -4410,8 +4411,14 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(process.cwd(), 'dist');
-    app.use(express.static(distPath));
+    app.use(express.static(distPath, {
+      setHeaders: (res, filePath) => {
+        if (filePath.endsWith('.html')) res.setHeader('Cache-Control', 'no-store, max-age=0');
+        else if (filePath.includes(`${path.sep}assets${path.sep}`)) res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+      },
+    }));
     app.get('*', (req, res) => {
+      res.setHeader('Cache-Control', 'no-store, max-age=0');
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }

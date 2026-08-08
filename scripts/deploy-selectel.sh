@@ -25,11 +25,15 @@ npm run lint
 npm run build
 npm run db:sheets:backup
 
-pm2 startOrReload ecosystem.config.cjs --update-env
+APP_REVISION="$(git rev-parse HEAD)" pm2 startOrReload ecosystem.config.cjs --update-env
 pm2 save
 
 for attempt in {1..20}; do
-  if curl --fail --silent --show-error http://127.0.0.1:3000/api/health >/dev/null; then
+  if HEALTH_JSON="$(curl --fail --silent --show-error http://127.0.0.1:3000/api/health)"; then
+    echo "${HEALTH_JSON}" | grep -F "\"revision\":\"$(git rev-parse HEAD)\"" >/dev/null || {
+      echo "ERROR: health endpoint reports a stale revision: ${HEALTH_JSON}" >&2
+      exit 1
+    }
     echo "MegaBot is healthy."
     pm2 status megabot
     exit 0
