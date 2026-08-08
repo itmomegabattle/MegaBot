@@ -21,6 +21,8 @@ import {
   Sun,
   MagnifyingGlass,
   UserCircle,
+  CaretUp,
+  CaretDown,
 } from '@phosphor-icons/react';
 import { Meeting, SimulationState, Task, User, WorkEvent } from '../types';
 import { normalizeAvailabilityConfig } from '../availabilityConfig';
@@ -260,9 +262,9 @@ export default function MiniApp({
   const [slotSettingsEndHour, setSlotSettingsEndHour] = useState(23);
   const [suggestions, setSuggestions] = useState<MeetingSuggestion[]>([]);
   const [suggesting, setSuggesting] = useState(false);
-  const [savingWeek, setSavingWeek] = useState(false);
-  const [weekSaved, setWeekSaved] = useState(false);
-  const [hasUnsavedSlots, setHasUnsavedSlots] = useState(false);
+  const [savingWeekIndex, setSavingWeekIndex] = useState<number | null>(null);
+  const [savedWeekIndexes, setSavedWeekIndexes] = useState<number[]>([]);
+  const [dirtyWeekIndexes, setDirtyWeekIndexes] = useState<number[]>([]);
   const [slotError, setSlotError] = useState('');
   const [slotNotice, setSlotNotice] = useState('');
   const [taskError, setTaskError] = useState('');
@@ -291,8 +293,10 @@ export default function MiniApp({
   const [taskCompetencies, setTaskCompetencies] = useState<string[]>([]);
   const [taskDeadline, setTaskDeadline] = useState('');
   const [taskAssignedTo, setTaskAssignedTo] = useState<string[]>([]);
+  const [taskAssignmentMode, setTaskAssignmentMode] = useState<'blocks' | 'people' | 'open'>('blocks');
   const [taskAssigneeSearch, setTaskAssigneeSearch] = useState('');
   const [showAllTaskAssignees, setShowAllTaskAssignees] = useState(false);
+  const [showTaskBlocks, setShowTaskBlocks] = useState(false);
   const [taskSow, setTaskSow] = useState('');
   const [taskPriority, setTaskPriority] = useState<Task['priority']>('normal');
   const [taskReminders, setTaskReminders] = useState<any[]>([]);
@@ -402,9 +406,7 @@ export default function MiniApp({
     if (!activeEvents.some((item) => item.id === selectedTaskEventId)) setSelectedTaskEventId(activeEvents[0]?.id || '');
   }, [activeEventIds, selectedTaskEventId]);
   const selectedTaskEvent = activeEvents.find((item) => item.id === selectedTaskEventId);
-  const eligibleTaskAssignees = taskCompetencies.length
-    ? coreTeamUsers.filter((user) => taskCompetencies.some((name) => user.primaryCompetency === name || user.competencies?.includes(name)))
-    : coreTeamUsers;
+  const eligibleTaskAssignees = coreTeamUsers;
   const normalizedTaskAssigneeSearch = taskAssigneeSearch.trim().toLowerCase();
   const matchedTaskAssignees = normalizedTaskAssigneeSearch
     ? eligibleTaskAssignees.filter((user) => `${user.realName} ${user.username} ${(user.competencies || []).join(' ')}`.toLowerCase().includes(normalizedTaskAssigneeSearch))
@@ -422,7 +424,6 @@ export default function MiniApp({
     [state.availabilities, state.users],
   );
   const majority = Math.floor(coreTeamUsers.length / 2) + 1;
-  const firstWeekFilled = activeDays.some((dayIndex) => (slots[dayIndex] || []).length > 0);
   const allMyTasks = state.tasks.filter((task) => taskAssigneeIds(task).includes(currentUser.id) && task.status !== 'completed');
   const allOpenTasks = state.tasks.filter((task) => task.status === 'open');
   const allCompletedTasks = state.tasks
@@ -433,6 +434,7 @@ export default function MiniApp({
   const openTasks = filterTasksBySelectedEvent(allOpenTasks);
   const completedTasks = filterTasksBySelectedEvent(allCompletedTasks);
   const latestCompletedTasks = completedTasks.slice(0, 10);
+  const editingCompletedTask = Boolean(completingTaskId && state.tasks.find((task) => task.id === completingTaskId)?.status === 'completed');
   const scheduledMeetings = state.meetings.filter((meeting) => meeting.status === 'scheduled');
   const visibleScheduledMeetings = showAllMeetings ? scheduledMeetings : scheduledMeetings.slice(0, 3);
   const profileAssignedTasks = state.tasks.filter((task) => taskAssigneeIds(task).includes(currentUser.id));
@@ -474,13 +476,13 @@ export default function MiniApp({
   const profileAge = ageFromBirthday(currentUser.birthday);
   const facultyTasks = state.tasks.filter((task) => task.facultyId);
   const visibleFacultyTasks = showAllFacultyTasks ? facultyTasks : facultyTasks.slice(0, 3);
-  const tasksByCompetency = filterTasksBySelectedEvent(state.tasks).reduce<Record<string, Task[]>>((acc, task) => {
+  const tasksByCompetency = filterTasksBySelectedEvent(state.tasks.filter((task) => task.status === 'completed')).reduce<Record<string, Task[]>>((acc, task) => {
     const key = taskCompetencyNames(task).join(' · ') || 'Без блока';
     if (!acc[key]) acc[key] = [];
     acc[key].push(task);
     return acc;
   }, {});
-  const allTasksByCompetency = state.tasks.reduce<Record<string, Task[]>>((acc, task) => {
+  const allTasksByCompetency = state.tasks.filter((task) => task.status === 'completed').reduce<Record<string, Task[]>>((acc, task) => {
     const key = taskCompetencyNames(task).join(' · ') || 'Без блока';
     if (!acc[key]) acc[key] = [];
     acc[key].push(task);
@@ -611,9 +613,10 @@ export default function MiniApp({
   };
 
   const toggleSlot = (day: number, hour: number) => {
-    setWeekSaved(false);
     setSlotError('');
-    setHasUnsavedSlots(true);
+    const weekIndex = Math.floor(day / 7);
+    setSavedWeekIndexes((current) => current.filter((item) => item !== weekIndex));
+    setDirtyWeekIndexes((current) => current.includes(weekIndex) ? current : [...current, weekIndex]);
     setSlots((prev) => {
       const daySlots = prev[day] || [];
       const nextDay = daySlots.includes(hour)
@@ -624,9 +627,10 @@ export default function MiniApp({
   };
 
   const selectWholeDay = (day: number) => {
-    setWeekSaved(false);
     setSlotError('');
-    setHasUnsavedSlots(true);
+    const weekIndex = Math.floor(day / 7);
+    setSavedWeekIndexes((current) => current.filter((item) => item !== weekIndex));
+    setDirtyWeekIndexes((current) => current.includes(weekIndex) ? current : [...current, weekIndex]);
     setSlots((prev) => {
       const full = (prev[day] || []).length === hours.length;
       return { ...prev, [day]: full ? [] : [...hours] };
@@ -673,25 +677,23 @@ export default function MiniApp({
   const toggleTaskCompetency = (name: string) => {
     const next = taskCompetencies.includes(name) ? taskCompetencies.filter((item) => item !== name) : [...taskCompetencies, name];
     setTaskCompetencies(next);
-    const eligibleIds = new Set(coreTeamUsers
+    const blockMemberIds = coreTeamUsers
       .filter((user) => next.some((item) => user.primaryCompetency === item || user.competencies?.includes(item)))
-      .map((user) => user.id));
-    setTaskAssignedTo((current) => current.filter((id) => eligibleIds.has(id)));
+      .map((user) => user.id);
+    setTaskAssignedTo(blockMemberIds);
     setShowAllTaskAssignees(false);
   };
 
-  const saveWeek = async () => {
-    if (!firstWeekFilled) {
-      setSlotError('Сначала отметь хотя бы один свободный час на первой неделе. Следующие недели можно заполнить дополнительно.');
-      setHasUnsavedSlots(true);
-      return;
-    }
+  const saveWeek = async (weekIndex: number) => {
     setSlotError('');
-    setSavingWeek(true);
+    setSavingWeekIndex(weekIndex);
     const ok = await onSaveAvailability(slots, currentWeekStart(), []);
-    setSavingWeek(false);
-    setWeekSaved(ok);
-    if (ok) setHasUnsavedSlots(false);
+    setSavingWeekIndex(null);
+    if (ok) {
+      setSavedWeekIndexes((current) => current.includes(weekIndex) ? current : [...current, weekIndex]);
+      setDirtyWeekIndexes((current) => current.filter((item) => item !== weekIndex));
+      setSlotNotice(`Неделя ${weekIndex + 1} сохранена независимо от остальных.`);
+    }
   };
 
   const resetMeetingForm = () => {
@@ -827,8 +829,10 @@ export default function MiniApp({
     setTaskCompetencies([]);
     setTaskDeadline('');
     setTaskAssignedTo([]);
+    setTaskAssignmentMode('blocks');
     setTaskAssigneeSearch('');
     setShowAllTaskAssignees(false);
+    setShowTaskBlocks(false);
     setTaskSow('');
     setTaskPriority('normal');
     setTaskReminders([]);
@@ -852,7 +856,9 @@ export default function MiniApp({
     setTaskCompetencies(taskCompetencyNames(task));
     setTaskDeadline(formatDateShort(task.deadline));
     setTaskAssignedTo(taskAssigneeIds(task));
+    setTaskAssignmentMode(taskAssigneeIds(task).length === 0 ? 'open' : taskCompetencyNames(task).length ? 'blocks' : 'people');
     setTaskAssigneeSearch('');
+    setShowTaskBlocks(false);
     setTaskSow(task.sow || '');
     setTaskPriority(task.priority || 'normal');
     setTaskReminders(task.reminders?.map((reminder) => ({ ...reminder })) || []);
@@ -869,8 +875,12 @@ export default function MiniApp({
       setTaskError('Выбери мероприятие в верхней части страницы.');
       return;
     }
-    if (!taskCompetencies.length) {
+    if (taskAssignmentMode === 'blocks' && !taskCompetencies.length) {
       setTaskError('Выбери хотя бы один блок исполнителей.');
+      return;
+    }
+    if (taskAssignmentMode !== 'open' && !taskAssignedTo.length) {
+      setTaskError('Выбери хотя бы одного исполнителя или сделай задачу открытой.');
       return;
     }
     setSavingTask(true);
@@ -881,7 +891,7 @@ export default function MiniApp({
       competencies: taskCompetencies,
       eventId: selectedTaskEventId,
       deadline: taskDeadline,
-      assignedTo: taskAssignedTo,
+      assignedTo: taskAssignmentMode === 'open' ? [] : taskAssignedTo,
       sow: taskSow,
       tips: [],
       priority: taskPriority,
@@ -915,10 +925,12 @@ export default function MiniApp({
   };
 
   const openCompletionPrompt = (taskId: string) => {
+    const task = state.tasks.find((item) => item.id === taskId);
+    const totalMinutes = Number(task?.timeSpentMinutes || 0);
     setCompletingTaskId(taskId);
-    setCompletionHours('');
-    setCompletionMinutes('');
-    setCompletionComment('');
+    setCompletionHours(totalMinutes ? String(Math.floor(totalMinutes / 60)) : '');
+    setCompletionMinutes(totalMinutes ? String(totalMinutes % 60) : '');
+    setCompletionComment(task?.completionComments?.[currentUser.id] || '');
   };
 
   const closeCompletionPrompt = () => {
@@ -942,6 +954,29 @@ export default function MiniApp({
     );
     setSavingCompletion(false);
     if (ok) closeCompletionPrompt();
+  };
+
+  const reopenCompletedTask = async () => {
+    if (!completingTaskId || savingCompletion) return;
+    setSavingCompletion(true);
+    setTaskError('');
+    try {
+      const response = await fetch('/api/task/status', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ taskId: completingTaskId, status: 'in_progress', requesterId: currentUser.id }),
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || 'Не удалось вернуть задачу в работу');
+      await onRefreshState();
+      setTaskNotice('Задача снова в работе. Комментарий можно исправить при следующем завершении.');
+      setSavingCompletion(false);
+      closeCompletionPrompt();
+    } catch (error: any) {
+      setTaskError(error.message || 'Не удалось вернуть задачу в работу.');
+    } finally {
+      setSavingCompletion(false);
+    }
   };
 
   const claimTask = async (taskId: string) => {
@@ -1405,7 +1440,11 @@ export default function MiniApp({
           <section className="space-y-4">
             <div className="rounded-3xl border border-blue-100 bg-white p-5 shadow-sm">
               <div className="flex items-center gap-4">
-                <UserAvatar user={currentUser} className="h-16 w-16 rounded-2xl" />
+                <label className="group relative shrink-0 cursor-pointer" aria-label="Изменить фотографию профиля">
+                  <UserAvatar user={currentUser} className="h-16 w-16 rounded-2xl" />
+                  <span className="absolute inset-0 flex items-center justify-center rounded-2xl bg-slate-950/0 text-transparent transition group-hover:bg-slate-950/45 group-hover:text-white group-focus-within:bg-slate-950/45 group-focus-within:text-white"><Camera className="h-5 w-5" /></span>
+                  <input type="file" accept="image/*" className="sr-only" onChange={(event) => { chooseAvatarFile(event.target.files?.[0]); event.currentTarget.value = ''; }} />
+                </label>
                 <div className="min-w-0">
                   <h2 className="truncate text-lg font-black">{currentUser.realName}</h2>
                   <a href={telegramLink(currentUser.username)} onClick={(event) => openTelegramProfile(event, telegramLink(currentUser.username))} className="text-sm font-bold text-[#0069E0]">
@@ -1419,10 +1458,6 @@ export default function MiniApp({
                 </div>
               </div>
               <div className="mt-4 flex flex-wrap gap-2">
-                <label className={`${secondaryButtonClass} cursor-pointer`}>
-                  <Camera className="h-4 w-4" /> Изменить фото
-                  <input type="file" accept="image/*" className="sr-only" onChange={(event) => { chooseAvatarFile(event.target.files?.[0]); event.currentTarget.value = ''; }} />
-                </label>
                 {currentUser.avatarDataUrl && (
                   <button type="button" disabled={avatarSaving} onClick={() => void saveAvatar('')} className={`${miniButtonClass} border-rose-100 bg-rose-50 text-rose-600 disabled:opacity-60`}>Удалить фото</button>
                 )}
@@ -1728,7 +1763,7 @@ export default function MiniApp({
                     <p className="mt-1 text-xs font-semibold text-slate-500">Экспортируй историю или полностью очисти журнал задач.</p>
                   </div>
                   <div className="flex flex-wrap gap-2">
-                    <a href="/api/integrations/google-sheets/task-log" target="_blank" rel="noreferrer" className={miniButtonClass}>
+                    <a href="https://docs.google.com/spreadsheets/d/1R1MtYJfEuGNw0JI_laNmRk_Un7wIQwxt0xRYTp3mih4/edit?gid=326388773#gid=326388773" target="_blank" rel="noreferrer" className={miniButtonClass}>
                       <ArrowSquareOut className="h-4 w-4" /> Таблица лога
                     </a>
                     <button onClick={clearTaskLog} className={`${miniButtonClass} border-rose-100 bg-rose-50 text-rose-600 hover:bg-rose-100 active:bg-rose-200`}>
@@ -1739,7 +1774,7 @@ export default function MiniApp({
                     </button>
                   </div>
                 </div>
-                {showTaskLog && <div className="mt-4"><TaskLogView tasksByCompetency={allTasksByCompetency} users={state.users} events={allEvents} /></div>}
+                {showTaskLog && <div className="mt-4"><TaskLogView tasksByCompetency={allTasksByCompetency} users={state.users} events={allEvents} currentUser={currentUser} onEditCompletion={openCompletionPrompt} onEditTask={startTaskEdit} /></div>}
               </div>
             )}
           </section>
@@ -1769,7 +1804,7 @@ export default function MiniApp({
                       <div key={`${weekIndex}-${day.full}`} className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
                         <div className="mb-3 grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
                           <div className="min-w-0">
-                            <h2 className="whitespace-nowrap text-sm font-black leading-tight sm:text-base"><span className="sm:hidden">{day.short}</span><span className="hidden sm:inline">{day.full}</span>, {formatDayMonth(date)}</h2>
+                            <h2 className="whitespace-nowrap text-sm font-black leading-tight sm:text-base"><span className="sm:hidden">{day.short},</span><span className="hidden sm:inline">{day.full},</span> {formatDayMonth(date)}</h2>
                             <p className="text-xs text-slate-500">
                               {selected.length ? `${selected.length} ч. свободно` : 'Пока ничего не выбрано'}
                             </p>
@@ -1801,21 +1836,21 @@ export default function MiniApp({
                       </div>
                     );
                   })}
+                  <button
+                    type="button"
+                    onClick={() => void saveWeek(weekIndex)}
+                    disabled={savingWeekIndex !== null || (!dirtyWeekIndexes.includes(weekIndex) && savedWeekIndexes.includes(weekIndex))}
+                    aria-busy={savingWeekIndex === weekIndex}
+                    className={`${primaryButtonClass} py-3 disabled:opacity-70`}
+                  >
+                    <Check className="h-5 w-5" />
+                    <span aria-live="polite">
+                      {savingWeekIndex === weekIndex ? 'Сохраняю...' : savedWeekIndexes.includes(weekIndex) ? 'Неделя сохранена' : `Сохранить неделю ${weekIndex + 1}`}
+                    </span>
+                  </button>
                 </div>
               ))}
             </div>
-
-            <button
-              onClick={saveWeek}
-              disabled={savingWeek || (!hasUnsavedSlots && weekSaved)}
-              aria-busy={savingWeek}
-              className={`${primaryButtonClass} mega-save-week z-20 py-4 text-base disabled:opacity-70`}
-            >
-              <Check className="h-5 w-5" />
-              <span aria-live="polite">
-                {savingWeek ? 'Сохраняю...' : weekSaved ? 'Неделя сохранена' : 'Сохранить неделю'}
-              </span>
-            </button>
           </section>
         )}
 
@@ -1828,7 +1863,7 @@ export default function MiniApp({
                   <h2 className="font-black">Общий календарь</h2>
                   <p className="mt-1 text-xs font-semibold text-slate-500">Все свободные часы команды на текущей неделе</p>
                 </div>
-                <a href="/api/integrations/google-sheets/availability" target="_blank" rel="noreferrer" className={miniButtonClass}>
+                <a href="https://docs.google.com/spreadsheets/d/16sbBKwmrUm2b6n7nZG2UYyjBk-8IkUaGJqEd-nQwtWo/edit?usp=sharing" target="_blank" rel="noreferrer" className={miniButtonClass}>
                   <ArrowSquareOut className="h-4 w-4" /> Открыть ОСНОВА
                 </a>
               </div>
@@ -2193,28 +2228,87 @@ export default function MiniApp({
                   <h2 className="font-black">{editingTaskId ? 'Редактировать задачу' : 'Новая задача'}</h2>
                   {editingTaskId && <button type="button" onClick={() => { resetTaskForm(); setShowTaskForm(false); }} className={miniButtonClass}><X className="h-4 w-4" /> Отмена</button>}
                 </div>
-                <Field label="Название">
-                  <input value={taskTitle} onChange={(e) => setTaskTitle(e.target.value)} className={inputClass} />
-                </Field>
-                <Field label="Описание">
-                  <textarea value={taskDesc} onChange={(e) => setTaskDesc(e.target.value)} className={inputClass} rows={3} />
-                </Field>
                 <Field label="Мероприятие">
                   <div className="rounded-2xl bg-blue-50 px-3 py-3 text-sm font-black text-[#005BC4]">{selectedTaskEvent?.name || 'Не выбрано'}</div>
                 </Field>
-                <Field label="Блоки исполнителей">
-                  <div className="grid grid-cols-1 gap-2 rounded-2xl border border-slate-200 bg-slate-50 p-2 sm:grid-cols-2">
-                    {(competencies.length ? competencies : ['Общее']).map((name) => {
-                      const selected = taskCompetencies.includes(name);
-                      return (
-                        <button key={name} type="button" aria-pressed={selected} onClick={() => toggleTaskCompetency(name)} className={`min-h-11 rounded-xl border px-3 py-2 text-left text-sm font-black ${pressClass} ${selected ? 'border-[#0069E0] bg-[#0069E0] text-white' : 'border-slate-200 bg-white text-slate-700 hover:border-blue-300'}`}>
-                          {name}
+                <Field label="Название задачи">
+                  <input value={taskTitle} onChange={(e) => setTaskTitle(e.target.value)} className={inputClass} />
+                </Field>
+                <Field label="Описание">
+                  <textarea value={taskDesc} onChange={(e) => setTaskDesc(e.target.value)} className={inputClass} rows={2} />
+                </Field>
+                <Field label="Исполнители">
+                  <div className="space-y-3">
+                    <div className="grid grid-cols-3 gap-1.5 rounded-2xl bg-slate-100 p-1.5">
+                      {([
+                        ['blocks', 'По блоку'],
+                        ['people', 'Конкретным людям'],
+                        ['open', 'Открытая'],
+                      ] as const).map(([mode, label]) => (
+                        <button
+                          key={mode}
+                          type="button"
+                          aria-pressed={taskAssignmentMode === mode}
+                          onClick={() => {
+                            setTaskAssignmentMode(mode);
+                            if (mode === 'open') setTaskAssignedTo([]);
+                            if (mode === 'blocks') setTaskAssignedTo(coreTeamUsers.filter((user) => taskCompetencies.some((name) => user.primaryCompetency === name || user.competencies?.includes(name))).map((user) => user.id));
+                            if (mode !== 'blocks') setShowTaskBlocks(false);
+                            setTaskAssigneeSearch('');
+                            setShowAllTaskAssignees(false);
+                          }}
+                          className={`min-h-11 min-w-0 rounded-xl px-1.5 py-2 text-xs font-black leading-tight sm:text-sm ${pressClass} ${taskAssignmentMode === mode ? 'bg-[#0069E0] text-white shadow-sm' : 'bg-white text-slate-700'}`}
+                        >
+                          {label}
                         </button>
-                      );
-                    })}
+                      ))}
+                    </div>
+
+                    {taskAssignmentMode === 'blocks' && (
+                      <div className="rounded-2xl border border-slate-200 bg-slate-50 p-2">
+                        <button type="button" onClick={() => setShowTaskBlocks((value) => !value)} className={`${secondaryButtonClass} w-full justify-between`}>
+                          <span>{taskCompetencies.length ? `Выбрано блоков: ${taskCompetencies.length}` : 'Выбрать блоки'}</span>
+                          {showTaskBlocks ? <CaretUp className="h-4 w-4" /> : <CaretDown className="h-4 w-4" />}
+                        </button>
+                        {showTaskBlocks && (
+                          <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                            {(competencies.length ? competencies : ['Общее']).map((name) => {
+                              const selected = taskCompetencies.includes(name);
+                              return (
+                                <button key={name} type="button" aria-pressed={selected} onClick={() => toggleTaskCompetency(name)} className={`min-h-11 rounded-xl border px-3 py-2 text-left text-sm font-black ${pressClass} ${selected ? 'border-[#0069E0] bg-[#0069E0] text-white' : 'border-slate-200 bg-white text-slate-700'}`}>
+                                  {selected ? '✓ ' : ''}{name}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {taskAssignmentMode !== 'open' && (
+                      <div className="space-y-2 rounded-2xl border border-slate-200 bg-slate-50 p-2">
+                        <div className="flex flex-col gap-2 min-[390px]:flex-row">
+                          <label className="relative min-w-0 flex-1">
+                            <MagnifyingGlass className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                            <input value={taskAssigneeSearch} onChange={(event) => setTaskAssigneeSearch(event.target.value)} className={`${inputClass} pl-10`} placeholder="Поиск по имени" aria-label="Поиск исполнителя" />
+                          </label>
+                          <button type="button" onClick={() => setTaskAssignedTo(taskAssignedTo.length === coreTeamUsers.length ? [] : coreTeamUsers.map((user) => user.id))} className={`${secondaryButtonClass} shrink-0 px-3`}>
+                            <UsersThree className="h-4 w-4" /> {taskAssignedTo.length === coreTeamUsers.length ? 'Снять всех' : 'Выбрать всех'}
+                          </button>
+                        </div>
+                        {!normalizedTaskAssigneeSearch && coreTeamUsers.length > 3 && <ListDisclosure expanded={showAllTaskAssignees} onToggle={() => setShowAllTaskAssignees((value) => !value)} total={coreTeamUsers.length} />}
+                        {visibleTaskAssignees.map((user) => (
+                          <label key={user.id} className="flex min-h-11 items-center justify-between rounded-xl bg-white px-3 py-2 text-sm font-semibold">
+                            <span className="min-w-0 truncate">{user.realName}{user.id === currentUser.id ? ' · это вы' : ''}</span>
+                            <input type="checkbox" checked={taskAssignedTo.includes(user.id)} onChange={() => setTaskAssignedTo((prev) => prev.includes(user.id) ? prev.filter((id) => id !== user.id) : [...prev, user.id])} />
+                          </label>
+                        ))}
+                        {normalizedTaskAssigneeSearch && visibleTaskAssignees.length === 0 && <p className="px-2 py-3 text-center text-sm font-bold text-slate-500">Никого не нашли</p>}
+                      </div>
+                    )}
                   </div>
                 </Field>
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div className="grid min-w-0 grid-cols-1 gap-3 overflow-hidden sm:grid-cols-2">
                   <Field label="Дедлайн">
                     <DatePickerField value={taskDeadline} onChange={setTaskDeadline} placeholder="Дата не выбрана" />
                   </Field>
@@ -2226,49 +2320,8 @@ export default function MiniApp({
                     </select>
                   </Field>
                 </div>
-                <Field label="Исполнитель">
-                  <div className="space-y-2 rounded-2xl border border-slate-200 bg-slate-50 p-2">
-                    <div className="px-1 text-xs font-bold text-slate-500">Показываются люди хотя бы из одного выбранного блока. Никого не выбирай, если задача открытая.</div>
-                    <label className="relative block">
-                      <MagnifyingGlass className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-                      <input
-                        value={taskAssigneeSearch}
-                        onChange={(event) => setTaskAssigneeSearch(event.target.value)}
-                        className={`${inputClass} pl-10`}
-                        placeholder="Найти по имени, username или блоку"
-                        aria-label="Поиск исполнителя"
-                      />
-                    </label>
-                    <button
-                      type="button"
-                      onClick={() => setTaskAssignedTo(taskAssignedTo.length === eligibleTaskAssignees.length ? [] : eligibleTaskAssignees.map((user) => user.id))}
-                      className={`${secondaryButtonClass} w-full`}
-                    >
-                      <UsersThree className="h-4 w-4" />
-                      {taskAssignedTo.length === eligibleTaskAssignees.length ? 'Снять выбор со всех блоков' : 'Назначить всем из выбранных блоков'}
-                    </button>
-                    {!normalizedTaskAssigneeSearch && eligibleTaskAssignees.length > 3 && (
-                      <ListDisclosure
-                        expanded={showAllTaskAssignees}
-                        onToggle={() => setShowAllTaskAssignees((value) => !value)}
-                        total={eligibleTaskAssignees.length}
-                      />
-                    )}
-                    {visibleTaskAssignees.map((user) => (
-                      <label key={user.id} className="flex items-center justify-between rounded-xl bg-white px-3 py-2 text-sm font-semibold">
-                        <span>{user.realName}</span>
-                        <input
-                          type="checkbox"
-                          checked={taskAssignedTo.includes(user.id)}
-                          onChange={() => setTaskAssignedTo((prev) => (prev.includes(user.id) ? prev.filter((id) => id !== user.id) : [...prev, user.id]))}
-                        />
-                      </label>
-                    ))}
-                    {normalizedTaskAssigneeSearch && visibleTaskAssignees.length === 0 && <p className="px-2 py-3 text-center text-sm font-bold text-slate-500">Никого не нашли</p>}
-                  </div>
-                </Field>
                 <Field label="ТЗ">
-                  <textarea value={taskSow} onChange={(e) => setTaskSow(e.target.value)} className={inputClass} rows={3} />
+                  <textarea value={taskSow} onChange={(e) => setTaskSow(e.target.value)} className={inputClass} rows={2} />
                 </Field>
                 <Field label="Напоминания исполнителям">
                   <div className="space-y-2">
@@ -2307,7 +2360,7 @@ export default function MiniApp({
             </button>
             {showCompletedTasks && (
               <>
-                <TaskList title="Последние выполненные" tasks={latestCompletedTasks} users={state.users} events={allEvents} currentUser={currentUser} actionLabel="Готово" onAction={() => undefined} onSaveComment={saveTaskComment} />
+                <TaskList title="Последние выполненные" tasks={latestCompletedTasks} users={state.users} events={allEvents} currentUser={currentUser} actionLabel="Готово" onAction={() => undefined} onEdit={startTaskEdit} onEditCompletion={openCompletionPrompt} onSaveComment={saveTaskComment} />
               </>
             )}
 
@@ -2318,7 +2371,7 @@ export default function MiniApp({
                   <p className="text-xs font-semibold text-slate-500">Все задачи за всё время, разбитые по блокам.</p>
                 </div>
                 <div className="flex flex-wrap gap-2">
-                  <a href="/api/integrations/google-sheets/task-log" target="_blank" rel="noreferrer" className={miniButtonClass}>
+                  <a href="https://docs.google.com/spreadsheets/d/1R1MtYJfEuGNw0JI_laNmRk_Un7wIQwxt0xRYTp3mih4/edit?gid=326388773#gid=326388773" target="_blank" rel="noreferrer" className={miniButtonClass}>
                     <ArrowSquareOut className="h-4 w-4" />
                     Полный лог в таблице
                   </a>
@@ -2329,7 +2382,7 @@ export default function MiniApp({
               </div>
               {showTaskLog && (
                 <div className="mt-4 space-y-3">
-                  <TaskLogView tasksByCompetency={tasksByCompetency} users={state.users} events={allEvents} />
+                  <TaskLogView tasksByCompetency={tasksByCompetency} users={state.users} events={allEvents} currentUser={currentUser} onEditCompletion={openCompletionPrompt} onEditTask={startTaskEdit} />
                 </div>
               )}
             </div>
@@ -2451,11 +2504,14 @@ export default function MiniApp({
                   return (
                     <div key={user.id} className={`rounded-3xl border border-blue-100 bg-white p-4 shadow-sm ${pressClass}`} onClick={() => setExpandedUserId(expanded ? null : user.id)}>
                       <div className="flex items-center justify-between gap-3">
-                        <div>
+                        <div className="flex min-w-0 items-center gap-3">
+                          <UserAvatar user={user} className="h-11 w-11 shrink-0 rounded-xl" />
+                          <div className="min-w-0">
                           <div className="font-black">{user.realName}</div>
                           <a href={telegramLink(user.username)} className="text-sm font-bold text-[#0069E0]" onClick={(event) => openTelegramProfile(event, telegramLink(user.username))}>
                             {user.username}
                           </a>
+                          </div>
                         </div>
                         <div className="text-right">
                           <div className="rounded-full bg-blue-50 px-3 py-1 text-xs font-black text-[#0069E0]">{user.primaryCompetency || 'Блок не выбран'}</div>
@@ -2969,7 +3025,7 @@ export default function MiniApp({
           <div className="w-full max-w-md rounded-[28px] border border-blue-100 bg-white p-5 shadow-[0_24px_70px_rgba(0,0,0,0.28)]">
             <div className="flex items-start justify-between gap-4">
               <div>
-                <h2 id="task-completion-title" className="text-xl font-black">Сколько времени заняла задача?</h2>
+                <h2 id="task-completion-title" className="text-xl font-black">{editingCompletedTask ? 'Исправить выполнение' : 'Сколько времени заняла задача?'}</h2>
                 <p className="mt-1 text-sm font-semibold text-slate-500">
                   Это необязательно, но поможет точнее планировать нагрузку команды.
                 </p>
@@ -3019,11 +3075,17 @@ export default function MiniApp({
             </div>
             <div className="mt-5 space-y-2">
               <button type="button" disabled={savingCompletion} onClick={() => completeTaskWithTime(true)} className={`${primaryButtonClass} disabled:opacity-60`}>
-                {savingCompletion ? 'Сохраняю...' : 'Сохранить и завершить'}
+                {savingCompletion ? 'Сохраняю...' : editingCompletedTask ? 'Сохранить исправления' : 'Сохранить и завершить'}
               </button>
-              <button type="button" disabled={savingCompletion} onClick={() => completeTaskWithTime(false)} className={`${secondaryButtonClass} w-full disabled:opacity-60`}>
-                Завершить без времени
-              </button>
+              {editingCompletedTask ? (
+                <button type="button" disabled={savingCompletion} onClick={() => void reopenCompletedTask()} className={`${secondaryButtonClass} w-full border-amber-200 bg-amber-50 text-amber-800 disabled:opacity-60`}>
+                  Вернуть в работу
+                </button>
+              ) : (
+                <button type="button" disabled={savingCompletion} onClick={() => completeTaskWithTime(false)} className={`${secondaryButtonClass} w-full disabled:opacity-60`}>
+                  Завершить без времени
+                </button>
+              )}
             </div>
           </div>
         </div>
@@ -3199,6 +3261,7 @@ function UserAvatar({ user, className = '' }: { user: User; className?: string }
 
 function AvatarCropEditor({ source, saving, onCancel, onSave }: { source: string; saving: boolean; onCancel: () => void; onSave: (dataUrl: string) => Promise<void> }) {
   const imageRef = useRef<HTMLImageElement | null>(null);
+  const [imageLoaded, setImageLoaded] = useState(false);
   const [zoom, setZoom] = useState(1);
   const [offsetX, setOffsetX] = useState(0);
   const [offsetY, setOffsetY] = useState(0);
@@ -3229,7 +3292,7 @@ function AvatarCropEditor({ source, saving, onCancel, onSave }: { source: string
           <button type="button" onClick={onCancel} className={miniButtonClass} aria-label="Закрыть"><X className="h-4 w-4" /></button>
         </div>
         <div className="mx-auto mt-4 aspect-square w-full max-w-[280px] overflow-hidden rounded-3xl bg-slate-100">
-          <img ref={imageRef} src={source} alt="Предпросмотр аватара" className="h-full w-full object-cover" style={{ transform: `translate(${offsetX * 0.2}%, ${offsetY * 0.2}%) scale(${zoom})` }} />
+          <img ref={imageRef} src={source} onLoad={() => setImageLoaded(true)} alt="Предпросмотр аватара" className="h-full w-full object-cover" style={{ transform: `translate(${offsetX * 0.2}%, ${offsetY * 0.2}%) scale(${zoom})` }} />
         </div>
         <div className="mt-4 space-y-3">
           <Field label="Масштаб"><input type="range" min="1" max="3" step="0.05" value={zoom} onChange={(event) => setZoom(Number(event.target.value))} className="w-full" /></Field>
@@ -3237,7 +3300,7 @@ function AvatarCropEditor({ source, saving, onCancel, onSave }: { source: string
             <Field label="По горизонтали"><input type="range" min="-100" max="100" value={offsetX} onChange={(event) => setOffsetX(Number(event.target.value))} className="w-full" /></Field>
             <Field label="По вертикали"><input type="range" min="-100" max="100" value={offsetY} onChange={(event) => setOffsetY(Number(event.target.value))} className="w-full" /></Field>
           </div>
-          <button type="button" disabled={saving} onClick={() => void crop()} className={`${primaryButtonClass} disabled:opacity-60`}>{saving ? 'Сохраняю...' : 'Сохранить аватар'}</button>
+          <button type="button" disabled={saving || !imageLoaded} onClick={() => void crop()} className={`${primaryButtonClass} disabled:opacity-60`}>{saving ? 'Сохраняю...' : imageLoaded ? 'Сохранить аватар' : 'Загружаю фото...'}</button>
         </div>
       </div>
     </div>
@@ -3256,6 +3319,7 @@ function TaskList({
   onEdit,
   onNotify,
   onSaveComment,
+  onEditCompletion,
 }: {
   title: string;
   tasks: Task[];
@@ -3268,11 +3332,13 @@ function TaskList({
   onEdit?: (task: Task) => void;
   onNotify?: (taskId: string) => void;
   onSaveComment?: (taskId: string, assigneeId: string, side: 'executor' | 'coordinator', text: string) => Promise<boolean>;
+  onEditCompletion?: (taskId: string) => void;
 }) {
   const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
   const [showAll, setShowAll] = useState(false);
   const [noteDrafts, setNoteDrafts] = useState<Record<string, string>>({});
   const [savingNoteKey, setSavingNoteKey] = useState('');
+  const [savedNoteKey, setSavedNoteKey] = useState('');
   const visibleTasks = showAll ? tasks : tasks.slice(0, 3);
 
   return (
@@ -3363,13 +3429,16 @@ function TaskList({
                                   disabled={savingNoteKey === draftKey}
                                   onClick={async () => {
                                     setSavingNoteKey(draftKey);
-                                    await onSaveComment(task.id, executor.id, side, noteDrafts[draftKey] ?? storedText);
+                                    setSavedNoteKey('');
+                                    const saved = await onSaveComment(task.id, executor.id, side, noteDrafts[draftKey] ?? storedText);
+                                    if (saved) setSavedNoteKey(draftKey);
                                     setSavingNoteKey('');
                                   }}
                                   className={`${miniButtonClass} disabled:opacity-60`}
                                 >
                                   <ChatCircleText className="h-4 w-4" /> {savingNoteKey === draftKey ? 'Сохраняю...' : 'Сохранить комментарий'}
                                 </button>
+                                {savedNoteKey === draftKey && <p role="status" className="text-xs font-black text-emerald-700">Комментарий сохранён</p>}
                               </div>
                             )}
                           </div>
@@ -3391,11 +3460,16 @@ function TaskList({
                     ))}
                   </div>
                 )}
-                {canCoordinate && task.status !== 'completed' && (
+                {canCoordinate && (
                   <div className="flex flex-wrap gap-2 pt-2">
                     {onEdit && <button type="button" onClick={() => onEdit(task)} className={miniButtonClass}><PencilSimple className="h-4 w-4" /> Редактировать</button>}
-                    {onNotify && <button type="button" onClick={() => onNotify(task.id)} className={miniButtonClass}><Bell className="h-4 w-4" /> Уведомить сейчас</button>}
+                    {onNotify && task.status !== 'completed' && <button type="button" onClick={() => onNotify(task.id)} className={miniButtonClass}><Bell className="h-4 w-4" /> Уведомить сейчас</button>}
                   </div>
+                )}
+                {task.status === 'completed' && (isMine || currentUser.role === 'admin') && onEditCompletion && (
+                  <button type="button" onClick={() => onEditCompletion(task.id)} className={`${miniButtonClass} border-amber-200 bg-amber-50 text-amber-800`}>
+                    <PencilSimple className="h-4 w-4" /> Исправить выполнение
+                  </button>
                 )}
                 {isMine && task.status === 'assigned' && onRelease && (
                   <button onClick={() => onRelease(task.id)} className={`${miniButtonClass} border-amber-100 bg-amber-50 text-amber-700 hover:bg-amber-100`}>
@@ -3412,7 +3486,7 @@ function TaskList({
   );
 }
 
-function TaskLogView({ tasksByCompetency, users, events }: { tasksByCompetency: Record<string, Task[]>; users: User[]; events: WorkEvent[] }) {
+function TaskLogView({ tasksByCompetency, users, events, currentUser, onEditCompletion, onEditTask }: { tasksByCompetency: Record<string, Task[]>; users: User[]; events: WorkEvent[]; currentUser: User; onEditCompletion: (taskId: string) => void; onEditTask: (task: Task) => void }) {
   const blockNames = Object.keys(tasksByCompetency).sort((a, b) => a.localeCompare(b, 'ru'));
   const [expandedBlocks, setExpandedBlocks] = useState<string[]>([]);
   if (blockNames.length === 0) return <EmptyState text="В логе пока нет задач" />;
@@ -3452,6 +3526,8 @@ function TaskLogView({ tasksByCompetency, users, events }: { tasksByCompetency: 
                   .map((id) => users.find((user) => user.id === id)?.realName)
                   .filter(Boolean)
                   .join(', ');
+                const canEditCompletion = currentUser.role === 'admin' || taskAssigneeIds(task).includes(currentUser.id);
+                const canEditTask = currentUser.role === 'admin' || task.creatorId === currentUser.id;
                 return (
                   <div key={task.id} className="rounded-2xl bg-white p-3 text-sm">
                     <div className="flex items-start justify-between gap-3">
@@ -3473,6 +3549,12 @@ function TaskLogView({ tasksByCompetency, users, events }: { tasksByCompetency: 
                       {task.timeSpentMinutes ? <span>Затрачено: <b>{taskDurationText(task.timeSpentMinutes)}</b></span> : null}
                     </div>
                     {task.sow && <div className="mt-2 rounded-xl bg-slate-50 p-2 text-xs text-slate-600">{task.sow}</div>}
+                    {(canEditCompletion || canEditTask) && (
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {canEditCompletion && <button type="button" onClick={() => onEditCompletion(task.id)} className={`${miniButtonClass} border-amber-200 bg-amber-50 text-amber-800`}><PencilSimple className="h-4 w-4" /> Исправить выполнение</button>}
+                        {canEditTask && <button type="button" onClick={() => onEditTask(task)} className={miniButtonClass}><PencilSimple className="h-4 w-4" /> Редактировать задачу</button>}
+                      </div>
+                    )}
                   </div>
                 );
               })}

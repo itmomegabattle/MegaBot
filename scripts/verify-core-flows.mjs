@@ -892,12 +892,24 @@ try {
   assert.equal(completed.data.task.timeSpentMinutes, 95);
   assert.equal(telegramCalls.filter((call) => call.path.endsWith('/sendMessage')).length, 1);
   assert.equal(telegramCalls.find((call) => call.path.endsWith('/sendMessage')).body.chat_id, '100');
+  const reopened = await request('/api/task/status', {
+    requesterId: 'u_alice', taskId: taskResult.data.task.id, status: 'in_progress',
+  });
+  assert.equal(reopened.response.status, 200);
+  assert.equal(reopened.data.task.status, 'in_progress');
+  assert.equal(reopened.data.task.timeSpentMinutes, undefined);
+  const correctedCompletion = await request('/api/task/status', {
+    requesterId: 'u_alice', taskId: taskResult.data.task.id, status: 'completed', timeSpentMinutes: 80, completionComment: 'Исправленный комментарий',
+  });
+  assert.equal(correctedCompletion.response.status, 200);
+  assert.equal(correctedCompletion.data.task.timeSpentMinutes, 80);
+  assert.equal(correctedCompletion.data.task.completionComments.u_alice, 'Исправленный комментарий');
   const taskExportResponse = await fetch(`http://127.0.0.1:${appPort}/api/task/export`, {
     headers: { Cookie: sessionCookie },
   });
   assert.equal(taskExportResponse.status, 200);
   const taskExport = await taskExportResponse.text();
-  assert.ok(taskExport.includes('1 ч 35 мин'));
+  assert.ok(taskExport.includes('1 ч 20 мин'));
   assert.ok(taskExport.includes('Тестовое мероприятие'));
 
   const aliceSessionCookie = sessionCookie;

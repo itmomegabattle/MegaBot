@@ -53,6 +53,13 @@ const sheets = [
 ];
 const calls: { url: string; body?: any }[] = [];
 let nextSheetId = 3000;
+const testSettings = { availabilityActiveDays: [0, 1, 2, 3, 4], availabilityStartHour: 17, availabilityEndHour: 18 };
+const columnIndex = (letters: string) => [...letters].reduce((value, letter) => value * 26 + letter.charCodeAt(0) - 64, 0) - 1;
+const rangeStart = (range: string) => {
+  const match = range.match(/!([A-Z]+)(\d+)/);
+  if (!match) throw new Error(`Invalid test range: ${range}`);
+  return { col: columnIndex(match[1]), row: Number(match[2]) - 1 };
+};
 
 const originalFetch = globalThis.fetch;
 globalThis.fetch = async (input: RequestInfo | URL, init: RequestInit = {}) => {
@@ -71,25 +78,20 @@ globalThis.fetch = async (input: RequestInfo | URL, init: RequestInit = {}) => {
     return new Response(JSON.stringify({ values }), { status: 200 });
   }
   if (url.includes('/values:batchClear')) {
-    for (let row = 3; row <= 4; row += 1) {
-      for (let col = 1; col <= 14; col += 1) raw[row][col] = '';
-    }
+    for (let row = 1; row <= 4; row += 1) for (let col = 1; col <= 14; col += 1) { raw[row][col] = ''; formatted[row][col] = ''; }
     return new Response(JSON.stringify({ clearedRanges: body.ranges }), { status: 200 });
   }
   if (url.includes('/values:batchUpdate')) {
-    if (body.valueInputOption === 'USER_ENTERED') {
-      body.data.forEach((item: any, day: number) => {
-        formatted[1][1 + day * 2] = item.values[0][0];
-        raw[1][1 + day * 2] = item.values[0][0];
-      });
-    }
-    if (body.valueInputOption === 'RAW') {
-      body.data.forEach((item: any) => {
-        item.values.forEach((rowValues: boolean[], rowOffset: number) => {
-          rowValues.forEach((value, colOffset) => { raw[3 + rowOffset][1 + colOffset] = value; });
-        });
-      });
-    }
+    body.data.forEach((item: any) => {
+      const start = rangeStart(item.range);
+      item.values.forEach((rowValues: unknown[], rowOffset: number) => rowValues.forEach((value, colOffset) => {
+        const row = start.row + rowOffset;
+        const col = start.col + colOffset;
+        raw[row] ||= []; formatted[row] ||= [];
+        raw[row][col] = value;
+        formatted[row][col] = typeof value === 'boolean' ? (value ? 'TRUE' : 'FALSE') : value;
+      }));
+    });
     return new Response(JSON.stringify({ totalUpdatedCells: 1 }), { status: 200 });
   }
   if (url.endsWith(':batchUpdate')) {
@@ -119,37 +121,37 @@ try {
     { id: 'u_alice', realName: 'Алиса Тестовая' },
     { id: 'u_bob', realName: 'Борис Тестовый' },
   ];
-  const first = await ensurePrimaryWeekSheet(config, users);
+  const first = await ensurePrimaryWeekSheet(config, users, testSettings);
   assert.equal(first.primary, 'ОСНОВА');
   assert.equal(first.rotated, true);
   assert.ok(first.backup?.backupTitle.startsWith('РЕЗЕРВ ОСНОВА '));
   assert.equal(first.backup?.verified, true);
   assert.deepEqual(first.hiddenLegacySheets, [`Неделя ${currentWeek}`, `Неделя ${addDays(currentWeek, 7)}`]);
   const duplicateIndex = calls.findIndex((call) => call.body?.requests?.some((request: any) => request.duplicateSheet));
-  const dateUpdateIndex = calls.findIndex((call) => call.body?.valueInputOption === 'USER_ENTERED');
   const clearIndex = calls.findIndex((call) => call.url.includes('/values:batchClear'));
-  assert.ok(duplicateIndex >= 0 && duplicateIndex < dateUpdateIndex && dateUpdateIndex < clearIndex);
+  const layoutWriteIndex = calls.findIndex((call, index) => index > clearIndex && call.body?.valueInputOption === 'RAW');
+  assert.ok(duplicateIndex >= 0 && duplicateIndex < clearIndex && clearIndex < layoutWriteIndex);
   const validationRequest = calls.find((call) => call.body?.requests?.some((request: any) => request.setDataValidation));
   assert.ok(validationRequest);
   assert.ok(validationRequest.body.requests.every((request: any) => (
     request.setDataValidation.rule.condition.type === 'BOOLEAN'
     && request.setDataValidation.rule.showCustomUi === true
   )));
-  const rawCheckboxWrite = calls.find((call) => call.body?.valueInputOption === 'RAW');
+  const rawCheckboxWrite = calls.find((call) => call.body?.valueInputOption === 'RAW' && call.body.data.every((item: any) => item.values.flat().every((value: unknown) => typeof value === 'boolean')));
   assert.ok(rawCheckboxWrite?.body.data.every((item: any) => item.values.flat().every((value: unknown) => typeof value === 'boolean')));
   assert.ok(!calls.some((call) => call.body?.requests?.some((request: any) => (
     request.duplicateSheet?.newSheetName?.startsWith('Неделя ')
   ))));
 
   calls.length = 0;
-  const second = await ensurePrimaryWeekSheet(config, users);
+  const second = await ensurePrimaryWeekSheet(config, users, testSettings);
   assert.equal(second.rotated, false);
   assert.equal(second.backup, null);
   assert.ok(!calls.some((call) => call.url.includes('/values:batchClear')));
   assert.ok(!calls.some((call) => call.body?.requests?.some((request: any) => request.duplicateSheet)));
 
   calls.length = 0;
-  const migration = await migratePrimaryWeekSheet(config, users);
+  const migration = await migratePrimaryWeekSheet(config, users, testSettings);
   assert.equal(migration.backup?.verified, true);
   assert.equal(calls.filter((call) => call.body?.requests?.some((request: any) => request.duplicateSheet)).length, 1);
   assert.ok(!calls.some((call) => call.url.includes('/values:batchClear')));

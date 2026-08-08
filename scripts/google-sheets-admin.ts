@@ -32,11 +32,11 @@ if (command === 'sheets') {
 } else if (command === 'backup') {
   console.log(JSON.stringify(await backupPrimarySheet(config), null, 2));
 } else if (command === 'prepare') {
-  console.log(JSON.stringify(await ensurePrimaryWeekSheet(config, users), null, 2));
+  console.log(JSON.stringify(await ensurePrimaryWeekSheet(config, users, state.settings), null, 2));
 } else if (command === 'migrate') {
-  console.log(JSON.stringify(await migratePrimaryWeekSheet(config, users), null, 2));
+  console.log(JSON.stringify(await migratePrimaryWeekSheet(config, users, state.settings), null, 2));
 } else if (command === 'weeks') {
-  console.log(JSON.stringify({ deprecatedCommand: 'weeks', ...(await ensurePrimaryWeekSheet(config, users)) }, null, 2));
+  console.log(JSON.stringify({ deprecatedCommand: 'weeks', ...(await ensurePrimaryWeekSheet(config, users, state.settings)) }, null, 2));
 } else if (command === 'import-preview') {
   console.log(JSON.stringify(await importAvailabilitiesFromSheet(config, users), null, 2));
 } else if (command === 'layout') {

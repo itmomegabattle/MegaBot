@@ -967,11 +967,45 @@ async function startServer() {
     persistChatPanelMessageIds();
   };
   const groupCheckins = new Map<string, { title: string; userIds: Set<string> }>();
+  let lastSheetAvailabilityPullAt = 0;
+  let sheetAvailabilityPull: Promise<void> | null = null;
+  const mergePrimarySheetAvailability = (previous: Availability | undefined, imported: Availability): Availability => ({
+    ...previous,
+    ...imported,
+    slots: {
+      ...Object.fromEntries(Object.entries(previous?.slots || {}).filter(([day]) => Number(day) >= 7)),
+      ...Object.fromEntries(Object.entries(imported.slots || {}).filter(([day]) => Number(day) >= 0 && Number(day) < 7)),
+    },
+    hardUnavailableDays: previous?.hardUnavailableDays || [],
+  });
+  const reconcileAvailabilityFromPrimarySheet = async (maxAgeMs = 0) => {
+    if (!sheetsConfig || Date.now() - lastSheetAvailabilityPullAt < maxAgeMs) return;
+    if (sheetAvailabilityPull) return sheetAvailabilityPull;
+    sheetAvailabilityPull = (async () => {
+      const state = loadDatabase();
+      const result = await importAvailabilitiesFromSheet(sheetsConfig, state.users);
+      let changed = false;
+      for (const availability of result.imported) {
+        const previous = state.availabilities[availability.userId];
+        const merged = mergePrimarySheetAvailability(previous, availability);
+        if (JSON.stringify(previous?.slots || {}) === JSON.stringify(merged.slots || {})) continue;
+        state.availabilities[availability.userId] = merged;
+        changed = true;
+      }
+      if (changed) saveDatabase(state);
+      lastSheetAvailabilityPullAt = Date.now();
+    })().finally(() => { sheetAvailabilityPull = null; });
+    return sheetAvailabilityPull;
+  };
 
   // API Routes
 
   // Get entire simulation state
-  app.get('/api/state', (req, res) => {
+  app.get('/api/state', async (req, res) => {
+    if (sheetsConfig) {
+      try { await reconcileAvailabilityFromPrimarySheet(3_000); }
+      catch (error: any) { console.error('Google Sheets on-read reconciliation failed:', error.message || error); }
+    }
     const state = loadDatabase();
     res.json(state);
   });
@@ -1017,8 +1051,17 @@ async function startServer() {
         changedUserRow,
         String(req.body?.sheetTitle || ''),
       );
-      result.imported.forEach((availability) => { state.availabilities[availability.userId] = availability; });
-      saveDatabase(state);
+      let changed = false;
+      result.imported.forEach((availability) => {
+        const previous = state.availabilities[availability.userId];
+        const merged = mergePrimarySheetAvailability(previous, availability);
+        if (JSON.stringify(previous?.slots || {}) !== JSON.stringify(merged.slots || {})) {
+          state.availabilities[availability.userId] = merged;
+          changed = true;
+        }
+      });
+      if (changed) saveDatabase(state);
+      lastSheetAvailabilityPullAt = Date.now();
       return res.json({ success: true, importedUsers: result.imported.length });
     } catch (error: any) {
       console.error('Google Sheets webhook import failed:', error);
@@ -3563,7 +3606,7 @@ async function startServer() {
     let googleSheetsWeeks: unknown = null;
     if (sheetsConfig) {
       try {
-        googleSheetsWeeks = await ensurePrimaryWeekSheet(sheetsConfig, state.users);
+        googleSheetsWeeks = await ensurePrimaryWeekSheet(sheetsConfig, state.users, state.settings);
         await exportAvailabilitiesToSheet(sheetsConfig, state.users, state.availabilities);
       }
       catch (error: any) {
@@ -4508,7 +4551,7 @@ async function startServer() {
   if (sheetsConfig) {
     const maintainPrimarySheetWeek = async () => {
       const state = loadDatabase();
-      await ensurePrimaryWeekSheet(sheetsConfig, state.users);
+      await ensurePrimaryWeekSheet(sheetsConfig, state.users, state.settings);
     };
     maintainPrimarySheetWeek().catch((error: any) => console.error('Google Sheets primary week maintenance failed:', error.message || error));
     setInterval(() => {
@@ -4517,14 +4560,11 @@ async function startServer() {
     setInterval(async () => {
       try {
         await flushPendingSheetAvailabilityExports();
-        const state = loadDatabase();
-        const result = await importAvailabilitiesFromSheet(sheetsConfig, state.users);
-        result.imported.forEach((availability) => { state.availabilities[availability.userId] = availability; });
-        if (result.imported.length) saveDatabase(state);
+        await reconcileAvailabilityFromPrimarySheet();
       } catch (error: any) {
         console.error('Google Sheets fallback reconciliation failed:', error.message || error);
       }
-    }, 60 * 1000);
+    }, 15 * 1000);
   }
 
   if (calendarConfig?.enabled) {

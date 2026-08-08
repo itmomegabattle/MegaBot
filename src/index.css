@@ -590,6 +590,21 @@ html.dark-theme .mega-shell .mega-bottom-nav {
   box-shadow: 0 18px 44px rgba(0, 0, 0, 0.48);
 }
 
+.mega-shell input[type='date'],
+.mega-shell input[type='time'] {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+.mega-shell input[type='date']::-webkit-date-and-time-value,
+.mega-shell input[type='time']::-webkit-date-and-time-value {
+  min-width: 0;
+  text-align: left;
+}
+
 @media (min-width: 640px) {
   .mega-shell main {
     padding-inline: 24px;
