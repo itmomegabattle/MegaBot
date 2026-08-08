@@ -39,6 +39,7 @@ const credentialsFile = path.join(tempRoot, 'service-account.json');
 const { privateKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
 const requests: { method?: string; url?: string; body: any }[] = [];
 const storedEvents = new Set<string>();
+const deletedEvents = new Set<string>();
 const server = http.createServer(async (request, response) => {
   let rawBody = '';
   for await (const chunk of request) rawBody += chunk;
@@ -52,6 +53,10 @@ const server = http.createServer(async (request, response) => {
   }
   const eventId = request.url?.split('/events/')[1];
   if (request.method === 'PATCH' && eventId) {
+    if (deletedEvents.has(eventId)) {
+      response.statusCode = 410;
+      return response.end(JSON.stringify({ error: { message: 'Resource has been deleted' } }));
+    }
     if (!storedEvents.has(eventId)) {
       response.statusCode = 404;
       return response.end(JSON.stringify({ error: { message: 'Not found' } }));
@@ -64,6 +69,7 @@ const server = http.createServer(async (request, response) => {
   }
   if (request.method === 'DELETE' && eventId) {
     storedEvents.delete(eventId);
+    deletedEvents.add(eventId);
     response.statusCode = 204;
     return response.end();
   }
@@ -92,8 +98,11 @@ try {
   assert.equal('created' in updated && updated.created, false);
   const deleted = await syncMeetingToGoogleCalendar(config, { ...meeting, status: 'cancelled', googleCalendarEventId: created.eventId }, state);
   assert.equal('deleted' in deleted && deleted.deleted, true);
-  assert.equal(requests.filter((request) => request.method === 'POST' && request.url?.endsWith('/events')).length, 1, 'retries must not create duplicates');
-  console.log('Google Calendar verification passed: access check, one-hour fallback, metadata, idempotent create/update, and cancellation.');
+  const recreated = await syncMeetingToGoogleCalendar(config, { ...meeting, googleCalendarEventId: created.eventId }, state);
+  assert.equal('created' in recreated && recreated.created, true);
+  assert.notEqual(recreated.eventId, created.eventId, 'a deleted Google Calendar event ID must not be reused');
+  assert.equal(requests.filter((request) => request.method === 'POST' && request.url?.endsWith('/events')).length, 2, 'only initial creation and deleted-event recovery may insert');
+  console.log('Google Calendar verification passed: access check, one-hour fallback, metadata, idempotent update, cancellation, and deleted-event recovery.');
 } finally {
   await new Promise<void>((resolve) => server.close(() => resolve()));
   await rm(tempRoot, { recursive: true, force: true });

@@ -151,15 +151,22 @@ export async function checkGoogleCalendarAccess(config: GoogleCalendarConfig) {
 
 export async function syncMeetingToGoogleCalendar(config: GoogleCalendarConfig, meeting: Meeting, state: Pick<SimulationState, 'users'>) {
   if (!config.enabled) return { skipped: true as const };
-  const eventId = meeting.googleCalendarEventId || googleCalendarEventId(meeting.id);
-  const eventPath = `/calendars/${encodeURIComponent(config.calendarId)}/events/${encodeURIComponent(eventId)}`;
+  let eventId = meeting.googleCalendarEventId || googleCalendarEventId(meeting.id);
+  let eventPath = `/calendars/${encodeURIComponent(config.calendarId)}/events/${encodeURIComponent(eventId)}`;
   if (meeting.status === 'cancelled') {
-    await calendarRequest(config, eventPath, { method: 'DELETE' }, [404]);
+    await calendarRequest(config, eventPath, { method: 'DELETE' }, [404, 410]);
     return { deleted: true as const, eventId };
   }
   const event = buildGoogleCalendarEvent(meeting, state, config.timeZone);
-  const patched = await calendarRequest(config, eventPath, { method: 'PATCH', body: JSON.stringify(event) }, [404]);
-  if (patched.status !== 404) return { created: false as const, eventId, event: patched.body };
+  const patched = await calendarRequest(config, eventPath, { method: 'PATCH', body: JSON.stringify(event) }, [404, 410]);
+  if (patched.status !== 404 && patched.status !== 410) return { created: false as const, eventId, event: patched.body };
+  // Google keeps a tombstone for deleted event IDs and returns 410 forever.
+  // Generate a fresh deterministic-format ID so a manually deleted meeting can
+  // be recreated and the replacement ID persisted back to the database.
+  if (patched.status === 410) {
+    eventId = googleCalendarEventId(`${meeting.id}:${crypto.randomUUID()}`);
+    eventPath = `/calendars/${encodeURIComponent(config.calendarId)}/events/${encodeURIComponent(eventId)}`;
+  }
   const inserted = await calendarRequest(config, `/calendars/${encodeURIComponent(config.calendarId)}/events`, {
     method: 'POST',
     body: JSON.stringify({ ...event, id: eventId }),
