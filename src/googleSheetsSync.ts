@@ -646,7 +646,6 @@ async function preparePrimaryWeekSheet(
       destination: { sheetId: grid.sheetId, startRowIndex: layout.dateRow, endRowIndex: Math.max(...layout.allRows.map((row) => row.rowIndex)) + 1, startColumnIndex: firstSlotColumn, endColumnIndex: lastDesiredColumn + 1 },
       pasteType: 'PASTE_FORMAT', pasteOrientation: 'NORMAL',
     } });
-    requests.push({ updateDimensionProperties: { range: { sheetId: grid.sheetId, dimension: 'COLUMNS', startIndex: firstSlotColumn, endIndex: lastDesiredColumn + 1 }, properties: { pixelSize: 58 }, fields: 'pixelSize' } });
     for (const day of availabilityConfig.activeDays) {
       const dayOffset = availabilityConfig.activeDays.indexOf(day) * availabilityConfig.hours.length;
       if (availabilityConfig.hours.length > 1) requests.push({ mergeCells: { range: { sheetId: grid.sheetId, startRowIndex: layout.dateRow, endRowIndex: layout.dateRow + 1, startColumnIndex: firstSlotColumn + dayOffset, endColumnIndex: firstSlotColumn + dayOffset + availabilityConfig.hours.length }, mergeType: 'MERGE_ALL' } });
