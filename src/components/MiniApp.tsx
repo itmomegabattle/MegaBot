@@ -1082,7 +1082,7 @@ export default function MiniApp({
 
   const submitBroadcast = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (!isAdmin || broadcastSaving) return;
+    if (broadcastSaving) return;
     setTeamError('');
     setBroadcastNotice('');
     if (!broadcastBody.trim()) {
@@ -2517,8 +2517,7 @@ export default function MiniApp({
         {(activeTab === 'team' || (isAdminPanel && adminSection === 'team')) && (
           <section className="space-y-4">
             {teamError && <div role="alert" className="rounded-2xl border border-rose-200 bg-rose-50 p-3 text-sm font-bold text-rose-800">{teamError}</div>}
-            {isAdmin && (
-              <div className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
+            <div className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
                 <button type="button" onClick={() => setBroadcastOpen((value) => !value)} className={`${secondaryButtonClass} w-full justify-between`} aria-expanded={broadcastOpen}>
                   <span className="flex items-center gap-2"><PaperPlaneTilt className="h-4 w-4" /> Создать рассылку</span>
                   {broadcastOpen ? <CaretUp className="h-4 w-4" /> : <CaretDown className="h-4 w-4" />}
@@ -2589,8 +2588,7 @@ export default function MiniApp({
                     {broadcastNotice && <p role="status" className="rounded-2xl bg-emerald-50 px-3 py-2 text-sm font-black text-emerald-800">{broadcastNotice}</p>}
                   </form>
                 )}
-              </div>
-            )}
+            </div>
             {isAdminPanel && (
               <button onClick={() => setShowAddUserForm((value) => !value)} className={primaryButtonClass}>
                 {showAddUserForm ? <Minus className="h-4 w-4" /> : <Plus className="h-4 w-4" />}

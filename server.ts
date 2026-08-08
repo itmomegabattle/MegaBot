@@ -950,7 +950,7 @@ async function startServer() {
     chatId,
     new Map(Object.entries(members)),
   ]));
-  const pendingGroupMentions = new Map<string, { competency?: string; expiresAt: number }>();
+  const pendingGroupMentions = new Map<string, { competency?: string; expiresAt: number; promptMessageId?: number }>();
   const processedCallbackIds = new Set<string>();
   const telegramChatUpdateQueues = new Map<string, Promise<void>>();
   const persistChatPanelMessageIds = () => {
@@ -1326,12 +1326,12 @@ async function startServer() {
     return false;
   }
 
-  async function sendGroupMessage(chatId: string | number, text: string) {
+  async function sendGroupMessage(chatId: string | number, text: string): Promise<number | undefined> {
     const botToken = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
     if (!botToken) return;
     const tgApiBase = process.env.TELEGRAM_API_BASE || 'https://api.telegram.org';
     try {
-      await telegramFetch(`${tgApiBase}/bot${botToken}/sendMessage`, {
+      const response = await telegramFetch(`${tgApiBase}/bot${botToken}/sendMessage`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1341,9 +1341,61 @@ async function startServer() {
           disable_web_page_preview: true,
         }),
       });
+      const data = await response.json().catch(() => null) as { ok?: boolean; description?: string; result?: { message_id?: number } } | null;
+      if (!response.ok || data?.ok === false) {
+        console.error('Telegram group message failed:', response.status, data?.description || 'Unknown Telegram response');
+        return;
+      }
+      return data?.result?.message_id;
     } catch (err) {
       console.error('Telegram group message failed:', err);
     }
+  }
+
+  let telegramBotIdPromise: Promise<string | null> | null = null;
+  async function telegramBotId() {
+    if (telegramBotIdPromise) return telegramBotIdPromise;
+    telegramBotIdPromise = (async () => {
+      const botToken = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
+      if (!botToken) return null;
+      const tgApiBase = process.env.TELEGRAM_API_BASE || 'https://api.telegram.org';
+      const response = await telegramFetch(`${tgApiBase}/bot${botToken}/getMe`);
+      const data = await response.json().catch(() => null) as { ok?: boolean; result?: { id?: string | number } } | null;
+      return data?.ok && data.result?.id ? String(data.result.id) : null;
+    })().catch((error) => {
+      console.error('Telegram getMe failed:', error);
+      telegramBotIdPromise = null;
+      return null;
+    });
+    return telegramBotIdPromise;
+  }
+
+  async function botCanReceiveOrdinaryGroupMessages(chatId: string | number) {
+    const botToken = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
+    const botId = await telegramBotId();
+    if (!botToken || !botId) return null;
+    const tgApiBase = process.env.TELEGRAM_API_BASE || 'https://api.telegram.org';
+    try {
+      const response = await telegramFetch(`${tgApiBase}/bot${botToken}/getChatMember?chat_id=${encodeURIComponent(chatId)}&user_id=${encodeURIComponent(botId)}`);
+      const data = await response.json().catch(() => null) as { ok?: boolean; result?: { status?: string } } | null;
+      if (!response.ok || !data?.ok) return null;
+      return data.result?.status === 'administrator' || data.result?.status === 'creator';
+    } catch (error) {
+      console.error('Telegram getChatMember failed:', error);
+      return null;
+    }
+  }
+
+  async function clearPendingGroupMention(pendingKey: string, chatId: string | number) {
+    const pending = pendingGroupMentions.get(pendingKey);
+    pendingGroupMentions.delete(pendingKey);
+    if (pending?.promptMessageId) await deleteTelegramMessage(chatId, pending.promptMessageId);
+    return pending;
+  }
+
+  function scheduleTemporaryGroupMessageDeletion(chatId: string | number, messageId: number | undefined, delayMs = 8_000) {
+    if (!messageId) return;
+    setTimeout(() => { void deleteTelegramMessage(chatId, messageId); }, delayMs);
   }
 
   function groupBotCommands(state = loadDatabase()) {
@@ -1551,18 +1603,23 @@ async function startServer() {
     return [...targets.values()].sort((a, b) => a.displayName.localeCompare(b.displayName, 'ru'));
   }
 
-  async function sendGroupMentionNotification(chatId: string | number, note: string, competency?: string) {
+  async function sendGroupMentionNotification(chatId: string | number, note: string, competency?: string, author?: User) {
     const state = loadDatabase();
     const targets = resolveGroupMentionTargets(state, chatId, competency);
     if (targets.length === 0) {
-      await sendGroupMessage(chatId, competency
+      const messageId = await sendGroupMessage(chatId, competency
         ? `В блоке «${competency}» пока нет участников с привязанным Telegram.`
         : 'Бот пока не знает ни одного участника этой беседы.');
-      return;
+      return Boolean(messageId);
     }
     const heading = competency ? `*Уведомление для блока «${competency}»*` : '*Уведомление для всех*';
     const cleanNote = note.trim().slice(0, 3000);
-    const prefix = `${heading}${cleanNote ? `\n\n${cleanNote}` : ''}\n\n`;
+    const authorLine = author ? `\n\n*Автор:* ${groupMentionToken({
+      telegramId: author.telegramId,
+      username: author.username,
+      displayName: author.realName || author.username || 'Участник',
+    })}` : '';
+    const prefix = `${heading}${cleanNote ? `\n\n${cleanNote}` : ''}${authorLine}\n\n`;
     const chunks: string[] = [];
     let current = prefix;
     for (const target of targets) {
@@ -1574,7 +1631,10 @@ async function startServer() {
       current += `${mention} `;
     }
     if (current.trim()) chunks.push(current.trim());
-    for (const chunk of chunks) await sendGroupMessage(chatId, chunk);
+    for (const chunk of chunks) {
+      if (!await sendGroupMessage(chatId, chunk)) return false;
+    }
+    return true;
   }
 
   async function reconcileMeetingCalendar() {
@@ -2538,15 +2598,24 @@ async function startServer() {
         const pendingKey = `${chatId}:${fromUser.id}`;
         const pendingMention = pendingGroupMentions.get(pendingKey);
 
-        if (pendingMention && pendingMention.expiresAt <= Date.now()) pendingGroupMentions.delete(pendingKey);
+        if (pendingMention && pendingMention.expiresAt <= Date.now()) await clearPendingGroupMention(pendingKey, chatId);
         if (pendingMention && pendingMention.expiresAt > Date.now() && !commandMatch) {
-          pendingGroupMentions.delete(pendingKey);
-          await deleteTelegramMessage(chatId, update.message.message_id);
           if (!user?.registered) {
-            await sendGroupMessage(chatId, 'Эта команда доступна участникам, привязанным к MegaBot.');
+            await deleteTelegramMessage(chatId, update.message.message_id);
+            await clearPendingGroupMention(pendingKey, chatId);
+            const warningId = await sendGroupMessage(chatId, 'Эта команда доступна участникам, привязанным к MegaBot.');
+            scheduleTemporaryGroupMessageDeletion(chatId, warningId);
             return res.json({ ok: true });
           }
-          await sendGroupMentionNotification(chatId, text, pendingMention.competency);
+          console.log(`[Group Mention] Received notification text in chat=${chatId} from=${fromUser.id}.`);
+          const sent = await sendGroupMentionNotification(chatId, text, pendingMention.competency, user);
+          if (sent) {
+            await deleteTelegramMessage(chatId, update.message.message_id);
+            await clearPendingGroupMention(pendingKey, chatId);
+          } else {
+            const warningId = await sendGroupMessage(chatId, 'Не удалось отправить уведомление. Твой текст сохранён в чате — повтори отправку или используй /cancel.');
+            scheduleTemporaryGroupMessageDeletion(chatId, warningId);
+          }
           return res.json({ ok: true });
         }
 
@@ -2570,7 +2639,10 @@ async function startServer() {
             state.settings = { ...(state.settings || {}), teamChatId: String(chatId) };
             saveDatabase(state);
             await configureGroupCommandMenu({ type: 'chat', chat_id: chatId });
-            await sendGroupMessage(chatId, 'Чат привязан к MegaBot. Командные функции активны.');
+            const canReceiveMessages = await botCanReceiveOrdinaryGroupMessages(chatId);
+            await sendGroupMessage(chatId, canReceiveMessages === false
+              ? 'Чат привязан к MegaBot, но двухшаговые команды пока не заработают. Назначь бота администратором с правом удаления сообщений.'
+              : 'Чат привязан к MegaBot. Командные функции активны.');
           }
           return res.json({ ok: true });
         }
@@ -2581,27 +2653,49 @@ async function startServer() {
           return res.json({ ok: true });
         }
 
+        const selectedCompetency = blockCommands.get(commandName);
+        if (commandName !== 'cancel' && commandName !== 'all' && !selectedCompetency && pendingGroupMentions.has(pendingKey)) {
+          await clearPendingGroupMention(pendingKey, chatId);
+        }
+
         if (commandName === 'cancel') {
-          const hadPending = pendingGroupMentions.delete(pendingKey);
-          await sendGroupMessage(chatId, hadPending ? 'Уведомление отменено.' : 'Нет ожидающего уведомления.');
+          const hadPending = await clearPendingGroupMention(pendingKey, chatId);
+          const confirmationId = await sendGroupMessage(chatId, hadPending ? 'Уведомление отменено.' : 'Нет ожидающего уведомления.');
+          scheduleTemporaryGroupMessageDeletion(chatId, confirmationId);
           return res.json({ ok: true });
         }
 
-        const selectedCompetency = blockCommands.get(commandName);
         if (commandName === 'all' || selectedCompetency) {
+          if (pendingGroupMentions.has(pendingKey)) await clearPendingGroupMention(pendingKey, chatId);
           if (!commandText) {
-            pendingGroupMentions.set(pendingKey, {
-              competency: selectedCompetency,
-              expiresAt: Date.now() + 10 * 60 * 1000,
-            });
-            await sendGroupMessage(
+            const canReceiveMessages = await botCanReceiveOrdinaryGroupMessages(chatId);
+            if (canReceiveMessages === false) {
+              const warningId = await sendGroupMessage(
+                chatId,
+                'Бот видит команды, но Telegram не передаёт ему обычные сообщения. Назначь @megaorgi_bot администратором беседы с правом удаления сообщений и повтори /all.',
+              );
+              scheduleTemporaryGroupMessageDeletion(chatId, warningId, 15_000);
+              return res.json({ ok: true });
+            }
+            const expiresAt = Date.now() + 10 * 60 * 1000;
+            const promptMessageId = await sendGroupMessage(
               chatId,
               `${selectedCompetency ? `Выбран блок «${selectedCompetency}». ` : ''}Напиши текст уведомления следующим сообщением. Бот добавит актуальные упоминания автоматически.\n\nДля отмены: /cancel`,
             );
+            pendingGroupMentions.set(pendingKey, {
+              competency: selectedCompetency,
+              expiresAt,
+              promptMessageId,
+            });
+            console.log(`[Group Mention] Waiting for notification text in chat=${chatId} from=${fromUser.id}.`);
+            setTimeout(() => {
+              const current = pendingGroupMentions.get(pendingKey);
+              if (current?.expiresAt !== expiresAt) return;
+              void clearPendingGroupMention(pendingKey, chatId);
+            }, 10 * 60 * 1000);
             return res.json({ ok: true });
           }
-          pendingGroupMentions.delete(pendingKey);
-          await sendGroupMentionNotification(chatId, commandText, selectedCompetency);
+          await sendGroupMentionNotification(chatId, commandText, selectedCompetency, user);
           return res.json({ ok: true });
         }
 
@@ -4285,7 +4379,8 @@ async function startServer() {
   app.post('/api/team/broadcast', async (req, res) => {
     const { requesterId, recipientMode, competencies, recipientIds, title, body } = req.body || {};
     const state = loadDatabase();
-    if (!isAdminUser(state, requesterId)) return res.status(403).json({ error: 'Создавать рассылки может только администратор' });
+    const author = state.users.find((user) => user.id === requesterId && user.registered && !isFacultyUser(user));
+    if (!author) return res.status(403).json({ error: 'Рассылки доступны участникам основной команды' });
     const cleanBody = String(body || '').trim().slice(0, 4_000);
     const cleanTitle = String(title || '').trim().slice(0, 120);
     if (!cleanBody) return res.status(400).json({ error: 'Текст рассылки обязателен' });
@@ -4316,7 +4411,9 @@ async function startServer() {
       });
     }
 
-    const messageText = cleanTitle ? `*${cleanTitle}*\n\n${cleanBody}` : cleanBody;
+    const authorName = author.realName || author.username || 'Участник команды';
+    const authorUsername = author.username ? ` (${author.username.startsWith('@') ? author.username : `@${author.username}`})` : '';
+    const messageText = `${cleanTitle ? `*${cleanTitle}*\n\n` : ''}${cleanBody}\n\n*Автор:* ${authorName}${authorUsername}`;
     const timestamp = new Date().toISOString();
     const sendJobs: Promise<boolean>[] = [];
     for (const recipient of recipients) {
@@ -4335,7 +4432,7 @@ async function startServer() {
     const delivery = await Promise.allSettled(sendJobs);
     const delivered = delivery.filter((result) => result.status === 'fulfilled' && result.value).length;
     const failed = sendJobs.length - delivered;
-    console.log(`[Team Broadcast] recipients=${recipients.length} queued=${sendJobs.length} delivered=${delivered} unavailable=${unavailable} failed=${failed}`);
+    console.log(`[Team Broadcast] author=${author.id} recipients=${recipients.length} queued=${sendJobs.length} delivered=${delivered} unavailable=${unavailable} failed=${failed}`);
     if (!delivered) {
       return res.status(502).json({
         error: 'Telegram не доставил рассылку. Участникам нужно открыть MegaBot и нажать /start, затем повторить отправку.',
