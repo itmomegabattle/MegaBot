@@ -15,6 +15,7 @@ const telegramCalls = [];
 let nextTelegramMessageId = 1000;
 let sessionCookie = '';
 let failNextTelegramEdit = false;
+let failNextTelegramSend = false;
 let createdEventId = '';
 
 const fixture = {
@@ -146,6 +147,12 @@ const fakeTelegram = http.createServer((req, res) => {
       failNextTelegramEdit = false;
       res.writeHead(400, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: false, description: 'Bad Request: message to edit not found' }));
+      return;
+    }
+    if (failNextTelegramSend && req.url.endsWith('/sendMessage')) {
+      failNextTelegramSend = false;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error_code: 403, description: 'Forbidden: bot was blocked by the user' }));
       return;
     }
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -774,6 +781,8 @@ try {
   assert.equal(manualReminder.response.status, 200);
   assert.equal(manualReminder.data.queued, 2);
 
+  const sessionBeforeBroadcast = sessionCookie;
+  sessionCookie = adminSessionCookie;
   telegramCalls.length = 0;
   const blockBroadcast = await request('/api/team/broadcast', {
     requesterId: 'u_admin',
@@ -788,17 +797,54 @@ try {
   assert.equal(blockBroadcast.data.delivered, 2);
   assert.ok(telegramCalls.every((call) => !call.path.endsWith('/sendMessage') || ['100', '200'].includes(String(call.body.chat_id))));
 
+  const unlinkedUser = await request('/api/user/add', {
+    requesterId: 'spoofed-user-id',
+    realName: 'Неподключённый Участник',
+    username: '@unlinked_user',
+    role: 'organizer',
+  });
+  assert.equal(unlinkedUser.response.status, 200);
+
   telegramCalls.length = 0;
   const peopleBroadcast = await request('/api/team/broadcast', {
-    requesterId: 'u_admin',
+    requesterId: 'spoofed-user-id',
     recipientMode: 'people',
-    recipientIds: ['u_bob', 'missing'],
+    recipientIds: ['u_bob', unlinkedUser.data.user.id, 'missing'],
     body: 'Персональная рассылка',
   });
   assert.equal(peopleBroadcast.response.status, 200);
-  assert.equal(peopleBroadcast.data.recipients, 1);
+  assert.equal(peopleBroadcast.data.recipients, 2);
   assert.equal(peopleBroadcast.data.delivered, 1);
+  assert.equal(peopleBroadcast.data.unavailable, 1);
+  assert.equal(peopleBroadcast.data.failed, 0);
   assert.equal(String(telegramCalls.find((call) => call.path.endsWith('/sendMessage')).body.chat_id), '300');
+
+  const unavailableBroadcast = await request('/api/team/broadcast', {
+    requesterId: 'u_admin',
+    recipientMode: 'people',
+    recipientIds: [unlinkedUser.data.user.id],
+    body: 'Некому доставить',
+  });
+  assert.equal(unavailableBroadcast.response.status, 409);
+  assert.equal(unavailableBroadcast.data.unavailable, 1);
+
+  telegramCalls.length = 0;
+  failNextTelegramSend = true;
+  const rejectedBroadcast = await request('/api/team/broadcast', {
+    requesterId: 'u_admin',
+    recipientMode: 'people',
+    recipientIds: ['u_bob'],
+    body: 'Telegram отклонит сообщение',
+  });
+  assert.equal(rejectedBroadcast.response.status, 502);
+  assert.equal(rejectedBroadcast.data.delivered, 0);
+  assert.equal(rejectedBroadcast.data.failed, 1);
+  const removeUnlinkedUser = await request('/api/user/delete', {
+    requesterId: 'u_admin',
+    userId: unlinkedUser.data.user.id,
+  });
+  assert.equal(removeUnlinkedUser.response.status, 200);
+  sessionCookie = sessionBeforeBroadcast;
 
   telegramCalls.length = 0;
   await request('/api/telegram-webhook', {

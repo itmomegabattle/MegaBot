@@ -1113,7 +1113,11 @@ export default function MiniApp({
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || 'Не удалось отправить рассылку');
-      setBroadcastNotice(`Рассылка отправлена: ${result.delivered || 0} из ${result.recipients || 0}.`);
+      setBroadcastNotice([
+        `Доставлено в личку: ${result.delivered || 0} из ${result.recipients || 0}.`,
+        result.unavailable ? `Не запускали бота: ${result.unavailable}.` : '',
+        result.failed ? `Ошибка Telegram: ${result.failed}.` : '',
+      ].filter(Boolean).join(' '));
       setBroadcastTitle('');
       setBroadcastBody('');
       setBroadcastBlocks([]);
@@ -2522,9 +2526,9 @@ export default function MiniApp({
                 {broadcastOpen && (
                   <form onSubmit={submitBroadcast} className="mt-4 space-y-3">
                     <Field label="Получатели">
-                      <div className="grid grid-cols-3 gap-1.5 rounded-2xl bg-slate-100 p-1.5">
+                      <div className="grid grid-cols-2 gap-1.5 rounded-2xl bg-slate-100 p-1.5 min-[520px]:grid-cols-3">
                         {([['all', 'Все'], ['blocks', 'По блоку'], ['people', 'Конкретные люди']] as const).map(([mode, label]) => (
-                          <button key={mode} type="button" aria-pressed={broadcastMode === mode} onClick={() => setBroadcastRecipientMode(mode)} className={`min-h-11 min-w-0 rounded-xl px-1.5 py-2 text-xs font-black leading-tight ${pressClass} ${broadcastMode === mode ? 'bg-[#0069E0] text-white shadow-sm' : 'bg-white text-slate-700'}`}>
+                          <button key={mode} type="button" aria-pressed={broadcastMode === mode} onClick={() => setBroadcastRecipientMode(mode)} className={`min-h-11 min-w-0 rounded-xl px-1.5 py-2 text-xs font-black leading-tight ${mode === 'people' ? 'col-span-2 min-[520px]:col-span-1' : ''} ${pressClass} ${broadcastMode === mode ? 'bg-[#0069E0] text-white shadow-sm' : 'bg-white text-slate-700'}`}>
                             {label}
                           </button>
                         ))}
@@ -2566,7 +2570,10 @@ export default function MiniApp({
                             </button>
                             {matchedBroadcastUsers.map((user) => (
                               <label key={user.id} className="flex min-h-11 items-center justify-between gap-3 rounded-xl bg-white px-3 py-2 text-sm font-semibold">
-                                <span className="min-w-0 truncate">{user.realName}{user.id === currentUser.id ? ' · это вы' : ''}</span>
+                                <span className="min-w-0">
+                                  <strong className="block truncate">{user.realName}{user.id === currentUser.id ? ' · это вы' : ''}</strong>
+                                  {!user.telegramId && <span className="block truncate text-xs font-bold text-amber-700">Нужно открыть бота через /start</span>}
+                                </span>
                                 <input type="checkbox" checked={broadcastRecipients.includes(user.id)} onChange={() => setBroadcastRecipients((current) => current.includes(user.id) ? current.filter((id) => id !== user.id) : [...current, user.id])} />
                               </label>
                             ))}

@@ -841,6 +841,7 @@ async function startServer() {
       '/task/release': 'userId',
       '/task/status': 'requesterId',
       '/task/log/clear': 'requesterId',
+      '/team/broadcast': 'requesterId',
       '/user/add': 'requesterId',
       '/user/delete': 'requesterId',
       '/user/update': 'requesterId',
@@ -1744,8 +1745,12 @@ async function startServer() {
           reply_markup: Object.keys(replyMarkup).length > 0 ? replyMarkup : undefined
         })
       });
-      if (!response.ok) {
-        console.error('Telegram sendMessage failed:', response.status, await response.text());
+      const responseText = await response.text();
+      let responseData: { ok?: boolean; description?: string } | null = null;
+      try { responseData = responseText ? JSON.parse(responseText) : null; }
+      catch { responseData = null; }
+      if (!response.ok || responseData?.ok === false) {
+        console.error('Telegram sendMessage failed:', response.status, responseData?.description || responseText);
         return false;
       }
       return true;
@@ -4286,7 +4291,7 @@ async function startServer() {
     if (!cleanBody) return res.status(400).json({ error: 'Текст рассылки обязателен' });
     if (!['all', 'blocks', 'people'].includes(recipientMode)) return res.status(400).json({ error: 'Выбери получателей рассылки' });
 
-    const teamUsers = state.users.filter((user) => user.registered && !isFacultyUser(user));
+    const teamUsers = state.users.filter((user) => !isFacultyUser(user));
     const cleanCompetencies = [...new Set((Array.isArray(competencies) ? competencies : []).map(String).filter((name) => state.competencies?.includes(name)))];
     const requestedIds = new Set((Array.isArray(recipientIds) ? recipientIds : []).map(String));
     let recipients: User[] = [];
@@ -4298,6 +4303,18 @@ async function startServer() {
     if (recipientMode === 'people') recipients = teamUsers.filter((user) => requestedIds.has(user.id));
     recipients = [...new Map(recipients.map((user) => [user.id, user])).values()];
     if (!recipients.length) return res.status(400).json({ error: 'Не найдено ни одного доступного получателя' });
+
+    const sendableRecipients = recipients.filter((recipient) => recipient.telegramId);
+    const unavailable = recipients.length - sendableRecipients.length;
+    if (!sendableRecipients.length) {
+      return res.status(409).json({
+        error: 'Никому не удалось отправить сообщение: выбранные участники ещё не открывали MegaBot через /start.',
+        recipients: recipients.length,
+        delivered: 0,
+        unavailable,
+        failed: 0,
+      });
+    }
 
     const messageText = cleanTitle ? `*${cleanTitle}*\n\n${cleanBody}` : cleanBody;
     const timestamp = new Date().toISOString();
@@ -4317,7 +4334,19 @@ async function startServer() {
     saveDatabase(state);
     const delivery = await Promise.allSettled(sendJobs);
     const delivered = delivery.filter((result) => result.status === 'fulfilled' && result.value).length;
-    return res.json({ success: true, recipients: recipients.length, queued: sendJobs.length, delivered });
+    const failed = sendJobs.length - delivered;
+    console.log(`[Team Broadcast] recipients=${recipients.length} queued=${sendJobs.length} delivered=${delivered} unavailable=${unavailable} failed=${failed}`);
+    if (!delivered) {
+      return res.status(502).json({
+        error: 'Telegram не доставил рассылку. Участникам нужно открыть MegaBot и нажать /start, затем повторить отправку.',
+        recipients: recipients.length,
+        queued: sendJobs.length,
+        delivered,
+        unavailable,
+        failed,
+      });
+    }
+    return res.json({ success: true, recipients: recipients.length, queued: sendJobs.length, delivered, unavailable, failed });
   });
 
   app.post('/api/task/notify', async (req, res) => {
