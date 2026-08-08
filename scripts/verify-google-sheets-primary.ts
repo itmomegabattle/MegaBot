@@ -60,6 +60,14 @@ const rangeStart = (range: string) => {
   if (!match) throw new Error(`Invalid test range: ${range}`);
   return { col: columnIndex(match[1]), row: Number(match[2]) - 1 };
 };
+const rangeBounds = (range: string) => {
+  const match = range.match(/!([A-Z]+)(\d+):([A-Z]+)(\d+)/);
+  if (!match) throw new Error(`Invalid test range: ${range}`);
+  return {
+    startCol: columnIndex(match[1]), startRow: Number(match[2]) - 1,
+    endCol: columnIndex(match[3]) + 1, endRow: Number(match[4]),
+  };
+};
 
 const originalFetch = globalThis.fetch;
 globalThis.fetch = async (input: RequestInfo | URL, init: RequestInit = {}) => {
@@ -78,7 +86,13 @@ globalThis.fetch = async (input: RequestInfo | URL, init: RequestInit = {}) => {
     return new Response(JSON.stringify({ values }), { status: 200 });
   }
   if (url.includes('/values:batchClear')) {
-    for (let row = 1; row <= 4; row += 1) for (let col = 1; col <= 14; col += 1) { raw[row][col] = ''; formatted[row][col] = ''; }
+    for (const range of body.ranges) {
+      const bounds = rangeBounds(range);
+      for (let row = bounds.startRow; row < bounds.endRow; row += 1) for (let col = bounds.startCol; col < bounds.endCol; col += 1) {
+        raw[row] ||= []; formatted[row] ||= [];
+        raw[row][col] = ''; formatted[row][col] = '';
+      }
+    }
     return new Response(JSON.stringify({ clearedRanges: body.ranges }), { status: 200 });
   }
   if (url.includes('/values:batchUpdate')) {
@@ -155,6 +169,39 @@ try {
   assert.equal(migration.backup?.verified, true);
   assert.equal(calls.filter((call) => call.body?.requests?.some((request: any) => request.duplicateSheet)).length, 1);
   assert.ok(!calls.some((call) => call.url.includes('/values:batchClear')));
+
+  formatted.length = 0;
+  raw.length = 0;
+  const fixedRows = Array.from({ length: 5 }, () => Array(74).fill(''));
+  fixedRows[2][0] = 'МегаОрги';
+  fixedRows[2][1] = 'Статус';
+  fixedRows[2][2] = 'Я в ауте';
+  fixedRows[2][73] = 'Тэг';
+  [8, 14, 20, 26, 32].forEach((start, day) => {
+    fixedRows[2][start] = shortDate(currentWeek, day);
+    [17, 18, 19, 20, 21, 22].forEach((hour, offset) => { fixedRows[3][start + offset] = `${hour}:00`; });
+  });
+  fixedRows[4][0] = 'Алиса Тестовая';
+  fixedRows[4][73] = '@alice';
+  formatted.push(...fixedRows.map((row) => [...row]));
+  raw.push(...fixedRows.map((row) => [...row]));
+  sheets[0].properties.gridProperties.columnCount = 74;
+  calls.length = 0;
+  const repairedFixedLayout = await ensurePrimaryWeekSheet(config, users, {
+    availabilityActiveDays: [0, 1, 2, 3, 4], availabilityStartHour: 17, availabilityEndHour: 22,
+  });
+  assert.equal(repairedFixedLayout.layoutChanged, true);
+  const fixedLayoutBatch = calls.find((call) => call.body?.requests?.some((request: any) => request.updateDimensionProperties));
+  assert.ok(fixedLayoutBatch?.body.requests.some((request: any) => (
+    request.mergeCells?.range?.startColumnIndex === 3 && request.mergeCells?.range?.endColumnIndex === 9
+  )));
+  assert.ok(fixedLayoutBatch?.body.requests.some((request: any) => (
+    request.updateDimensionProperties?.range?.startIndex === 53
+    && request.updateDimensionProperties?.properties?.hiddenByUser === true
+  )));
+  const fixedValuesWrite = calls.find((call) => call.body?.valueInputOption === 'RAW' && call.body.data.some((item: any) => item.range.includes('!D3')));
+  assert.ok(fixedValuesWrite?.body.data.some((item: any) => item.range.includes('!N3')));
+  assert.ok(fixedValuesWrite?.body.data.some((item: any) => item.range.includes('!AR3')));
   console.log('Google Sheets primary-sheet verification passed: backup-before-rotation, ОСНОВА-only sync, checkboxes, legacy hiding, and idempotency.');
 } finally {
   globalThis.fetch = originalFetch;

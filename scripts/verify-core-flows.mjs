@@ -1298,7 +1298,20 @@ try {
       message_id: 22,
       chat: { id: -100500, type: 'supergroup' },
       from: { id: 200, username: 'alice', first_name: 'Алиса' },
-      text: '/checkin Репетиция',
+      text: '/checkin',
+    },
+  });
+  const checkinPrompt = telegramCalls.find((call) => call.path.endsWith('/sendMessage') && String(call.body.text || '').includes('название переклички'));
+  assert.ok(checkinPrompt);
+  assert.ok(!telegramCalls.some((call) => call.body.reply_markup?.inline_keyboard?.[0]?.[0]?.callback_data === 'group_checkin'));
+  telegramCalls.length = 0;
+  await request('/api/telegram-webhook', {
+    update_id: 2201,
+    message: {
+      message_id: 2201,
+      chat: { id: -100500, type: 'supergroup' },
+      from: { id: 200, username: 'alice', first_name: 'Алиса' },
+      text: 'Репетиция',
     },
   });
   const checkinMessage = telegramCalls.find((call) => (
@@ -1306,6 +1319,9 @@ try {
     && call.body.reply_markup?.inline_keyboard?.[0]?.[0]?.callback_data === 'group_checkin'
   ));
   assert.ok(checkinMessage);
+  assert.ok(String(checkinMessage.body.text || '').includes('Репетиция'));
+  assert.ok(telegramCalls.some((call) => call.path.endsWith('/deleteMessage') && call.body.message_id === checkinPrompt.resultMessageId));
+  assert.ok(telegramCalls.some((call) => call.path.endsWith('/deleteMessage') && call.body.message_id === 2201));
   const checkinPanelId = checkinMessage.resultMessageId;
 
   telegramCalls.length = 0;

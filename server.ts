@@ -951,6 +951,7 @@ async function startServer() {
     new Map(Object.entries(members)),
   ]));
   const pendingGroupMentions = new Map<string, { competency?: string; expiresAt: number; promptMessageId?: number }>();
+  const pendingGroupCheckins = new Map<string, { expiresAt: number; promptMessageId?: number }>();
   const processedCallbackIds = new Set<string>();
   const telegramChatUpdateQueues = new Map<string, Promise<void>>();
   const persistChatPanelMessageIds = () => {
@@ -1279,6 +1280,7 @@ async function startServer() {
       if (data.result?.message_id) {
         rememberChatPanelMessage(chatId, data.result.message_id);
         await deleteOldChatPanels(chatId, data.result.message_id);
+        return data.result.message_id;
       }
     } catch (err) {
       console.error('Telegram keyboard send failed:', err);
@@ -1309,6 +1311,7 @@ async function startServer() {
       if (data.result?.message_id) {
         rememberChatPanelMessage(chatId, data.result.message_id);
         await deleteOldChatPanels(chatId, data.result.message_id);
+        return data.result.message_id;
       }
     } catch (err) {
       console.error('Telegram panel send failed:', err);
@@ -1391,6 +1394,21 @@ async function startServer() {
     pendingGroupMentions.delete(pendingKey);
     if (pending?.promptMessageId) await deleteTelegramMessage(chatId, pending.promptMessageId);
     return pending;
+  }
+
+  async function clearPendingGroupCheckin(pendingKey: string, chatId: string | number) {
+    const pending = pendingGroupCheckins.get(pendingKey);
+    pendingGroupCheckins.delete(pendingKey);
+    if (pending?.promptMessageId) await deleteTelegramMessage(chatId, pending.promptMessageId);
+    return pending;
+  }
+
+  async function startGroupCheckin(chatId: string | number, title: string) {
+    const panelId = await sendInlinePanel(chatId, `*${title}*\n\nОтметились: 0\nПока никто`, [[
+      { text: 'Я здесь · 0', callback_data: 'group_checkin' },
+    ]]);
+    if (panelId) groupCheckins.set(`${chatId}:${panelId}`, { title, userIds: new Set() });
+    return Boolean(panelId);
   }
 
   function scheduleTemporaryGroupMessageDeletion(chatId: string | number, messageId: number | undefined, delayMs = 8_000) {
@@ -2597,8 +2615,10 @@ async function startServer() {
         const blockCommands = groupCommandCompetencies(state);
         const pendingKey = `${chatId}:${fromUser.id}`;
         const pendingMention = pendingGroupMentions.get(pendingKey);
+        const pendingCheckin = pendingGroupCheckins.get(pendingKey);
 
         if (pendingMention && pendingMention.expiresAt <= Date.now()) await clearPendingGroupMention(pendingKey, chatId);
+        if (pendingCheckin && pendingCheckin.expiresAt <= Date.now()) await clearPendingGroupCheckin(pendingKey, chatId);
         if (pendingMention && pendingMention.expiresAt > Date.now() && !commandMatch) {
           if (!user?.registered) {
             await deleteTelegramMessage(chatId, update.message.message_id);
@@ -2614,6 +2634,25 @@ async function startServer() {
             await clearPendingGroupMention(pendingKey, chatId);
           } else {
             const warningId = await sendGroupMessage(chatId, 'Не удалось отправить уведомление. Твой текст сохранён в чате — повтори отправку или используй /cancel.');
+            scheduleTemporaryGroupMessageDeletion(chatId, warningId);
+          }
+          return res.json({ ok: true });
+        }
+        if (pendingCheckin && pendingCheckin.expiresAt > Date.now() && !commandMatch) {
+          if (!user?.registered) {
+            await deleteTelegramMessage(chatId, update.message.message_id);
+            await clearPendingGroupCheckin(pendingKey, chatId);
+            const warningId = await sendGroupMessage(chatId, 'Эта команда доступна участникам, привязанным к MegaBot.');
+            scheduleTemporaryGroupMessageDeletion(chatId, warningId);
+            return res.json({ ok: true });
+          }
+          const title = text.slice(0, 200).trim();
+          const started = title ? await startGroupCheckin(chatId, title) : false;
+          if (started) {
+            await deleteTelegramMessage(chatId, update.message.message_id);
+            await clearPendingGroupCheckin(pendingKey, chatId);
+          } else {
+            const warningId = await sendGroupMessage(chatId, 'Не удалось начать перекличку. Название сохранено в чате — попробуй ещё раз или используй /cancel.');
             scheduleTemporaryGroupMessageDeletion(chatId, warningId);
           }
           return res.json({ ok: true });
@@ -2657,10 +2696,16 @@ async function startServer() {
         if (commandName !== 'cancel' && commandName !== 'all' && !selectedCompetency && pendingGroupMentions.has(pendingKey)) {
           await clearPendingGroupMention(pendingKey, chatId);
         }
+        if (commandName !== 'cancel' && commandName !== 'checkin' && pendingGroupCheckins.has(pendingKey)) {
+          await clearPendingGroupCheckin(pendingKey, chatId);
+        }
 
         if (commandName === 'cancel') {
-          const hadPending = await clearPendingGroupMention(pendingKey, chatId);
-          const confirmationId = await sendGroupMessage(chatId, hadPending ? 'Уведомление отменено.' : 'Нет ожидающего уведомления.');
+          const [hadMention, hadCheckin] = await Promise.all([
+            clearPendingGroupMention(pendingKey, chatId),
+            clearPendingGroupCheckin(pendingKey, chatId),
+          ]);
+          const confirmationId = await sendGroupMessage(chatId, hadMention || hadCheckin ? 'Действие отменено.' : 'Нет ожидающего действия.');
           scheduleTemporaryGroupMessageDeletion(chatId, confirmationId);
           return res.json({ ok: true });
         }
@@ -2749,12 +2794,25 @@ async function startServer() {
         }
 
         if (commandName === 'checkin') {
-          const title = commandText || 'Перекличка команды';
-          await sendInlinePanel(chatId, `*${title}*\n\nОтметились: 0\nПока никто`, [[
-            { text: 'Я здесь · 0', callback_data: 'group_checkin' },
-          ]]);
-          const panelId = chatPanelMessageIds.get(String(chatId));
-          if (panelId) groupCheckins.set(`${chatId}:${panelId}`, { title, userIds: new Set() });
+          if (commandText) {
+            await startGroupCheckin(chatId, commandText.slice(0, 200));
+            return res.json({ ok: true });
+          }
+          if (pendingGroupCheckins.has(pendingKey)) await clearPendingGroupCheckin(pendingKey, chatId);
+          const canReceiveMessages = await botCanReceiveOrdinaryGroupMessages(chatId);
+          if (canReceiveMessages === false) {
+            const warningId = await sendGroupMessage(chatId, 'Бот видит команду, но Telegram не передаёт ему обычные сообщения. Назначь @megaorgi_bot администратором беседы и повтори /checkin.');
+            scheduleTemporaryGroupMessageDeletion(chatId, warningId, 15_000);
+            return res.json({ ok: true });
+          }
+          const expiresAt = Date.now() + 10 * 60 * 1000;
+          const promptMessageId = await sendGroupMessage(chatId, 'Напиши название переклички следующим сообщением.\n\nДля отмены: /cancel');
+          pendingGroupCheckins.set(pendingKey, { expiresAt, promptMessageId });
+          setTimeout(() => {
+            const current = pendingGroupCheckins.get(pendingKey);
+            if (current?.expiresAt !== expiresAt) return;
+            void clearPendingGroupCheckin(pendingKey, chatId);
+          }, 10 * 60 * 1000);
           return res.json({ ok: true });
         }
 
