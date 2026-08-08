@@ -16,6 +16,7 @@ import {
   currentMoscowWeekStart,
 } from '../src/googleSheetsSync.js';
 import { googleSheetsDatabaseConfigFromEnv, importStateFromGoogleSheetsDatabase } from '../src/googleSheetsDatabase.js';
+import { normalizeAvailabilityConfig } from '../src/availabilityConfig.js';
 
 const command = process.argv[2] || 'mapping';
 const dbFile = path.resolve(process.env.DB_FILE || 'database.json');
@@ -27,9 +28,15 @@ if (fs.existsSync(dbFile)) {
 } else {
   const databaseConfig = googleSheetsDatabaseConfigFromEnv();
   if (!databaseConfig?.enabled) throw new Error(`Database file not found: ${dbFile}`);
-  const imported = await importStateFromGoogleSheetsDatabase(databaseConfig);
-  if (!imported.initialized || !imported.state) throw new Error('Google Sheets database is not initialized');
-  state = imported.state;
+  for (let attempt = 1; attempt <= 10; attempt += 1) {
+    const imported = await importStateFromGoogleSheetsDatabase(databaseConfig);
+    if (imported.initialized && imported.state) {
+      state = imported.state;
+      break;
+    }
+    if (attempt < 10) await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+  if (!state) throw new Error('Google Sheets database did not expose a complete snapshot within 10 seconds');
 }
 const users = Array.isArray(state.users) ? state.users : [];
 
@@ -58,13 +65,15 @@ if (command === 'sheets') {
 } else if (command === 'roundtrip-test') {
   const user = users.find((item: any) => item.telegramId) || users[0];
   if (!user) throw new Error('No user available for roundtrip test');
+  const testHour = normalizeAvailabilityConfig(state.settings).hours[0];
+  if (!Number.isInteger(testHour)) throw new Error('No active availability hour configured');
   const base = { userId: user.id, hardUnavailableDays: [], weekStart: currentMoscowWeekStart(), updatedAt: new Date().toISOString() };
-  await exportAvailabilityToSheet(config, users, { ...base, slots: { 0: [12] } });
+  await exportAvailabilityToSheet(config, users, { ...base, slots: { 0: [testHour] } });
   const imported = await importAvailabilitiesFromSheet(config, users);
-  const passed = Boolean(imported.imported.find((item) => item.userId === user.id)?.slots?.[0]?.includes(12));
+  const passed = Boolean(imported.imported.find((item) => item.userId === user.id)?.slots?.[0]?.includes(testHour));
   await exportAvailabilityToSheet(config, users, { ...base, slots: {} });
   if (!passed) throw new Error('Roundtrip test failed: written slot was not imported');
-  console.log(JSON.stringify({ passed: true, userId: user.id, telegramId: user.telegramId, restoredBlank: true }, null, 2));
+  console.log(JSON.stringify({ passed: true, userId: user.id, telegramId: user.telegramId, testHour, restoredBlank: true }, null, 2));
 } else {
   throw new Error(`Unknown command: ${command}`);
 }

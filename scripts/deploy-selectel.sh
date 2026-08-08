@@ -23,6 +23,23 @@ fi
 npm ci
 npm run lint
 npm run build
+
+BOT_STOPPED=false
+restart_bot_on_error() {
+  if [[ "${BOT_STOPPED}" == "true" ]]; then
+    echo "Deployment failed while MegaBot was stopped; starting the built revision." >&2
+    export APP_REVISION="$(git rev-parse HEAD)"
+    pm2 startOrReload ecosystem.config.cjs --update-env || true
+    pm2 save || true
+  fi
+}
+trap restart_bot_on_error ERR
+
+# Stop the only database writer before taking the deploy backup. Otherwise the
+# retiring process can leave a snapshot in the transient `writing` state while
+# PM2 starts the replacement process.
+pm2 stop megabot
+BOT_STOPPED=true
 for backup_attempt in {1..5}; do
   if npm run db:sheets:backup; then
     break
@@ -36,6 +53,7 @@ done
 
 export APP_REVISION="$(git rev-parse HEAD)"
 pm2 startOrReload ecosystem.config.cjs --update-env
+BOT_STOPPED=false
 pm2 save
 
 for attempt in {1..20}; do
