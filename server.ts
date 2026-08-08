@@ -3630,8 +3630,8 @@ async function startServer() {
     const { requesterId, userId, realName, username, role, birthday, competencies, primaryCompetency, avatarDataUrl } = req.body;
     const state = loadDatabase();
 
-    const selfEditOnly = requesterId === userId && realName === undefined && username === undefined && role === undefined && birthday === undefined
-      && (Array.isArray(competencies) || primaryCompetency !== undefined || avatarDataUrl !== undefined);
+    const selfEditOnly = requesterId === userId && role === undefined
+      && (realName !== undefined || username !== undefined || birthday !== undefined || Array.isArray(competencies) || primaryCompetency !== undefined || avatarDataUrl !== undefined);
     if (!isAdminUser(state, requesterId) && !selfEditOnly) {
       return res.status(403).json({ error: 'Редактировать участников может только админ' });
     }

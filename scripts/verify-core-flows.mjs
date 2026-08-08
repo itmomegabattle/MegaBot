@@ -319,6 +319,39 @@ try {
   assert.equal(avatarUpdate.response.status, 200);
   assert.match(avatarUpdate.data.user.avatarDataUrl, /^data:image\/webp;base64,/);
 
+  sessionCookie = aliceSessionBeforeAdmin;
+  const selfProfileUpdate = await request('/api/user/update', {
+    requesterId: 'u_alice',
+    userId: 'u_alice',
+    realName: 'Алиса Обновлённая',
+    username: '@alice_new',
+    birthday: '10.11.2000',
+    competencies: ['Дизайн'],
+    primaryCompetency: 'Дизайн',
+  });
+  assert.equal(selfProfileUpdate.response.status, 200);
+  assert.equal(selfProfileUpdate.data.user.realName, 'Алиса Обновлённая');
+  assert.equal(selfProfileUpdate.data.user.username, '@alice_new');
+  assert.equal(selfProfileUpdate.data.user.birthday, '10.11.2000');
+
+  const selfRoleEscalation = await request('/api/user/update', {
+    requesterId: 'u_alice',
+    userId: 'u_alice',
+    role: 'admin',
+  });
+  assert.equal(selfRoleEscalation.response.status, 403);
+  const selfProfileRestore = await request('/api/user/update', {
+    requesterId: 'u_alice',
+    userId: 'u_alice',
+    realName: 'Алиса Командная',
+    username: '@alice',
+    birthday: '09.11.2000',
+    competencies: ['Дизайн'],
+    primaryCompetency: 'Дизайн',
+  });
+  assert.equal(selfProfileRestore.response.status, 200);
+  sessionCookie = adminSessionCookie;
+
   const createEvent = await request('/api/event/create', {
     requesterId: 'u_admin',
     name: 'Тестовое мероприятие',

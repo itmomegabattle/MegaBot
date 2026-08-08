@@ -1271,7 +1271,17 @@ export default function MiniApp({
     setTeamError('');
     const payload = isAdminPanel
       ? { requesterId: currentUser.id, userId, ...userDraft }
-      : { requesterId: currentUser.id, userId, competencies: userDraft.competencies, primaryCompetency: userDraft.primaryCompetency };
+      : userId === currentUser.id
+        ? {
+            requesterId: currentUser.id,
+            userId,
+            realName: userDraft.realName,
+            username: userDraft.username,
+            birthday: userDraft.birthday,
+            competencies: userDraft.competencies,
+            primaryCompetency: userDraft.primaryCompetency,
+          }
+        : { requesterId: currentUser.id, userId, competencies: userDraft.competencies, primaryCompetency: userDraft.primaryCompetency };
     try {
       const res = await fetch('/api/user/update', {
         method: 'POST',
@@ -1582,10 +1592,63 @@ export default function MiniApp({
                 </div>
               </div>
               <div className="mt-4 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => editingUserId === currentUser.id ? setEditingUserId(null) : startUserEdit(currentUser)}
+                  className={miniButtonClass}
+                  aria-expanded={editingUserId === currentUser.id}
+                >
+                  <PencilSimple className="h-4 w-4" />
+                  {editingUserId === currentUser.id ? 'Закрыть редактирование' : 'Редактировать профиль'}
+                </button>
                 {currentUser.avatarDataUrl && (
                   <button type="button" disabled={avatarSaving} onClick={() => void saveAvatar('')} className={`${miniButtonClass} border-rose-100 bg-rose-50 text-rose-600 disabled:opacity-60`}>Удалить фото</button>
                 )}
               </div>
+
+              {editingUserId === currentUser.id && (
+                <div className="mt-4 space-y-3 rounded-2xl border border-blue-100 bg-slate-50 p-3">
+                  <div className="grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-2">
+                    <Field label="Имя">
+                      <input value={userDraft.realName} onChange={(event) => setUserDraft((prev) => ({ ...prev, realName: event.target.value }))} className={inputClass} autoComplete="name" />
+                    </Field>
+                    <Field label="Telegram">
+                      <input value={userDraft.username} onChange={(event) => setUserDraft((prev) => ({ ...prev, username: event.target.value }))} className={inputClass} autoCapitalize="none" autoCorrect="off" />
+                    </Field>
+                  </div>
+                  <Field label="Дата рождения">
+                    <DatePickerField value={userDraft.birthday} onChange={(value) => setUserDraft((prev) => ({ ...prev, birthday: value }))} placeholder="Выбери дату" fullYear />
+                  </Field>
+                  <Field label="Главный блок">
+                    <div className="grid grid-cols-1 gap-2 rounded-2xl border border-slate-200 bg-white p-2">
+                      {competencies.length === 0 ? (
+                        <div className="px-2 py-1 text-xs font-bold text-slate-400">Админ ещё не добавил блоки</div>
+                      ) : competencies.map((name) => (
+                        <label key={name} className="flex min-h-11 items-center justify-between rounded-xl px-3 py-2 text-sm font-semibold">
+                          <span>{name}</span>
+                          <input
+                            type="radio"
+                            name="profile-primary-competency"
+                            checked={userDraft.primaryCompetency === name}
+                            onChange={() => setUserDraft((prev) => ({
+                              ...prev,
+                              primaryCompetency: name,
+                              competencies: prev.competencies.includes(name) ? prev.competencies : [name, ...prev.competencies],
+                            }))}
+                          />
+                        </label>
+                      ))}
+                    </div>
+                  </Field>
+                  {teamError && <p role="alert" className="text-sm font-bold text-rose-600">{teamError}</p>}
+                  <div className="grid grid-cols-2 gap-2">
+                    <button type="button" onClick={() => setEditingUserId(null)} className={secondaryButtonClass}>Отмена</button>
+                    <button type="button" onClick={() => void updateUser(currentUser.id)} disabled={savingUserId === currentUser.id} className={`${primaryButtonClass} disabled:opacity-60`}>
+                      {savingUserId === currentUser.id ? 'Сохраняю…' : 'Сохранить'}
+                    </button>
+                  </div>
+                </div>
+              )}
 
               <div className="mt-5 grid grid-cols-2 overflow-hidden rounded-2xl border border-blue-100 bg-slate-50 sm:grid-cols-4">
                 {[
