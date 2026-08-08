@@ -1573,6 +1573,18 @@ export default function MiniApp({
         {activeTab === 'profile' && (
           <section className="space-y-4">
             <div className="rounded-3xl border border-blue-100 bg-white p-5 shadow-sm">
+              <div className="mb-4 flex min-w-0 items-center justify-between gap-3">
+                <h2 className="min-w-0 text-lg font-black text-slate-950">Профиль</h2>
+                <button
+                  type="button"
+                  onClick={() => editingUserId === currentUser.id ? setEditingUserId(null) : startUserEdit(currentUser)}
+                  className={`${miniButtonClass} min-h-11 shrink-0 px-3`}
+                  aria-expanded={editingUserId === currentUser.id}
+                >
+                  <PencilSimple className="h-4 w-4" weight="bold" />
+                  {editingUserId === currentUser.id ? 'Закрыть' : 'Редактировать'}
+                </button>
+              </div>
               <div className="flex items-center gap-4">
                 <label className="group relative shrink-0 cursor-pointer" aria-label="Изменить фотографию профиля">
                   <UserAvatar user={currentUser} className="h-16 w-16 rounded-2xl" />
@@ -1591,20 +1603,11 @@ export default function MiniApp({
                   </p>
                 </div>
               </div>
-              <div className="mt-4 flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  onClick={() => editingUserId === currentUser.id ? setEditingUserId(null) : startUserEdit(currentUser)}
-                  className={miniButtonClass}
-                  aria-expanded={editingUserId === currentUser.id}
-                >
-                  <PencilSimple className="h-4 w-4" />
-                  {editingUserId === currentUser.id ? 'Закрыть редактирование' : 'Редактировать профиль'}
-                </button>
-                {currentUser.avatarDataUrl && (
+              {currentUser.avatarDataUrl && (
+                <div className="mt-4 flex flex-wrap gap-2">
                   <button type="button" disabled={avatarSaving} onClick={() => void saveAvatar('')} className={`${miniButtonClass} border-rose-100 bg-rose-50 text-rose-600 disabled:opacity-60`}>Удалить фото</button>
-                )}
-              </div>
+                </div>
+              )}
 
               {editingUserId === currentUser.id && (
                 <div className="mt-4 space-y-3 rounded-2xl border border-blue-100 bg-slate-50 p-3">
@@ -2050,7 +2053,7 @@ export default function MiniApp({
                   <h2 className="font-black">Общий календарь</h2>
                   <p className="mt-1 text-xs font-semibold text-slate-500">Все свободные часы команды на текущей неделе</p>
                 </div>
-                <a href="https://docs.google.com/spreadsheets/d/16sbBKwmrUm2b6n7nZG2UYyjBk-8IkUaGJqEd-nQwtWo/edit?usp=sharing" target="_blank" rel="noreferrer" className={miniButtonClass}>
+                <a href="https://docs.google.com/spreadsheets/d/16sbBKwmrUm2b6n7nZG2UYyjBk-8IkUaGJqEd-nQwtWo/edit?gid=1910422522#gid=1910422522" target="_blank" rel="noreferrer" className={miniButtonClass}>
                   <ArrowSquareOut className="h-4 w-4" /> Открыть ОСНОВА
                 </a>
               </div>

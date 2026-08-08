@@ -1257,7 +1257,7 @@ async function startServer() {
     }
   }
 
-  async function sendTelegramKeyboard(chatId: string | number, text: string, rows: string[][], includeWebApp = false, user?: User) {
+  async function sendTelegramKeyboard(chatId: string | number, text: string, rows: string[][], includeWebApp = false, user?: User, silent = false) {
     const botToken = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
     if (!botToken) return;
     const tgApiBase = process.env.TELEGRAM_API_BASE || 'https://api.telegram.org';
@@ -1270,6 +1270,7 @@ async function startServer() {
           text: renderTelegramHtml(text),
           parse_mode: 'HTML',
           reply_markup: buildKeyboard(rows, includeWebApp, user),
+          disable_notification: (silent || /^tasks?(?:_|$)/.test(chatSessions.get(String(chatId))?.flow || '')) || undefined,
         }),
       });
       if (!response.ok) {
@@ -1291,6 +1292,7 @@ async function startServer() {
     chatId: string | number,
     text: string,
     inlineKeyboard: { text: string; callback_data: string }[][],
+    silent = false,
   ) {
     const botToken = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
     if (!botToken) return;
@@ -1304,6 +1306,7 @@ async function startServer() {
           text: renderTelegramHtml(text),
           parse_mode: 'HTML',
           reply_markup: inlineKeyboard.length ? { inline_keyboard: inlineKeyboard } : undefined,
+          disable_notification: silent || undefined,
         }),
       });
       if (!response.ok) return;
@@ -1329,7 +1332,7 @@ async function startServer() {
     return false;
   }
 
-  async function sendGroupMessage(chatId: string | number, text: string): Promise<number | undefined> {
+  async function sendGroupMessage(chatId: string | number, text: string, silent = false): Promise<number | undefined> {
     const botToken = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
     if (!botToken) return;
     const tgApiBase = process.env.TELEGRAM_API_BASE || 'https://api.telegram.org';
@@ -1342,6 +1345,7 @@ async function startServer() {
           text: renderTelegramHtml(text),
           parse_mode: 'HTML',
           disable_web_page_preview: true,
+          disable_notification: silent || undefined,
         }),
       });
       const data = await response.json().catch(() => null) as { ok?: boolean; description?: string; result?: { message_id?: number } } | null;
@@ -1778,7 +1782,7 @@ async function startServer() {
     return { changed: wasAttending !== attending, attending };
   }
 
-  async function sendTelegramMessage(chatId: string | number, text: string, buttons?: { text: string; action: string }[], keyboardOnly = false, recipient?: User): Promise<boolean> {
+  async function sendTelegramMessage(chatId: string | number, text: string, buttons?: { text: string; action: string }[], keyboardOnly = false, recipient?: User, silent = false): Promise<boolean> {
     const botToken = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
     if (!botToken) {
       console.warn('TELEGRAM_BOT_TOKEN is not set. Telegram message was not sent.');
@@ -1820,7 +1824,8 @@ async function startServer() {
           chat_id: chatId,
           text: renderTelegramHtml(text),
           parse_mode: 'HTML',
-          reply_markup: Object.keys(replyMarkup).length > 0 ? replyMarkup : undefined
+          reply_markup: Object.keys(replyMarkup).length > 0 ? replyMarkup : undefined,
+          disable_notification: silent || undefined,
         })
       });
       const responseText = await response.text();
@@ -1848,6 +1853,22 @@ async function startServer() {
           ...(user.role === 'admin' ? [['МФ', 'Помощь']] : [['Помощь']]),
         ];
     await sendTelegramKeyboard(chatId, profileSummaryText(user, state), rows, false, user);
+  }
+
+  function sendTaskTelegramMessage(chatId: string | number, text: string, buttons?: { text: string; action: string }[], keyboardOnly = false, recipient?: User) {
+    return sendTelegramMessage(chatId, text, buttons, keyboardOnly, recipient, true);
+  }
+
+  function sendTaskTelegramKeyboard(chatId: string | number, text: string, rows: string[][], includeWebApp = false, user?: User) {
+    return sendTelegramKeyboard(chatId, text, rows, includeWebApp, user, true);
+  }
+
+  function sendTaskInlinePanel(chatId: string | number, text: string, inlineKeyboard: { text: string; callback_data: string }[][]) {
+    return sendInlinePanel(chatId, text, inlineKeyboard, true);
+  }
+
+  function sendTaskGroupMessage(chatId: string | number, text: string) {
+    return sendGroupMessage(chatId, text, true);
   }
 
   async function showWelcomePanel(chatId: string | number, user: User) {
@@ -1958,7 +1979,7 @@ async function startServer() {
 
   async function showTasksPanel(chatId: string | number, user: User, state: SimulationState) {
     chatSessions.set(String(chatId), { flow: 'tasks_root' });
-    await sendTelegramKeyboard(chatId, tasksSummaryText(user, state), [
+    await sendTaskTelegramKeyboard(chatId, tasksSummaryText(user, state), [
       ['Управлять задачами', 'Создать задачу'],
       ['Свободные задачи', 'Выполненные задачи'],
       ['Назад'],
@@ -2000,7 +2021,7 @@ async function startServer() {
     saveDatabase(state);
     const sendJobs = state.users
       .filter((member) => member.role === 'admin' && member.telegramId && member.id !== user.id)
-      .map((admin) => sendTelegramMessage(
+      .map((admin) => sendTaskTelegramMessage(
         admin.telegramId!,
         `Задача выполнена!\n\n${task.title}\nИсполнитель: ${userMention(user)}${timeSpentMinutes ? `\nЗатрачено: ${taskDurationLabel(timeSpentMinutes)}` : ''}${cleanComment ? `\nКомментарий: ${cleanComment}` : ''}`,
         undefined,
@@ -2120,7 +2141,7 @@ async function startServer() {
             timestamp: new Date().toISOString(),
           });
           if (target?.telegramId) {
-            await sendTelegramMessage(target.telegramId, text, undefined, false, target);
+            await sendTaskTelegramMessage(target.telegramId, text, undefined, false, target);
           }
         }
         if (reminder.type === 'before_deadline') reminder.sentAt = now.toISOString();
@@ -2503,7 +2524,7 @@ async function startServer() {
               [{ text: 'Назад', callback_data: 'nav_tasks' }],
             ]
           : [[{ text: 'Назад', callback_data: 'nav_tasks' }]];
-        await sendInlinePanel(chatId, taskDetailsText(task, state), buttons);
+        await sendTaskInlinePanel(chatId, taskDetailsText(task, state), buttons);
         return res.json({ ok: true });
       }
 
@@ -2516,22 +2537,22 @@ async function startServer() {
         }
         if (task.status !== 'open') {
           await answerCallback(callback.id, 'Задача уже занята');
-          await sendTelegramMessage(chatId, 'Эту задачу уже взяли. Открой приложение, чтобы увидеть актуальный список.', [{ text: 'Открыть задачи', action: 'open_tasks' }]);
+          await sendTaskTelegramMessage(chatId, 'Эту задачу уже взяли. Открой приложение, чтобы увидеть актуальный список.', [{ text: 'Открыть задачи', action: 'open_tasks' }]);
           return res.json({ ok: true });
         }
         task.assignedTo = [user.id];
         task.status = 'assigned';
         saveDatabase(state);
         await answerCallback(callback.id, 'Задача закреплена за тобой');
-        await sendGroupMessage(chatId, `Ты взял задачу:\n\n${taskDetailsText(task, state)}`);
+        await sendTaskGroupMessage(chatId, `Ты взял задачу:\n\n${taskDetailsText(task, state)}`);
         await showTasksPanel(chatId, user, state);
         const creator = state.users.find(u => u.id === task.creatorId);
         const notifyClaimText = `Задачу "${task.title}" подхватил ${userMention(user)}.\n\nСвязаться: ${user.username}`;
         if (creator?.telegramId && creator.id !== user.id) {
-          await sendTelegramMessage(creator.telegramId, notifyClaimText);
+          await sendTaskTelegramMessage(creator.telegramId, notifyClaimText);
         }
         for (const admin of state.users.filter(u => u.role === 'admin' && u.telegramId && u.id !== user.id && u.id !== creator?.id)) {
-          await sendTelegramMessage(admin.telegramId!, notifyClaimText);
+          await sendTaskTelegramMessage(admin.telegramId!, notifyClaimText);
         }
         return res.json({ ok: true });
       }
@@ -2554,14 +2575,14 @@ async function startServer() {
         task.timeSpentMinutes = undefined;
         saveDatabase(state);
         await answerCallback(callback.id, 'Задача возвращена на биржу');
-        await sendGroupMessage(chatId, `Ты отказался от задачи *"${task.title}"*. Она снова открыта.`);
+        await sendTaskGroupMessage(chatId, `Ты отказался от задачи *"${task.title}"*. Она снова открыта.`);
         await showTasksPanel(chatId, user, state);
         const creator = state.users.find(u => u.id === task.creatorId);
         if (creator?.telegramId && creator.id !== user.id) {
-          await sendTelegramMessage(creator.telegramId, `${userMention(user)} отказался от задачи *"${task.title}"*. Она снова на бирже.`);
+          await sendTaskTelegramMessage(creator.telegramId, `${userMention(user)} отказался от задачи *"${task.title}"*. Она снова на бирже.`);
         }
         for (const target of state.users.filter(u => u.telegramId && u.id !== user.id)) {
-          await sendTelegramMessage(target.telegramId!, `Задача снова свободна:\n\n${taskDetailsText(task, state)}`, [{ text: 'Посмотреть задачу', action: `task_view:${task.id}` }]);
+          await sendTaskTelegramMessage(target.telegramId!, `Задача снова свободна:\n\n${taskDetailsText(task, state)}`, [{ text: 'Посмотреть задачу', action: `task_view:${task.id}` }]);
         }
         return res.json({ ok: true });
       }
@@ -2575,7 +2596,7 @@ async function startServer() {
         }
         chatSessions.set(String(chatId), { flow: 'task_complete_time', completionTaskId: task.id });
         await answerCallback(callback.id);
-        await sendTelegramKeyboard(
+        await sendTaskTelegramKeyboard(
           chatId,
           `Задача *"${task.title}"* готова.\n\nСколько времени ушло на выполнение? Это необязательно, но поможет планировать нагрузку.`,
           [['15 минут', '30 минут'], ['1 час', '2 часа'], ['Указать вручную'], ['Не указывать', 'Назад']],
@@ -2764,7 +2785,7 @@ async function startServer() {
               - (parseShortDate(b.deadline)?.getTime() ?? Number.POSITIVE_INFINITY)
             ))
             .slice(0, 10);
-          await sendGroupMessage(chatId, tasks.length
+          await sendTaskGroupMessage(chatId, tasks.length
             ? `*Ближайшие дедлайны*\n\n${tasks.map((task) => `• ${formatShortDate(task.deadline) || 'без даты'} — ${task.title}`).join('\n')}`
             : 'Активных задач нет.');
           return res.json({ ok: true });
@@ -2882,13 +2903,13 @@ async function startServer() {
         }
         if (normalizedText === 'назад' || normalizedText === 'меню') {
           chatSessions.delete(chatKey);
-          await sendTelegramKeyboard(chatId, 'Меню задач.', [['Мои задачи', 'Помощь']], false, user);
+          await sendTaskTelegramKeyboard(chatId, 'Меню задач.', [['Мои задачи', 'Помощь']], false, user);
           return res.json({ ok: true });
         }
 
         const myTasks = state.tasks.filter((task) => assignedIds(task).includes(user.id) && task.status !== 'completed');
         if (cmd.startsWith('/start')) {
-          await sendTelegramKeyboard(chatId, `Привет, ${user.realName}! Здесь будут только задачи от команды MEGABATTLE.`, [['Мои задачи', 'Помощь']], false, user);
+          await sendTaskTelegramKeyboard(chatId, `Привет, ${user.realName}! Здесь будут только задачи от команды MEGABATTLE.`, [['Мои задачи', 'Помощь']], false, user);
           saveDatabase(state);
           return res.json({ ok: true });
         }
@@ -2958,7 +2979,7 @@ async function startServer() {
           task.completedAt = session.selectedStatus === 'completed' ? new Date().toISOString() : '';
           const creator = state.users.find((item) => item.id === task.creatorId);
           if (creator?.telegramId) {
-            await sendTelegramMessage(creator.telegramId, `Статус задачи изменён.\n\nЗадача: ${task.title}\nИсполнитель: ${userMention(user)}\nСтатус: ${taskStatusLabel(task.status)}`);
+            await sendTaskTelegramMessage(creator.telegramId, `Статус задачи изменён.\n\nЗадача: ${task.title}\nИсполнитель: ${userMention(user)}\nСтатус: ${taskStatusLabel(task.status)}`);
           }
           chatSessions.delete(chatKey);
           saveDatabase(state);
@@ -3390,7 +3411,7 @@ async function startServer() {
         chatSessions.delete(chatKey);
         for (const target of (assigneeIds.length ? team.filter((member) => assigneeIds.includes(member.id)) : team)) {
           if (target.telegramId && target.id !== user.id) {
-            await sendTelegramMessage(
+            await sendTaskTelegramMessage(
               target.telegramId,
               assigneeIds.length ? `Тебе назначена задача:\n\n${taskDetailsText(task, state)}` : `Новая свободная задача:\n\n${taskDetailsText(task, state)}`,
               [{ text: 'Посмотреть задачу', action: `task_view:${task.id}` }],
@@ -3400,7 +3421,7 @@ async function startServer() {
           }
         }
         saveDatabase(state);
-        await sendGroupMessage(chatId, `Задача создана:\n\n${taskDetailsText(task, state)}`);
+        await sendTaskGroupMessage(chatId, `Задача создана:\n\n${taskDetailsText(task, state)}`);
         await showTasksPanel(chatId, user, state);
         return res.json({ ok: true });
       }
@@ -3436,7 +3457,7 @@ async function startServer() {
         }
       } else if (normalizedText === 'свободные задачи') {
         const openTasks = state.tasks.filter((task) => task.status === 'open').slice(0, 10);
-        await sendInlinePanel(
+        await sendTaskInlinePanel(
           chatId,
           openTasks.length
             ? `*Свободные задачи*\n\n${openTasks.map((task, index) => `${index + 1}. ${task.title} · ${formatShortDate(task.deadline) || 'без даты'}`).join('\n')}`
@@ -3453,7 +3474,7 @@ async function startServer() {
           .slice(-10)
           .reverse();
         chatSessions.set(chatKey, { flow: 'tasks_submenu' });
-        await sendTelegramKeyboard(
+        await sendTaskTelegramKeyboard(
           chatId,
           completed.length
             ? `*Последние выполненные задачи*\n\n${completed.map((task) => `• ${task.title}`).join('\n')}`
@@ -3465,7 +3486,7 @@ async function startServer() {
         return res.json({ ok: true });
       } else if (normalizedText === 'управлять задачами') {
         const myTasks = state.tasks.filter((task) => assignedIds(task).includes(user.id) && task.status !== 'completed').slice(0, 10);
-        await sendInlinePanel(
+        await sendTaskInlinePanel(
           chatId,
           myTasks.length
             ? `*Управление задачами*\n\n${myTasks.map((task, index) => `${index + 1}. ${task.title} · ${taskStatusLabel(task.status)}`).join('\n')}`
@@ -3902,7 +3923,7 @@ async function startServer() {
         timestamp: new Date().toISOString(),
       });
       if (target?.telegramId) {
-        await sendTelegramMessage(target.telegramId, text, undefined, false, target);
+        await sendTaskTelegramMessage(target.telegramId, text, undefined, false, target);
       }
     }
     saveDatabase(state);
@@ -3960,7 +3981,7 @@ async function startServer() {
         timestamp: new Date().toISOString(),
       });
       if (target.telegramId) {
-        await sendTelegramMessage(target.telegramId, text, undefined, false, target);
+        await sendTaskTelegramMessage(target.telegramId, text, undefined, false, target);
       }
     }
     saveDatabase(state);
@@ -4313,7 +4334,7 @@ async function startServer() {
           buttons: [{ text: 'Открыть задачи', action: 'open_tasks' }]
         });
         if (assignedUser.telegramId) {
-          sendJobs.push(sendTelegramMessage(
+          sendJobs.push(sendTaskTelegramMessage(
             assignedUser.telegramId,
             `Тебе назначена новая задача!\n\n${taskDetailsText(newTask, state)}`,
             [{ text: 'Открыть задачи', action: 'open_tasks' }],
@@ -4334,7 +4355,7 @@ async function startServer() {
           buttons: [{ text: 'Посмотреть задачу', action: `task_view:${newTask.id}` }]
         });
         if (u.telegramId) {
-          sendJobs.push(sendTelegramMessage(
+          sendJobs.push(sendTaskTelegramMessage(
             u.telegramId,
             `Клич о помощи: на доске появилась свободная задача.\n\n${taskDetailsText(newTask, state)}`,
             [{ text: 'Посмотреть задачу', action: `task_view:${newTask.id}` }],
@@ -4401,7 +4422,7 @@ async function startServer() {
         timestamp: new Date().toISOString(),
         buttons: currentAssignees.has(id) ? [{ text: 'Открыть задачи', action: 'open_tasks' }] : undefined,
       });
-      if (target.telegramId) sendJobs.push(sendTelegramMessage(target.telegramId, text, currentAssignees.has(id) ? [{ text: 'Открыть задачи', action: 'open_tasks' }] : undefined, false, target));
+      if (target.telegramId) sendJobs.push(sendTaskTelegramMessage(target.telegramId, text, currentAssignees.has(id) ? [{ text: 'Открыть задачи', action: 'open_tasks' }] : undefined, false, target));
     }
     saveDatabase(state);
     await Promise.allSettled(sendJobs);
@@ -4528,7 +4549,7 @@ async function startServer() {
         timestamp: new Date().toISOString(),
         buttons: [{ text: 'Открыть задачи', action: 'open_tasks' }],
       });
-      if (target.telegramId) sendJobs.push(sendTelegramMessage(target.telegramId, text, [{ text: 'Открыть задачи', action: 'open_tasks' }], false, target));
+      if (target.telegramId) sendJobs.push(sendTaskTelegramMessage(target.telegramId, text, [{ text: 'Открыть задачи', action: 'open_tasks' }], false, target));
     }
     saveDatabase(state);
     const delivery = await Promise.allSettled(sendJobs);
@@ -4566,7 +4587,7 @@ async function startServer() {
       timestamp: new Date().toISOString()
     });
     if (user.telegramId) {
-      claimSendJobs.push(sendTelegramMessage(
+      claimSendJobs.push(sendTaskTelegramMessage(
         user.telegramId,
         `Ты взял задачу в работу:\n\n${taskDetailsText(task, state)}`,
         [{ text: 'Открыть задачи', action: 'open_tasks' }],
@@ -4587,7 +4608,7 @@ async function startServer() {
         timestamp: new Date().toISOString()
       });
       if (creator.telegramId) {
-        claimSendJobs.push(sendTelegramMessage(creator.telegramId, text, undefined, false, creator));
+        claimSendJobs.push(sendTaskTelegramMessage(creator.telegramId, text, undefined, false, creator));
       }
     }
     for (const admin of state.users.filter(u => u.role === 'admin' && u.id !== userId && u.id !== creator?.id)) {
@@ -4599,7 +4620,7 @@ async function startServer() {
         text,
         timestamp: new Date().toISOString()
       });
-      if (admin.telegramId) claimSendJobs.push(sendTelegramMessage(admin.telegramId, text, undefined, false, admin));
+      if (admin.telegramId) claimSendJobs.push(sendTaskTelegramMessage(admin.telegramId, text, undefined, false, admin));
     }
 
     saveDatabase(state);
@@ -4628,11 +4649,11 @@ async function startServer() {
     const sendJobs: Promise<boolean>[] = [];
     const creator = state.users.find(u => u.id === task.creatorId);
     if (creator?.telegramId && creator.id !== user.id) {
-      sendJobs.push(sendTelegramMessage(creator.telegramId, `${userMention(user)} отказался от задачи *"${task.title}"*. Она снова на бирже.`));
+      sendJobs.push(sendTaskTelegramMessage(creator.telegramId, `${userMention(user)} отказался от задачи *"${task.title}"*. Она снова на бирже.`));
     }
 
     for (const target of state.users.filter(u => u.telegramId && u.id !== user.id)) {
-      sendJobs.push(sendTelegramMessage(target.telegramId!, `Задача снова свободна:\n\n${taskDetailsText(task, state)}`, [{ text: 'Посмотреть задачу', action: `task_view:${task.id}` }]));
+      sendJobs.push(sendTaskTelegramMessage(target.telegramId!, `Задача снова свободна:\n\n${taskDetailsText(task, state)}`, [{ text: 'Посмотреть задачу', action: `task_view:${task.id}` }]));
     }
     await Promise.allSettled(sendJobs);
 
@@ -4691,7 +4712,7 @@ async function startServer() {
           timestamp: new Date().toISOString()
         });
         if (admin.telegramId) {
-          sendJobs.push(sendTelegramMessage(admin.telegramId, text, undefined, false, admin));
+          sendJobs.push(sendTaskTelegramMessage(admin.telegramId, text, undefined, false, admin));
         }
       });
       await Promise.allSettled(sendJobs);

@@ -53,7 +53,7 @@ const sheets = [
 ];
 const calls: { url: string; body?: any }[] = [];
 let nextSheetId = 3000;
-const testSettings = { availabilityActiveDays: [0, 1, 2, 3, 4], availabilityStartHour: 17, availabilityEndHour: 18 };
+const testSettings = { availabilityWeekCount: 2, availabilityActiveDays: [0, 1, 2, 3, 4], availabilityStartHour: 17, availabilityEndHour: 18 };
 const columnIndex = (letters: string) => [...letters].reduce((value, letter) => value * 26 + letter.charCodeAt(0) - 64, 0) - 1;
 const rangeStart = (range: string) => {
   const match = range.match(/!([A-Z]+)(\d+)/);
@@ -110,6 +110,14 @@ globalThis.fetch = async (input: RequestInfo | URL, init: RequestInit = {}) => {
   }
   if (url.endsWith(':batchUpdate')) {
     for (const request of body.requests || []) {
+      if (request.deleteSheet) {
+        const index = sheets.findIndex((item) => item.properties.sheetId === request.deleteSheet.sheetId);
+        if (index >= 0) sheets.splice(index, 1);
+      }
+      if (request.appendDimension) {
+        const sheet = sheets.find((item) => item.properties.sheetId === request.appendDimension.sheetId);
+        if (sheet) sheet.properties.gridProperties.columnCount += Number(request.appendDimension.length || 0);
+      }
       if (request.duplicateSheet) {
         sheets.push({ properties: {
           sheetId: nextSheetId++, title: request.duplicateSheet.newSheetName,
@@ -138,7 +146,7 @@ try {
   const first = await ensurePrimaryWeekSheet(config, users, testSettings);
   assert.equal(first.primary, 'ОСНОВА');
   assert.equal(first.rotated, true);
-  assert.ok(first.backup?.backupTitle.startsWith('РЕЗЕРВ ОСНОВА '));
+  assert.equal(first.backup?.backupTitle, 'РЕЗЕРВ ОСНОВА');
   assert.equal(first.backup?.verified, true);
   assert.deepEqual(first.hiddenLegacySheets, [`Неделя ${currentWeek}`, `Неделя ${addDays(currentWeek, 7)}`]);
   const duplicateIndex = calls.findIndex((call) => call.body?.requests?.some((request: any) => request.duplicateSheet));
@@ -191,6 +199,8 @@ try {
     availabilityActiveDays: [0, 1, 2, 3, 4], availabilityStartHour: 17, availabilityEndHour: 22,
   });
   assert.equal(repairedFixedLayout.layoutChanged, true);
+  assert.equal(repairedFixedLayout.dates.length, 10);
+  assert.ok(repairedFixedLayout.dates.includes(addDays(currentWeek, 7)));
   const fixedLayoutBatch = calls.find((call) => call.body?.requests?.some((request: any) => request.updateDimensionProperties));
   assert.ok(fixedLayoutBatch?.body.requests.some((request: any) => (
     request.mergeCells?.range?.startColumnIndex === 3 && request.mergeCells?.range?.endColumnIndex === 9

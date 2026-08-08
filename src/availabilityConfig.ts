@@ -10,6 +10,10 @@ export const DEFAULT_AVAILABILITY_START_HOUR = 17;
 export const DEFAULT_AVAILABILITY_END_HOUR = 23;
 
 export function normalizeAvailabilityConfig(settings?: AvailabilitySettings) {
+  const requestedWeekCount = Number(settings?.availabilityWeekCount);
+  const weekCount = Number.isInteger(requestedWeekCount) && requestedWeekCount >= 2 && requestedWeekCount <= 5
+    ? requestedWeekCount
+    : 2;
   const requestedDays = Array.isArray(settings?.availabilityActiveDays)
     ? settings.availabilityActiveDays
     : DEFAULT_AVAILABILITY_ACTIVE_DAYS;
@@ -24,6 +28,7 @@ export function normalizeAvailabilityConfig(settings?: AvailabilitySettings) {
   const requestedEndHour = hour(settings?.availabilityEndHour, DEFAULT_AVAILABILITY_END_HOUR);
   const endHour = Math.max(startHour, requestedEndHour);
   return {
+    weekCount,
     activeDays: activeDays.length ? activeDays : [...DEFAULT_AVAILABILITY_ACTIVE_DAYS],
     startHour,
     endHour,

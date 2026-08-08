@@ -3,7 +3,7 @@
  * Run installMegaBotTrigger() once from the Apps Script editor.
  */
 const MEGABOT_WEBHOOK_URL = 'https://megaorgiabot.ru/api/integrations/google-sheets/webhook';
-const MEGABOT_PRIMARY_SHEET_ID = 432131861;
+const MEGABOT_PRIMARY_SHEET_ID = 1910422522;
 
 /** Existing spreadsheet controls: row 2 checkboxes clear a whole day. */
 function handleDayReset(event) {

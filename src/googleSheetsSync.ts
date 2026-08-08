@@ -60,7 +60,7 @@ export function googleSheetsConfigFromEnv(): GoogleSheetsConfig | null {
     primarySheetTitle: process.env.GOOGLE_SHEETS_PRIMARY_SHEET_TITLE?.trim() || 'ОСНОВА',
     primarySheetId: Number.isInteger(Number(process.env.GOOGLE_SHEETS_PRIMARY_SHEET_ID)) ? Number(process.env.GOOGLE_SHEETS_PRIMARY_SHEET_ID) : undefined,
     templateSheetTitle: process.env.GOOGLE_SHEETS_TEMPLATE_SHEET_TITLE?.trim() || 'ШАБЛОН НЕДЕЛИ',
-    scanRange: process.env.GOOGLE_SHEETS_SCAN_RANGE?.trim() || 'A1:BZ200',
+    scanRange: process.env.GOOGLE_SHEETS_SCAN_RANGE?.trim() || 'A1:ZZ200',
     nameAliases,
   };
 }
@@ -478,35 +478,25 @@ function findPrimarySheet(metadata: Awaited<ReturnType<typeof sheetMetadata>>, c
     : metadata.sheets.find((sheet) => sheet.properties.title === config.primarySheetTitle);
 }
 
-function moscowBackupTimestamp(date = new Date()) {
-  return new Intl.DateTimeFormat('sv-SE', {
-    timeZone: 'Europe/Moscow',
-    year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
-  }).format(date).replace(':', '-').replace(':', '-');
-}
-
 export async function backupPrimarySheet(config: GoogleSheetsConfig, label = 'РЕЗЕРВ ОСНОВА') {
   const metadata = await sheetMetadata(config);
   const source = findPrimarySheet(metadata, config);
   if (!source) throw new Error(`Primary sheet not found by id/title: ${config.primarySheetId ?? config.primarySheetTitle}`);
-  const baseTitle = `${label} ${moscowBackupTimestamp()}`.slice(0, 94);
-  const existingTitles = new Set(metadata.sheets.map((sheet) => sheet.properties.title));
-  let title = baseTitle;
-  let suffix = 2;
-  while (existingTitles.has(title)) {
-    title = `${baseTitle.slice(0, 96 - String(suffix).length)} ${suffix}`;
-    suffix += 1;
-  }
+  const title = label.slice(0, 100);
+  const previous = metadata.sheets.find((sheet) => sheet.properties.title === title && sheet.properties.sheetId !== source.properties.sheetId);
+  const requests: unknown[] = [];
+  if (previous) requests.push({ deleteSheet: { sheetId: previous.properties.sheetId } });
+  requests.push({ duplicateSheet: {
+    sourceSheetId: source.properties.sheetId,
+    newSheetName: title,
+    insertSheetIndex: metadata.sheets.length - (previous ? 1 : 0),
+  } });
   const duplicated = await googleRequest(config, ':batchUpdate', {
     method: 'POST',
-    body: JSON.stringify({ requests: [{ duplicateSheet: {
-      sourceSheetId: source.properties.sheetId,
-      newSheetName: title,
-      insertSheetIndex: metadata.sheets.length,
-    } }] }),
+    body: JSON.stringify({ requests }),
   });
-  const backupSheetId = Number(duplicated.replies?.[0]?.duplicateSheet?.properties?.sheetId);
+  const duplicateReply = duplicated.replies?.find((reply: any) => reply?.duplicateSheet);
+  const backupSheetId = Number(duplicateReply?.duplicateSheet?.properties?.sheetId);
   if (!Number.isInteger(backupSheetId)) throw new Error('Google Sheets did not return the backup sheet ID');
   const verifiedMetadata = await sheetMetadata(config);
   const verifiedBackup = verifiedMetadata.sheets.find((sheet) => (
@@ -614,22 +604,30 @@ async function preparePrimaryWeekSheet(
   const grid = await readGrid(config);
   const layout = discover(grid, users, currentWeek, config.nameAliases);
   const availabilityConfig = normalizeAvailabilityConfig(settings);
-  const desiredSlots = availabilityConfig.activeDays.flatMap((day) => availabilityConfig.hours.map((hour) => ({
-    day,
-    date: addDays(currentWeek, day),
+  const desiredDayOffsets = Array.from({ length: availabilityConfig.weekCount }, (_, weekIndex) => (
+    availabilityConfig.activeDays.map((day) => weekIndex * 7 + day)
+  )).flat();
+  const desiredSlots = desiredDayOffsets.flatMap((dayOffset) => availabilityConfig.hours.map((hour) => ({
+    day: dayOffset % 7,
+    dayOffset,
+    date: addDays(currentWeek, dayOffset),
     hour,
   })));
-  const fixedDayStarts = [3, 13, 23, 33, 43, 53, 63];
+  const fixedDayStarts = Array.from({ length: availabilityConfig.weekCount * 7 }, (_, dayOffset) => 3 + dayOffset * 10);
   const fixedDayCapacity = 9;
   const populatedColumnCount = Math.max(0, ...grid.raw.map((row) => row.length));
   const useFixedDayLayout = populatedColumnCount >= 74 && availabilityConfig.hours.length <= fixedDayCapacity;
   const existingSlotColumns = layout.columnHours.map((hour, col) => hour !== null && layout.columnDates[col] ? col : -1).filter((col) => col >= 0);
   if (!existingSlotColumns.length && !useFixedDayLayout) throw new Error(`No availability columns were discovered in ${grid.title}`);
   const firstSlotColumn = useFixedDayLayout ? fixedDayStarts[0] : Math.min(...existingSlotColumns);
-  const desiredDates = availabilityConfig.activeDays.map((day) => addDays(currentWeek, day));
+  const desiredDates = desiredDayOffsets.map((dayOffset) => addDays(currentWeek, dayOffset));
   const currentSlots = existingSlotColumns.map((col) => ({ col, date: layout.columnDates[col], hour: layout.columnHours[col] }));
   const desiredSlotColumns = useFixedDayLayout
-    ? availabilityConfig.activeDays.flatMap((day) => availabilityConfig.hours.map((hour, hourIndex) => ({ col: fixedDayStarts[day] + hourIndex, date: addDays(currentWeek, day), hour })))
+    ? desiredDayOffsets.flatMap((dayOffset) => availabilityConfig.hours.map((hour, hourIndex) => ({
+      col: fixedDayStarts[dayOffset] + hourIndex,
+      date: addDays(currentWeek, dayOffset),
+      hour,
+    })))
     : desiredSlots.map((slot, index) => ({ ...slot, col: firstSlotColumn + index }));
   const layoutChanged = currentSlots.length !== desiredSlots.length || desiredSlots.some((slot, index) => (
     currentSlots[index]?.col !== desiredSlotColumns[index]?.col
@@ -645,16 +643,64 @@ async function preparePrimaryWeekSheet(
     const oldValues = new Map<string, boolean>();
     for (const row of layout.allRows) for (const col of existingSlotColumns) oldValues.set(`${row.rowIndex}:${layout.columnDates[col]}:${layout.columnHours[col]}`, isSelected(grid.raw[row.rowIndex]?.[col]));
     if (useFixedDayLayout) {
-      const requests: any[] = [{ unmergeCells: { range: {
+      const metadata = await sheetMetadata(config);
+      const sheet = metadata.sheets.find((item) => item.properties.sheetId === grid.sheetId);
+      const currentColumnCount = Number(sheet?.properties.gridProperties?.columnCount || 0);
+      const requiredColumnCount = fixedDayStarts.at(-1)! + fixedDayCapacity + 1;
+      const requests: any[] = [];
+      if (currentColumnCount < requiredColumnCount) requests.push({ appendDimension: {
+        sheetId: grid.sheetId,
+        dimension: 'COLUMNS',
+        length: requiredColumnCount - currentColumnCount,
+      } });
+      requests.push({ unmergeCells: { range: {
         sheetId: grid.sheetId,
         startRowIndex: layout.dateRow,
         endRowIndex: layout.dateRow + 1,
         startColumnIndex: fixedDayStarts[0],
-        endColumnIndex: fixedDayStarts[6] + fixedDayCapacity,
-      } } }];
-      for (let day = 0; day < 7; day += 1) {
-        const start = fixedDayStarts[day];
-        const active = availabilityConfig.activeDays.includes(day);
+        endColumnIndex: requiredColumnCount,
+      } } });
+      for (let weekIndex = 1; weekIndex < availabilityConfig.weekCount; weekIndex += 1) {
+        requests.push({ copyPaste: {
+          source: {
+            sheetId: grid.sheetId,
+            startRowIndex: 0,
+            endRowIndex: lastParticipantRow,
+            startColumnIndex: fixedDayStarts[0],
+            endColumnIndex: fixedDayStarts[0] + 70,
+          },
+          destination: {
+            sheetId: grid.sheetId,
+            startRowIndex: 0,
+            endRowIndex: lastParticipantRow,
+            startColumnIndex: fixedDayStarts[weekIndex * 7],
+            endColumnIndex: fixedDayStarts[weekIndex * 7] + 70,
+          },
+          pasteType: 'PASTE_FORMAT',
+          pasteOrientation: 'NORMAL',
+        } });
+        requests.push({ copyPaste: {
+          source: {
+            sheetId: grid.sheetId,
+            startRowIndex: 0,
+            endRowIndex: lastParticipantRow,
+            startColumnIndex: fixedDayStarts[0],
+            endColumnIndex: fixedDayStarts[0] + 70,
+          },
+          destination: {
+            sheetId: grid.sheetId,
+            startRowIndex: 0,
+            endRowIndex: lastParticipantRow,
+            startColumnIndex: fixedDayStarts[weekIndex * 7],
+            endColumnIndex: fixedDayStarts[weekIndex * 7] + 70,
+          },
+          pasteType: 'PASTE_FORMULA',
+          pasteOrientation: 'NORMAL',
+        } });
+      }
+      for (let dayOffset = 0; dayOffset < availabilityConfig.weekCount * 7; dayOffset += 1) {
+        const start = fixedDayStarts[dayOffset];
+        const active = availabilityConfig.activeDays.includes(dayOffset % 7);
         requests.push({ updateDimensionProperties: {
           range: { sheetId: grid.sheetId, dimension: 'COLUMNS', startIndex: start, endIndex: start + fixedDayCapacity + 1 },
           properties: { hiddenByUser: !active },
@@ -685,11 +731,11 @@ async function preparePrimaryWeekSheet(
         ranges: fixedDayStarts.map((start) => `${quotedSheet(grid.title)}!${columnName(start)}${layout.dateRow + 1}:${columnName(start + fixedDayCapacity - 1)}${lastParticipantRow}`),
       }) });
       const data: { range: string; values: unknown[][] }[] = [];
-      for (const day of availabilityConfig.activeDays) {
-        const start = fixedDayStarts[day];
-        const date = addDays(currentWeek, day);
+      for (const dayOffset of desiredDayOffsets) {
+        const start = fixedDayStarts[dayOffset];
+        const date = addDays(currentWeek, dayOffset);
         const [, month, dateDay] = date.split('-');
-        data.push({ range: `${quotedSheet(grid.title)}!${columnName(start)}${layout.dateRow + 1}`, values: [[`${dateDay}.${month} ${weekdays[day]}`]] });
+        data.push({ range: `${quotedSheet(grid.title)}!${columnName(start)}${layout.dateRow + 1}`, values: [[`${dateDay}.${month} ${weekdays[dayOffset % 7]}`]] });
         data.push({ range: `${quotedSheet(grid.title)}!${columnName(start)}${layout.hourRow + 1}`, values: [availabilityConfig.hours.map((hour) => `${String(hour).padStart(2, '0')}:00`)] });
         for (const row of layout.allRows) data.push({
           range: `${quotedSheet(grid.title)}!${columnName(start)}${row.rowIndex + 1}`,
@@ -723,10 +769,10 @@ async function preparePrimaryWeekSheet(
     await googleRequest(config, '/values:batchClear', { method: 'POST', body: JSON.stringify({ ranges: [`${quotedSheet(grid.title)}!${columnName(firstSlotColumn)}${layout.dateRow + 1}:${columnName(lastColumn)}${lastParticipantRow}`] }) });
     const hourHeader = desiredSlots.map((slot) => `${String(slot.hour).padStart(2, '0')}:00`);
     const data = [
-      ...availabilityConfig.activeDays.map((day, dayIndex) => {
-        const date = addDays(currentWeek, day);
+      ...desiredDayOffsets.map((dayOffset, dayIndex) => {
+        const date = addDays(currentWeek, dayOffset);
         const [, month, dateDay] = date.split('-');
-        return { range: `${quotedSheet(grid.title)}!${columnName(firstSlotColumn + dayIndex * availabilityConfig.hours.length)}${layout.dateRow + 1}`, values: [[`${dateDay}.${month} ${weekdays[day]}`]] };
+        return { range: `${quotedSheet(grid.title)}!${columnName(firstSlotColumn + dayIndex * availabilityConfig.hours.length)}${layout.dateRow + 1}`, values: [[`${dateDay}.${month} ${weekdays[dayOffset % 7]}`]] };
       }),
       { range: `${quotedSheet(grid.title)}!${columnName(firstSlotColumn)}${layout.hourRow + 1}`, values: [hourHeader] },
       ...layout.allRows.map((row) => ({ range: `${quotedSheet(grid.title)}!${columnName(firstSlotColumn)}${row.rowIndex + 1}`, values: [desiredSlots.map((slot) => oldValues.get(`${row.rowIndex}:${slot.date}:${slot.hour}`) || false)] })),

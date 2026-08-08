@@ -394,6 +394,7 @@ try {
     },
   });
   const meetingsMenu = telegramCalls.find((call) => call.path.endsWith('/sendMessage') && call.body.reply_markup?.keyboard);
+  assert.notEqual(meetingsMenu.body.disable_notification, true);
   const meetingsButtons = meetingsMenu.body.reply_markup.keyboard.flat().map((button) => button.text);
   assert.deepEqual(meetingsButtons, ['Назначить собрание', 'Назад']);
 
@@ -421,6 +422,7 @@ try {
     },
   });
   const tasksMenu = telegramCalls.find((call) => call.path.endsWith('/sendMessage') && call.body.reply_markup?.keyboard);
+  assert.equal(tasksMenu.body.disable_notification, true);
   const tasksButtons = tasksMenu.body.reply_markup.keyboard.flat().map((button) => button.text);
   assert.ok(tasksButtons.includes('Назад'));
   assert.ok(!tasksButtons.includes('Профиль'));
@@ -436,6 +438,7 @@ try {
     },
   });
   const openTasksPanel = telegramCalls.find((call) => call.path.endsWith('/sendMessage') && call.body.reply_markup?.inline_keyboard);
+  assert.equal(openTasksPanel.body.disable_notification, true);
   assert.ok(openTasksPanel.body.reply_markup.inline_keyboard.flat().some((button) => button.callback_data === 'nav_tasks' && button.text === 'Назад'));
 
   telegramCalls.length = 0;
@@ -462,6 +465,7 @@ try {
     },
   });
   const completedTasksMenu = telegramCalls.find((call) => call.path.endsWith('/sendMessage') && call.body.reply_markup?.keyboard);
+  assert.equal(completedTasksMenu.body.disable_notification, true);
   assert.deepEqual(completedTasksMenu.body.reply_markup.keyboard.flat().map((button) => button.text), ['Назад']);
 
   telegramCalls.length = 0;
@@ -758,6 +762,7 @@ try {
   assert.equal(taskResult.data.task.priority, 'critical');
   assert.deepEqual(taskResult.data.task.competencies, ['Дизайн', 'Продакшн']);
   assert.equal(telegramCalls.filter((call) => call.path.endsWith('/sendMessage')).length, 2);
+  assert.ok(telegramCalls.filter((call) => call.path.endsWith('/sendMessage')).every((call) => call.body.disable_notification === true));
 
   telegramCalls.length = 0;
   const openTaskResult = await request('/api/task/create', {
@@ -771,6 +776,7 @@ try {
     eventId: createdEventId,
   });
   assert.equal(openTaskResult.response.status, 200);
+  assert.ok(telegramCalls.filter((call) => call.path.endsWith('/sendMessage')).every((call) => call.body.disable_notification === true));
   telegramCalls.length = 0;
   const selfClaim = await request('/api/task/claim', {
     taskId: openTaskResult.data.task.id,
@@ -813,12 +819,14 @@ try {
   assert.equal(coordinatorComment.response.status, 200);
   assert.equal(coordinatorComment.data.task.assigneeNotes.u_bob.coordinator, 'Борис отвечает за проверку');
 
+  telegramCalls.length = 0;
   const manualReminder = await request('/api/task/notify', {
     requesterId: 'u_alice',
     taskId: openTaskResult.data.task.id,
   });
   assert.equal(manualReminder.response.status, 200);
   assert.equal(manualReminder.data.queued, 2);
+  assert.ok(telegramCalls.filter((call) => call.path.endsWith('/sendMessage')).every((call) => call.body.disable_notification === true));
 
   const sessionBeforeBroadcast = sessionCookie;
   sessionCookie = adminSessionCookie;
@@ -911,6 +919,7 @@ try {
     },
   });
   const completionTimeMenu = telegramCalls.find((call) => call.path.endsWith('/sendMessage') && call.body.reply_markup?.keyboard);
+  assert.equal(completionTimeMenu.body.disable_notification, true);
   assert.ok(completionTimeMenu.body.reply_markup.keyboard.flat().some((button) => button.text === 'Не указывать'));
 
   telegramCalls.length = 0;
