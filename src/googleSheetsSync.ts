@@ -674,7 +674,13 @@ async function preparePrimaryWeekSheet(
           fields: 'hiddenByUser',
         } });
       }
-      await googleRequest(config, ':batchUpdate', { method: 'POST', body: JSON.stringify({ requests }) });
+      try {
+        await googleRequest(config, ':batchUpdate', { method: 'POST', body: JSON.stringify({ requests }) });
+      } catch (error: any) {
+        const structuralRequests = requests.filter((request) => !request.updateDimensionProperties);
+        if (!String(error?.message || error).includes('protected cell or object') || structuralRequests.length === requests.length) throw error;
+        await googleRequest(config, ':batchUpdate', { method: 'POST', body: JSON.stringify({ requests: structuralRequests }) });
+      }
       await googleRequest(config, '/values:batchClear', { method: 'POST', body: JSON.stringify({
         ranges: fixedDayStarts.map((start) => `${quotedSheet(grid.title)}!${columnName(start)}${layout.dateRow + 1}:${columnName(start + fixedDayCapacity - 1)}${lastParticipantRow}`),
       }) });

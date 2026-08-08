@@ -22,6 +22,7 @@
     "sheets:layout": "tsx scripts/google-sheets-admin.ts layout",
     "sheets:range": "tsx scripts/google-sheets-admin.ts range",
     "sheets:roundtrip-test": "tsx scripts/google-sheets-admin.ts roundtrip-test",
+    "sheets:export-all": "tsx scripts/google-sheets-admin.ts export-all",
     "db:sheets:check": "tsx scripts/google-sheets-database-admin.ts check",
     "db:sheets:status": "tsx scripts/google-sheets-database-admin.ts status",
     "db:sheets:backup": "tsx scripts/google-sheets-database-admin.ts backup",

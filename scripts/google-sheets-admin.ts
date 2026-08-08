@@ -13,6 +13,7 @@ import {
   inspectActiveWeekLayouts,
   inspectGoogleSheetRange,
   exportAvailabilityToSheet,
+  exportAvailabilitiesToSheet,
   currentMoscowWeekStart,
 } from '../src/googleSheetsSync.js';
 import { googleSheetsDatabaseConfigFromEnv, importStateFromGoogleSheetsDatabase } from '../src/googleSheetsDatabase.js';
@@ -74,6 +75,8 @@ if (command === 'sheets') {
   await exportAvailabilityToSheet(config, users, { ...base, slots: {} });
   if (!passed) throw new Error('Roundtrip test failed: written slot was not imported');
   console.log(JSON.stringify({ passed: true, userId: user.id, telegramId: user.telegramId, testHour, restoredBlank: true }, null, 2));
+} else if (command === 'export-all') {
+  console.log(JSON.stringify(await exportAvailabilitiesToSheet(config, users, state.availabilities || {}), null, 2));
 } else {
   throw new Error(`Unknown command: ${command}`);
 }
