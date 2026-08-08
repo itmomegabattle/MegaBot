@@ -15,12 +15,22 @@ import {
   exportAvailabilityToSheet,
   currentMoscowWeekStart,
 } from '../src/googleSheetsSync.js';
+import { googleSheetsDatabaseConfigFromEnv, importStateFromGoogleSheetsDatabase } from '../src/googleSheetsDatabase.js';
 
 const command = process.argv[2] || 'mapping';
 const dbFile = path.resolve(process.env.DB_FILE || 'database.json');
 const config = googleSheetsConfigFromEnv();
 if (!config) throw new Error('Google Sheets environment variables are not configured');
-const state = JSON.parse(fs.readFileSync(dbFile, 'utf8'));
+let state: any;
+if (fs.existsSync(dbFile)) {
+  state = JSON.parse(fs.readFileSync(dbFile, 'utf8'));
+} else {
+  const databaseConfig = googleSheetsDatabaseConfigFromEnv();
+  if (!databaseConfig?.enabled) throw new Error(`Database file not found: ${dbFile}`);
+  const imported = await importStateFromGoogleSheetsDatabase(databaseConfig);
+  if (!imported.initialized || !imported.state) throw new Error('Google Sheets database is not initialized');
+  state = imported.state;
+}
 const users = Array.isArray(state.users) ? state.users : [];
 
 if (command === 'sheets') {
