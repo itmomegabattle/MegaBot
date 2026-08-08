@@ -88,18 +88,26 @@ const PRODUCTION_WEBAPP_URL = 'https://megaorgiabot.ru';
 const TEMPORARY_TUNNEL_HOST = /(?:^|\.)(?:loca\.lt|localtunnel\.me|lhr\.life|ngrok(?:-free)?\.(?:app|io)|trycloudflare\.com)$/i;
 let resolvedWebAppUrl: string | undefined;
 
+function revisionedWebAppUrl(value: string) {
+  const revision = String(process.env.APP_REVISION || '').trim().slice(0, 12);
+  if (!value || !revision || process.env.NODE_ENV !== 'production') return value;
+  const url = new URL(value);
+  url.searchParams.set('v', revision);
+  return url.toString();
+}
+
 function configuredWebAppUrl() {
   if (resolvedWebAppUrl !== undefined) return resolvedWebAppUrl;
   const configured = String(process.env.WEBAPP_URL || '').trim().replace(/\/$/, '');
   if (!configured) {
-    resolvedWebAppUrl = process.env.NODE_ENV === 'production' ? PRODUCTION_WEBAPP_URL : '';
+    resolvedWebAppUrl = revisionedWebAppUrl(process.env.NODE_ENV === 'production' ? PRODUCTION_WEBAPP_URL : '');
     return resolvedWebAppUrl;
   }
   try {
     const url = new URL(configured);
     if (process.env.NODE_ENV === 'production' && TEMPORARY_TUNNEL_HOST.test(url.hostname)) {
       console.warn(`Temporary WEBAPP_URL ${url.hostname} is not allowed in production; using ${PRODUCTION_WEBAPP_URL}.`);
-      resolvedWebAppUrl = PRODUCTION_WEBAPP_URL;
+      resolvedWebAppUrl = revisionedWebAppUrl(PRODUCTION_WEBAPP_URL);
       return resolvedWebAppUrl;
     }
   } catch {
@@ -107,7 +115,7 @@ function configuredWebAppUrl() {
     resolvedWebAppUrl = '';
     return resolvedWebAppUrl;
   }
-  resolvedWebAppUrl = configured;
+  resolvedWebAppUrl = revisionedWebAppUrl(configured);
   return resolvedWebAppUrl;
 }
 

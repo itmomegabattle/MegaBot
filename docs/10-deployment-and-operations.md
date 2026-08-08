@@ -123,7 +123,7 @@ bash scripts/deploy-selectel.sh
 ```
 
 Скрипт сам выполняет сборку, резервное копирование базы, PM2 reload и health-check.
-Health-check также сравнивает поле `revision` с текущим `git rev-parse HEAD`, поэтому старый `dist` больше не может быть принят за успешный деплой. HTML Mini App отдаётся с `Cache-Control: no-store`, а версионированные файлы из `dist/assets` — как immutable.
+Health-check также сравнивает поле `revision` с текущим `git rev-parse HEAD`, поэтому старый `dist` больше не может быть принят за успешный деплой. HTML Mini App отдаётся с `Cache-Control: no-store`, версионированные файлы из `dist/assets` — как immutable, а URL кнопки Telegram получает параметр `?v=<revision>` для принудительного сброса кеша WebView после каждого выпуска.
 
 ## Telegram-интеграция
 
