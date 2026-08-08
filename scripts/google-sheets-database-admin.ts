@@ -81,6 +81,23 @@ async function main() {
     return;
   }
 
+  if (command === 'restore-backup') {
+    if (!process.argv.includes('--confirm')) throw new Error('Restore refused. Stop the bot and repeat with --confirm.');
+    await assertBotStopped();
+    const requestedFile = process.argv.find((argument, index) => index > 2 && argument !== '--confirm');
+    if (!requestedFile) throw new Error('Backup JSON path is required');
+    const backupFile = path.resolve(requestedFile);
+    const state = JSON.parse(fs.readFileSync(backupFile, 'utf8')) as SimulationState;
+    if (!Array.isArray(state.users) || !Array.isArray(state.tasks) || !Array.isArray(state.meetings)) {
+      throw new Error('Backup does not contain a valid MegaBot state');
+    }
+    await exportStateToGoogleSheetsDatabase(config, state, 'manual_restore');
+    const verified = await readRemoteState();
+    if (digest(verified.state!) !== digest(state)) throw new Error('Restore roundtrip digest mismatch');
+    console.log(JSON.stringify({ passed: true, backupFile, revision: verified.revision, digest: digest(state), counts: verified.counts }, null, 2));
+    return;
+  }
+
   if (command === 'reset-operational-data') {
     if (!process.argv.includes('--confirm')) throw new Error('Destructive reset refused. Stop the bot and repeat with --confirm.');
     await assertBotStopped();
@@ -104,7 +121,7 @@ async function main() {
     return;
   }
 
-  throw new Error(`Unknown command: ${command}. Use check, status, backup, or reset-operational-data.`);
+  throw new Error(`Unknown command: ${command}. Use check, status, backup, restore-backup, or reset-operational-data.`);
 }
 
 main().catch((error) => {

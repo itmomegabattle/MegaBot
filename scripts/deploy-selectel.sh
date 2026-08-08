@@ -23,7 +23,16 @@ fi
 npm ci
 npm run lint
 npm run build
-npm run db:sheets:backup
+for backup_attempt in {1..5}; do
+  if npm run db:sheets:backup; then
+    break
+  fi
+  if [[ "${backup_attempt}" == "5" ]]; then
+    echo "ERROR: Google Sheets database backup failed after 5 attempts." >&2
+    exit 1
+  fi
+  sleep 3
+done
 
 export APP_REVISION="$(git rev-parse HEAD)"
 pm2 startOrReload ecosystem.config.cjs --update-env
