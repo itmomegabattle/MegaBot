@@ -156,6 +156,7 @@ const formatDateTimeShort = (value?: string) => {
 };
 
 const taskStatusText = (status: Task['status']) => {
+  if (status === 'cancelled') return 'Отменена';
   if (status === 'completed') return 'Выполнено';
   if (status === 'waiting') return 'Ждет';
   if (status === 'in_progress' || status === 'assigned') return 'В работе';
@@ -383,6 +384,16 @@ export default function MiniApp({
   const [editingFacultyUserId, setEditingFacultyUserId] = useState<string | null>(null);
   const [facultyEditDraft, setFacultyEditDraft] = useState({ realName: '', username: '', role: 'faculty_responsible' as User['role'], facultyId: '', competencies: [] as string[] });
 
+  useEffect(() => {
+    setFacultyTaskErrors((current) => ({
+      ...current,
+      facultyId: current.facultyId && facultyTaskDraft.facultyId ? false : current.facultyId,
+      assignedTo: current.assignedTo && facultyTaskDraft.assignedTo.length > 0 ? false : current.assignedTo,
+      title: current.title && facultyTaskDraft.title.trim() ? false : current.title,
+      deadline: current.deadline && facultyTaskDraft.deadline.trim() ? false : current.deadline,
+    }));
+  }, [facultyTaskDraft.assignedTo.length, facultyTaskDraft.deadline, facultyTaskDraft.facultyId, facultyTaskDraft.title]);
+
   const isAdmin = currentUser.role === 'admin';
   const isAdminPanel = isAdmin && activeTab === 'admin';
 
@@ -445,7 +456,7 @@ export default function MiniApp({
     [state.availabilities, state.users],
   );
   const majority = Math.floor(coreTeamUsers.length / 2) + 1;
-  const allMyTasks = state.tasks.filter((task) => taskAssigneeIds(task).includes(currentUser.id) && task.status !== 'completed');
+  const allMyTasks = state.tasks.filter((task) => taskAssigneeIds(task).includes(currentUser.id) && !['completed', 'cancelled'].includes(task.status));
   const allOpenTasks = state.tasks.filter((task) => task.status === 'open');
   const allCompletedTasks = state.tasks
     .filter((task) => task.status === 'completed')
@@ -455,7 +466,7 @@ export default function MiniApp({
   const openTasks = filterTasksBySelectedEvent(allOpenTasks);
   const completedTasks = filterTasksBySelectedEvent(allCompletedTasks);
   const assignedByMeTasks = filterTasksBySelectedEvent(state.tasks.filter((task) => (
-    task.creatorId === currentUser.id && task.status !== 'completed' && taskAssigneeIds(task).length > 0
+    task.creatorId === currentUser.id && !['completed', 'cancelled'].includes(task.status) && taskAssigneeIds(task).length > 0
   )));
   const latestCompletedTasks = completedTasks.slice(0, 10);
   const editingCompletedTask = Boolean(completingTaskId && state.tasks.find((task) => task.id === completingTaskId)?.status === 'completed');
@@ -498,7 +509,7 @@ export default function MiniApp({
     (profileAvailability[dayIndex] || []).length > 0 || profileUnavailableDays.has(dayIndex)
   ));
   const profileAge = ageFromBirthday(currentUser.birthday);
-  const facultyTasks = state.tasks.filter((task) => task.facultyId);
+  const facultyTasks = state.tasks.filter((task) => task.facultyId && task.status !== 'cancelled');
   const visibleFacultyTasks = showAllFacultyTasks ? facultyTasks : facultyTasks.slice(0, 3);
   const tasksByCompetency = filterTasksBySelectedEvent(state.tasks.filter((task) => task.status === 'completed')).reduce<Record<string, Task[]>>((acc, task) => {
     const key = taskCompetencyNames(task).join(' · ') || 'Без блока';
@@ -513,7 +524,7 @@ export default function MiniApp({
     return acc;
   }, {});
   const facultyTasksByCompetency = state.tasks
-    .filter((task) => task.facultyId)
+    .filter((task) => task.facultyId && task.status !== 'cancelled')
     .reduce<Record<string, Task[]>>((acc, task) => {
       const key = task.competency || 'Факультет';
       if (!acc[key]) acc[key] = [];
@@ -1049,6 +1060,26 @@ export default function MiniApp({
     }
   };
 
+  const deleteTask = async (taskId: string) => {
+    const task = state.tasks.find((item) => item.id === taskId);
+    if (!task || !window.confirm(`Удалить задачу «${task.title}»? Исполнители получат уведомление, а запись останется в логе.`)) return;
+    setTaskError('');
+    setTaskNotice('');
+    try {
+      const response = await fetch('/api/task/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ requesterId: currentUser.id, taskId }),
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || 'Не удалось удалить задачу');
+      await onRefreshState();
+      setTaskNotice('Задача отменена и убрана из активных списков.');
+    } catch (error: any) {
+      setTaskError(error.message || 'Не удалось удалить задачу.');
+    }
+  };
+
   const refreshPage = async () => {
     if (refreshing) return;
     setRefreshing(true);
@@ -1408,7 +1439,6 @@ export default function MiniApp({
       facultyId: !facultyTaskDraft.facultyId,
       assignedTo: facultyTaskDraft.assignedTo.length === 0,
       title: !facultyTaskDraft.title.trim(),
-      description: !facultyTaskDraft.description.trim(),
       deadline: !facultyTaskDraft.deadline.trim(),
     };
     setFacultyTaskErrors(nextErrors);
@@ -2557,9 +2587,9 @@ export default function MiniApp({
                 </button>
               </form>
             )}
-            <TaskList title="Мои задачи" tasks={myTasks} users={state.users} events={allEvents} currentUser={currentUser} actionLabel="Готово" onAction={openCompletionPrompt} onRelease={onReleaseTask} onEdit={startTaskEdit} onNotify={notifyTaskAssignees} onSaveComment={saveTaskComment} />
-            <TaskList title="Назначенные мной" tasks={assignedByMeTasks} users={state.users} events={allEvents} currentUser={currentUser} onEdit={startTaskEdit} onNotify={notifyTaskAssignees} onSaveComment={saveTaskComment} />
-            <TaskList title="Открытые задачи" tasks={openTasks} users={state.users} events={allEvents} currentUser={currentUser} actionLabel="Взять" onAction={claimTask} onEdit={startTaskEdit} onNotify={notifyTaskAssignees} onSaveComment={saveTaskComment} />
+            <TaskList title="Мои задачи" tasks={myTasks} users={state.users} events={allEvents} currentUser={currentUser} actionLabel="Готово" onAction={openCompletionPrompt} onRelease={onReleaseTask} onEdit={startTaskEdit} onDelete={deleteTask} onNotify={notifyTaskAssignees} onSaveComment={saveTaskComment} />
+            <TaskList title="Назначенные мной" tasks={assignedByMeTasks} users={state.users} events={allEvents} currentUser={currentUser} onEdit={startTaskEdit} onDelete={deleteTask} onNotify={notifyTaskAssignees} onSaveComment={saveTaskComment} />
+            <TaskList title="Открытые задачи" tasks={openTasks} users={state.users} events={allEvents} currentUser={currentUser} actionLabel="Взять" onAction={claimTask} onEdit={startTaskEdit} onDelete={deleteTask} onNotify={notifyTaskAssignees} onSaveComment={saveTaskComment} />
             <button onClick={() => setShowCompletedTasks((value) => !value)} className={secondaryButtonClass}>
               {showCompletedTasks ? <Minus className="h-4 w-4" /> : <Check className="h-4 w-4" />}
               {showCompletedTasks ? 'Скрыть выполненные задачи' : 'Посмотреть выполненные задачи'}
@@ -3117,9 +3147,8 @@ export default function MiniApp({
                     <input value={facultyTaskDraft.title} onChange={(e) => { setFacultyTaskErrors((prev) => ({ ...prev, title: false })); setFacultyTaskDraft((prev) => ({ ...prev, title: e.target.value })); }} className={`${inputClass} ${facultyTaskErrors.title ? 'border-rose-300 bg-rose-50 focus:border-rose-500' : ''}`} />
                     {facultyTaskErrors.title && <RequiredHint />}
                   </Field>
-                  <Field label="Описание">
-                    <textarea value={facultyTaskDraft.description} onChange={(e) => { setFacultyTaskErrors((prev) => ({ ...prev, description: false })); setFacultyTaskDraft((prev) => ({ ...prev, description: e.target.value })); }} className={`${inputClass} ${facultyTaskErrors.description ? 'border-rose-300 bg-rose-50 focus:border-rose-500' : ''}`} rows={3} />
-                    {facultyTaskErrors.description && <RequiredHint />}
+                  <Field label="Описание — необязательно">
+                    <textarea value={facultyTaskDraft.description} onChange={(e) => setFacultyTaskDraft((prev) => ({ ...prev, description: e.target.value }))} className={inputClass} rows={3} />
                   </Field>
                   <Field label="Дедлайн">
                     <DatePickerField value={facultyTaskDraft.deadline} onChange={(value) => { setFacultyTaskErrors((prev) => ({ ...prev, deadline: false })); setFacultyTaskDraft((prev) => ({ ...prev, deadline: value })); }} placeholder="Выбери дату" error={facultyTaskErrors.deadline} />
@@ -3218,28 +3247,32 @@ export default function MiniApp({
                                 <div className="mt-1 text-xs text-slate-500">Исполнители: {executors || 'не выбраны'}</div>
                               </div>
                               {canEdit && (
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    setEditingFacultyTaskId(task.id);
-                                    setFacultyTaskErrors({});
-                                    setFacultyTaskDraft({
-                                      facultyId: task.facultyId || '',
-                                      competency: task.competency || '',
-                                      eventId: task.eventId || '',
-                                      title: task.title,
-                                      description: task.description,
-                                      deadline: formatDateShort(task.deadline),
-                                      assignedTo: taskAssigneeIds(task),
-                                      reminders: task.reminders?.length ? task.reminders : [],
-                                    });
-                                    setCollapsedFacultyReminders([]);
-                                  }}
-                                  className={miniButtonClass}
-                                >
-                                  <PencilSimple className="h-4 w-4" />
-                                  Редактировать
-                                </button>
+                                <div className="flex shrink-0 flex-col gap-2">
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setEditingFacultyTaskId(task.id);
+                                      setFacultyTaskErrors({});
+                                      setFacultyTaskDraft({
+                                        facultyId: task.facultyId || '',
+                                        competency: task.competency || '',
+                                        eventId: task.eventId || '',
+                                        title: task.title,
+                                        description: task.description,
+                                        deadline: formatDateShort(task.deadline),
+                                        assignedTo: taskAssigneeIds(task),
+                                        reminders: task.reminders?.length ? task.reminders : [],
+                                      });
+                                      setCollapsedFacultyReminders([]);
+                                    }}
+                                    className={miniButtonClass}
+                                  >
+                                    <PencilSimple className="h-4 w-4" /> Редактировать
+                                  </button>
+                                  <button type="button" onClick={() => deleteTask(task.id)} className={`${miniButtonClass} border-rose-200 bg-rose-50 text-rose-700`}>
+                                    <Trash className="h-4 w-4" /> Удалить
+                                  </button>
+                                </div>
                               )}
                             </div>
                           </div>
@@ -3600,6 +3633,7 @@ function TaskList({
   onAction,
   onRelease,
   onEdit,
+  onDelete,
   onNotify,
   onSaveComment,
   onEditCompletion,
@@ -3613,6 +3647,7 @@ function TaskList({
   onAction?: (taskId: string) => void;
   onRelease?: (taskId: string) => void;
   onEdit?: (task: Task) => void;
+  onDelete?: (taskId: string) => void;
   onNotify?: (taskId: string) => void;
   onSaveComment?: (taskId: string, assigneeId: string, side: 'executor' | 'coordinator', text: string) => Promise<boolean>;
   onEditCompletion?: (taskId: string) => void;
@@ -3687,21 +3722,34 @@ function TaskList({
                       const completionComment = task.completionComments?.[executor.id] || '';
                       const side = executor.id === currentUser.id ? 'executor' as const : canCoordinate ? 'coordinator' as const : null;
                       const draftKey = `${task.id}:${executor.id}:${side || 'view'}`;
-                      const storedText = side === 'executor' ? note.executor || '' : note.coordinator || '';
+                      const history = note.history?.length ? note.history : [
+                        ...(note.executor ? [{ id: `${task.id}:${executor.id}:legacy-executor`, authorId: executor.id, side: 'executor' as const, text: note.executor, createdAt: note.updatedAt || '' }] : []),
+                        ...(note.coordinator ? [{ id: `${task.id}:${executor.id}:legacy-coordinator`, authorId: task.creatorId || '', side: 'coordinator' as const, text: note.coordinator, createdAt: note.updatedAt || '' }] : []),
+                      ];
                       return (
                         <details key={executor.id} className="rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2">
                           <summary className="cursor-pointer list-none font-black text-slate-800">
                             {executor.realName}
-                            <span className="ml-2 text-xs font-semibold text-slate-500">{note.executor || note.coordinator || completionComment ? 'есть комментарии' : 'без комментариев'}</span>
+                            <span className="ml-2 text-xs font-semibold text-slate-500">{history.length || completionComment ? `${history.length + (completionComment ? 1 : 0)} комм.` : 'без комментариев'}</span>
                           </summary>
                           <div className="mt-3 space-y-2 text-xs">
-                            <InfoRow label="От исполнителя" value={note.executor || 'пока не написал'} />
-                            <InfoRow label="От координатора" value={note.coordinator || 'пока не написал'} />
+                            {history.length ? history.map((comment) => {
+                              const author = users.find((user) => user.id === comment.authorId);
+                              return (
+                                <div key={comment.id} className="rounded-xl border border-slate-200 bg-white px-3 py-2">
+                                  <div className="flex flex-wrap items-center justify-between gap-2 font-black text-slate-700">
+                                    <span>{author?.realName || (comment.side === 'executor' ? executor.realName : 'Координатор')}</span>
+                                    {comment.createdAt && <span className="font-semibold text-slate-400">{formatDateTimeShort(comment.createdAt)}</span>}
+                                  </div>
+                                  <p className="mt-1 whitespace-pre-wrap text-slate-600">{comment.text}</p>
+                                </div>
+                              );
+                            }) : <p className="text-slate-500">Комментариев пока нет</p>}
                             {completionComment && <InfoRow label="При завершении" value={completionComment} />}
                             {task.status !== 'completed' && side && onSaveComment && (
                               <div className="space-y-2 pt-1">
                                 <textarea
-                                  value={noteDrafts[draftKey] ?? storedText}
+                                  value={noteDrafts[draftKey] ?? ''}
                                   onChange={(event) => setNoteDrafts((current) => ({ ...current, [draftKey]: event.target.value }))}
                                   className={inputClass}
                                   rows={2}
@@ -3709,12 +3757,15 @@ function TaskList({
                                 />
                                 <button
                                   type="button"
-                                  disabled={savingNoteKey === draftKey}
+                                  disabled={savingNoteKey === draftKey || !(noteDrafts[draftKey] || '').trim()}
                                   onClick={async () => {
                                     setSavingNoteKey(draftKey);
                                     setSavedNoteKey('');
-                                    const saved = await onSaveComment(task.id, executor.id, side, noteDrafts[draftKey] ?? storedText);
-                                    if (saved) setSavedNoteKey(draftKey);
+                                    const saved = await onSaveComment(task.id, executor.id, side, noteDrafts[draftKey] || '');
+                                    if (saved) {
+                                      setSavedNoteKey(draftKey);
+                                      setNoteDrafts((current) => ({ ...current, [draftKey]: '' }));
+                                    }
                                     setSavingNoteKey('');
                                   }}
                                   className={`${miniButtonClass} disabled:opacity-60`}
@@ -3747,6 +3798,7 @@ function TaskList({
                   <div className="flex flex-wrap gap-2 pt-2">
                     {onEdit && <button type="button" onClick={() => onEdit(task)} className={miniButtonClass}><PencilSimple className="h-4 w-4" /> Редактировать</button>}
                     {onNotify && task.status !== 'completed' && <button type="button" onClick={() => onNotify(task.id)} className={miniButtonClass}><Bell className="h-4 w-4" /> Уведомить сейчас</button>}
+                    {onDelete && task.status !== 'completed' && <button type="button" onClick={() => onDelete(task.id)} className={`${miniButtonClass} border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100`}><Trash className="h-4 w-4" /> Удалить задачу</button>}
                   </div>
                 )}
                 {task.status === 'completed' && (isMine || currentUser.role === 'admin') && onEditCompletion && (

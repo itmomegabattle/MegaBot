@@ -850,6 +850,17 @@ try {
   });
   assert.equal(executorComment.response.status, 200);
   assert.equal(executorComment.data.task.assigneeNotes.u_alice.executor, 'Собираю материалы');
+  const secondExecutorComment = await request('/api/task/comment', {
+    requesterId: 'u_alice',
+    taskId: openTaskResult.data.task.id,
+    assigneeId: 'u_alice',
+    side: 'executor',
+    text: 'Материалы готовы, начинаю сборку',
+  });
+  assert.equal(secondExecutorComment.response.status, 200);
+  assert.equal(secondExecutorComment.data.task.assigneeNotes.u_alice.history.length, 2);
+  assert.deepEqual(secondExecutorComment.data.task.assigneeNotes.u_alice.history.map((comment) => comment.text), ['Собираю материалы', 'Материалы готовы, начинаю сборку']);
+  assert.ok(secondExecutorComment.data.task.assigneeNotes.u_alice.history.every((comment) => comment.authorId === 'u_alice'));
   const coordinatorComment = await request('/api/task/comment', {
     requesterId: 'u_alice',
     taskId: openTaskResult.data.task.id,
@@ -1066,8 +1077,7 @@ try {
   });
   assert.equal(completed.response.status, 200);
   assert.equal(completed.data.task.timeSpentMinutes, 95);
-  assert.equal(telegramCalls.filter((call) => call.path.endsWith('/sendMessage')).length, 1);
-  assert.equal(telegramCalls.find((call) => call.path.endsWith('/sendMessage')).body.chat_id, '100');
+  assert.equal(telegramCalls.filter((call) => call.path.endsWith('/sendMessage')).length, 0);
   const reopened = await request('/api/task/status', {
     requesterId: 'u_alice', taskId: taskResult.data.task.id, status: 'in_progress',
   });
@@ -1115,7 +1125,7 @@ try {
     facultyId: 'fac_test',
     competency: 'Дизайн',
     title: 'Факультетская задача',
-    description: 'Проверка уведомлений факультета',
+    description: '',
     deadline: '2030-01-03',
     assignedTo: ['u_faculty', 'u_alice', 'missing'],
     reminders: [],
@@ -1136,6 +1146,23 @@ try {
   assert.equal(facultyTaskUpdate.data.task.assignedTo, null);
   assert.equal(telegramCalls.filter((call) => call.path.endsWith('/sendMessage')).length, 1);
   assert.ok(telegramCalls.some((call) => call.body.text.includes('больше не исполнитель')));
+
+  telegramCalls.length = 0;
+  const cancelledFacultyTask = await request('/api/task/delete', {
+    requesterId: 'u_alice',
+    taskId: facultyTask.data.task.id,
+  });
+  assert.equal(cancelledFacultyTask.response.status, 200);
+  assert.equal(cancelledFacultyTask.data.task.status, 'cancelled');
+  assert.ok(cancelledFacultyTask.data.task.cancelledAt);
+  assert.equal(cancelledFacultyTask.data.task.cancelledBy, 'u_alice');
+  assert.equal(telegramCalls.filter((call) => call.path.endsWith('/sendMessage')).length, 0);
+  const editCancelledTask = await request('/api/faculty/task/update', {
+    requesterId: 'u_alice',
+    taskId: facultyTask.data.task.id,
+    title: 'Этого изменения быть не должно',
+  });
+  assert.equal(editCancelledTask.response.status, 409);
 
   telegramCalls.length = 0;
   await request('/api/telegram-webhook', {
@@ -1448,7 +1475,11 @@ try {
   assert.equal(database.settings.availabilityStartHour, 18);
   assert.equal(database.settings.availabilityEndHour, 21);
   assert.ok(database.messages.u_alice.length > 0);
-  assert.ok(database.messages.u_admin.some((message) => message.text.includes('Задача выполнена')));
+  assert.ok(!database.messages.u_admin.some((message) => message.id.startsWith('task_comp_admin_')));
+  const persistedCommentTask = database.tasks.find((task) => task.id === openTaskResult.data.task.id);
+  assert.deepEqual(persistedCommentTask.assigneeNotes.u_alice.history.map((comment) => comment.text), ['Собираю материалы', 'Материалы готовы, начинаю сборку']);
+  const persistedCancelledTask = database.tasks.find((task) => task.id === facultyTask.data.task.id);
+  assert.equal(persistedCancelledTask.status, 'cancelled');
   const persistedPanels = JSON.parse(await readFile(`${testDatabasePath}.chat-panels.json`, 'utf8'));
   assert.equal(persistedPanels.version, 2);
   assert.ok(Number.isInteger(persistedPanels.panels['200'].current));

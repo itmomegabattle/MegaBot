@@ -44,12 +44,21 @@ export interface Meeting {
   googleCalendarEventId?: string;
 }
 
-export type TaskStatus = 'open' | 'assigned' | 'completed' | 'waiting' | 'in_progress';
+export type TaskStatus = 'open' | 'assigned' | 'completed' | 'waiting' | 'in_progress' | 'cancelled';
+
+export interface TaskNoteComment {
+  id: string;
+  authorId: string;
+  side: 'executor' | 'coordinator';
+  text: string;
+  createdAt: string;
+}
 
 export interface TaskAssigneeNote {
   executor?: string;
   coordinator?: string;
   updatedAt?: string;
+  history?: TaskNoteComment[];
 }
 
 export interface WorkEvent {
@@ -87,6 +96,8 @@ export interface Task {
   priority: 'normal' | 'important' | 'critical';
   createdAt?: string;
   completedAt?: string;
+  cancelledAt?: string;
+  cancelledBy?: string;
   timeSpentMinutes?: number;
   facultyId?: string;
   eventId?: string;

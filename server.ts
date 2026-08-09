@@ -412,14 +412,16 @@ function taskDetailsText(task: Task, state: SimulationState) {
       ? executors.map(userMention).join(', ')
       : 'не указан';
 
-  const progressNotes = assignedIds(task)
-    .map((id) => {
-      const assignee = state.users.find((user) => user.id === id);
-      const note = task.assigneeNotes?.[id];
-      if (!note?.executor && !note?.coordinator) return '';
-      return `• ${assignee?.realName || 'Исполнитель'}${note.executor ? `: ${note.executor}` : ''}${note.coordinator ? `\n  Координатор: ${note.coordinator}` : ''}`;
-    })
-    .filter(Boolean);
+  const progressNotes = assignedIds(task).flatMap((id) => {
+    const note = task.assigneeNotes?.[id];
+    if (note?.history?.length) return note.history.map((comment) => {
+      const author = state.users.find((user) => user.id === comment.authorId);
+      return `• ${author?.realName || 'Участник'}: ${comment.text}`;
+    });
+    const assignee = state.users.find((user) => user.id === id);
+    if (!note?.executor && !note?.coordinator) return [];
+    return [`• ${assignee?.realName || 'Исполнитель'}${note.executor ? `: ${note.executor}` : ''}${note.coordinator ? `\n  Координатор: ${note.coordinator}` : ''}`];
+  });
   const completionNotes = Object.entries(task.completionComments || {})
     .filter(([, comment]) => String(comment || '').trim())
     .map(([id, comment]) => `• ${state.users.find((user) => user.id === id)?.realName || 'Исполнитель'}: ${comment}`);
@@ -443,7 +445,7 @@ function roleLabel(role: User['role']) {
 }
 
 function profileSummaryText(user: User, state: SimulationState) {
-  const activeTasks = state.tasks.filter((task) => assignedIds(task).includes(user.id) && task.status !== 'completed');
+  const activeTasks = state.tasks.filter((task) => assignedIds(task).includes(user.id) && !['completed', 'cancelled'].includes(task.status));
   const completedTasks = state.tasks.filter((task) => assignedIds(task).includes(user.id) && task.status === 'completed');
   const upcomingMeetings = state.meetings
     .filter((meeting) => (
@@ -500,7 +502,7 @@ function meetingsSummaryText(user: User, state: SimulationState) {
 }
 
 function tasksSummaryText(user: User, state: SimulationState) {
-  const myTasks = state.tasks.filter((task) => assignedIds(task).includes(user.id) && task.status !== 'completed');
+  const myTasks = state.tasks.filter((task) => assignedIds(task).includes(user.id) && !['completed', 'cancelled'].includes(task.status));
   const openTasks = state.tasks.filter((task) => task.status === 'open');
   const personal = myTasks.length
     ? myTasks.slice(0, 8).map((task, index) => (
@@ -519,7 +521,7 @@ function teamSummaryText(state: SimulationState) {
 
 function facultiesSummaryText(state: SimulationState) {
   const faculties = state.faculties || [];
-  const activeTasks = state.tasks.filter((task) => task.facultyId && task.status !== 'completed');
+  const activeTasks = state.tasks.filter((task) => task.facultyId && !['completed', 'cancelled'].includes(task.status));
   return `*МФ · факультеты*\n\n${faculties.map((faculty) => {
     const people = state.users.filter((user) => user.facultyId === faculty.id).length;
     const tasks = activeTasks.filter((task) => task.facultyId === faculty.id).length;
@@ -615,6 +617,7 @@ function telegramCommandSlug(value: string) {
 }
 
 function taskStatusLabel(status: Task['status']) {
+  if (status === 'cancelled') return 'Отменена';
   if (status === 'completed') return 'Выполнена';
   if (status === 'in_progress') return 'В работе';
   if (status === 'waiting') return 'Ждет';
@@ -836,6 +839,7 @@ async function startServer() {
       '/task/create': 'creatorId',
       '/task/update': 'requesterId',
       '/task/comment': 'requesterId',
+      '/task/delete': 'requesterId',
       '/task/notify': 'requesterId',
       '/task/claim': 'userId',
       '/task/release': 'userId',
@@ -1042,7 +1046,10 @@ async function startServer() {
   };
   const groupCheckins = new Map<string, { title: string; userIds: Set<string> }>();
   let lastSheetAvailabilityPullAt = 0;
+  let nextSheetAvailabilityPullAt = 0;
   let sheetAvailabilityPull: Promise<void> | null = null;
+  const sheetAvailabilityPullMinIntervalMs = Math.max(5_000, Number(process.env.GOOGLE_SHEETS_AVAILABILITY_PULL_INTERVAL_MS) || 10_000);
+  const sheetAvailabilityErrorBackoffMs = Math.max(15_000, Number(process.env.GOOGLE_SHEETS_AVAILABILITY_ERROR_BACKOFF_MS) || 60_000);
   const mergePrimarySheetAvailability = (previous: Availability | undefined, imported: Availability): Availability => ({
     ...previous,
     ...imported,
@@ -1053,8 +1060,10 @@ async function startServer() {
     hardUnavailableDays: previous?.hardUnavailableDays || [],
   });
   const reconcileAvailabilityFromPrimarySheet = async (maxAgeMs = 0) => {
-    if (!sheetsConfig || Date.now() - lastSheetAvailabilityPullAt < maxAgeMs) return;
+    const now = Date.now();
+    if (!sheetsConfig || now < nextSheetAvailabilityPullAt || now - lastSheetAvailabilityPullAt < maxAgeMs) return;
     if (sheetAvailabilityPull) return sheetAvailabilityPull;
+    nextSheetAvailabilityPullAt = now + Math.max(maxAgeMs, sheetAvailabilityPullMinIntervalMs);
     sheetAvailabilityPull = (async () => {
       const state = loadDatabase();
       const result = await importAvailabilitiesFromSheet(sheetsConfig, state.users);
@@ -1068,7 +1077,10 @@ async function startServer() {
       }
       if (changed) saveDatabase(state);
       lastSheetAvailabilityPullAt = Date.now();
-    })().finally(() => { sheetAvailabilityPull = null; });
+    })().catch((error) => {
+      nextSheetAvailabilityPullAt = Date.now() + sheetAvailabilityErrorBackoffMs;
+      throw error;
+    }).finally(() => { sheetAvailabilityPull = null; });
     return sheetAvailabilityPull;
   };
 
@@ -1077,7 +1089,7 @@ async function startServer() {
   // Get entire simulation state
   app.get('/api/state', async (req, res) => {
     if (sheetsConfig) {
-      try { await reconcileAvailabilityFromPrimarySheet(3_000); }
+      try { await reconcileAvailabilityFromPrimarySheet(sheetAvailabilityPullMinIntervalMs); }
       catch (error: any) { console.error('Google Sheets on-read reconciliation failed:', error.message || error); }
     }
     const state = loadDatabase();
@@ -2028,15 +2040,14 @@ async function startServer() {
     if (cleanComment) task.completionComments[user.id] = cleanComment;
     else delete task.completionComments[user.id];
     saveDatabase(state);
-    const sendJobs = state.users
-      .filter((member) => member.role === 'admin' && member.telegramId && member.id !== user.id)
-      .map((admin) => sendTaskTelegramMessage(
-        admin.telegramId!,
+    const creator = state.users.find((member) => member.id === task.creatorId && member.telegramId && member.id !== user.id);
+    const sendJobs = creator ? [sendTaskTelegramMessage(
+        creator.telegramId!,
         `Задача выполнена!\n\n${task.title}\nИсполнитель: ${userMention(user)}${timeSpentMinutes ? `\nЗатрачено: ${taskDurationLabel(timeSpentMinutes)}` : ''}${cleanComment ? `\nКомментарий: ${cleanComment}` : ''}`,
         undefined,
         false,
-        admin,
-      ));
+        creator,
+      )] : [];
     await Promise.allSettled(sendJobs);
   }
 
@@ -2802,7 +2813,7 @@ async function startServer() {
 
         if (commandName === 'deadlines') {
           const tasks = state.tasks
-            .filter((task) => task.status !== 'completed')
+            .filter((task) => !['completed', 'cancelled'].includes(task.status))
             .slice()
             .sort((a, b) => (
               (parseShortDate(a.deadline)?.getTime() ?? Number.POSITIVE_INFINITY)
@@ -2931,7 +2942,7 @@ async function startServer() {
           return res.json({ ok: true });
         }
 
-        const myTasks = state.tasks.filter((task) => assignedIds(task).includes(user.id) && task.status !== 'completed');
+        const myTasks = state.tasks.filter((task) => assignedIds(task).includes(user.id) && !['completed', 'cancelled'].includes(task.status));
         if (cmd.startsWith('/start')) {
           await sendTaskTelegramKeyboard(chatId, `Привет, ${user.realName}! Здесь будут только задачи от команды MEGABATTLE.`, [['Мои задачи', 'Помощь']], false, user);
           saveDatabase(state);
@@ -3508,7 +3519,7 @@ async function startServer() {
         );
         return res.json({ ok: true });
       } else if (normalizedText === 'управлять задачами') {
-        const myTasks = state.tasks.filter((task) => assignedIds(task).includes(user.id) && task.status !== 'completed').slice(0, 10);
+        const myTasks = state.tasks.filter((task) => assignedIds(task).includes(user.id) && !['completed', 'cancelled'].includes(task.status)).slice(0, 10);
         await sendTaskInlinePanel(
           chatId,
           myTasks.length
@@ -3555,7 +3566,7 @@ async function startServer() {
         await showFacultiesPanel(chatId, user, state);
         return res.json({ ok: true });
       } else if (normalizedText === 'задачи факультетов') {
-        const facultyTasks = state.tasks.filter((task) => task.facultyId && task.status !== 'completed').slice(0, 12);
+        const facultyTasks = state.tasks.filter((task) => task.facultyId && !['completed', 'cancelled'].includes(task.status)).slice(0, 12);
         chatSessions.set(chatKey, { flow: 'faculties_submenu' });
         await sendTelegramKeyboard(
           chatId,
@@ -3898,8 +3909,8 @@ async function startServer() {
       ? [...new Set(assignedTo.filter(Boolean))]
           .filter((id) => state.users.some((user) => user.id === id && isFacultyUser(user)))
       : [];
-    if (!facultyId || !title || !description || !deadline || assigneeIds.length === 0) {
-      return res.status(400).json({ error: 'Заполни факультет, название, описание, дедлайн и исполнителей' });
+    if (!facultyId || !title || !deadline || assigneeIds.length === 0) {
+      return res.status(400).json({ error: 'Заполни факультет, название, дедлайн и исполнителей' });
     }
     const cleanEventId = String(eventId || '').trim();
     if (cleanEventId && !state.events?.some((item) => item.id === cleanEventId && item.status === 'active')) {
@@ -3916,7 +3927,7 @@ async function startServer() {
     const task: Task = {
       id: 't_' + Date.now(),
       title,
-      description,
+      description: String(description || '').trim(),
       deadline,
       assignedTo: assigneeIds,
       creatorId: requesterId,
@@ -3957,6 +3968,7 @@ async function startServer() {
     const state = loadDatabase();
     const task = state.tasks.find((item) => item.id === taskId);
     if (!task) return res.status(404).json({ error: 'Задача не найдена' });
+    if (task.status === 'cancelled') return res.status(409).json({ error: 'Отменённую задачу нельзя редактировать' });
     if (task.creatorId !== requesterId && !isAdminUser(state, requesterId)) {
       return res.status(403).json({ error: 'Редактировать задачу может автор или админ' });
     }
@@ -4396,6 +4408,7 @@ async function startServer() {
     const state = loadDatabase();
     const task = state.tasks.find((item) => item.id === taskId);
     if (!task) return res.status(404).json({ error: 'Задача не найдена' });
+    if (task.status === 'cancelled') return res.status(409).json({ error: 'Отменённую задачу нельзя редактировать' });
     if (task.creatorId !== requesterId && !isAdminUser(state, requesterId)) {
       return res.status(403).json({ error: 'Редактировать задачу может автор или администратор' });
     }
@@ -4459,6 +4472,7 @@ async function startServer() {
     if (!task) return res.status(404).json({ error: 'Задача не найдена. Обнови страницу и попробуй снова.' });
     if (!requester) return res.status(403).json({ error: 'Пользователь не найден или доступ ещё не активирован' });
     if (task.status === 'completed') return res.status(409).json({ error: 'Выполненная задача доступна только для просмотра. Сначала верни её в работу.' });
+    if (task.status === 'cancelled') return res.status(409).json({ error: 'Отменённая задача доступна только для просмотра.' });
     if (side !== 'coordinator' && side !== 'executor') return res.status(400).json({ error: 'Неизвестный тип комментария' });
     const targetAssigneeId = side === 'executor' ? requester.id : String(assigneeId || '');
     if (!assignedIds(task).includes(targetAssigneeId)) return res.status(400).json({ error: 'Исполнитель больше не назначен на эту задачу. Обнови страницу.' });
@@ -4467,13 +4481,78 @@ async function startServer() {
     if ((side === 'coordinator' && !isCoordinator) || (side === 'executor' && !isExecutor)) {
       return res.status(403).json({ error: 'Нет доступа к этому комментарию' });
     }
+    const cleanText = String(text || '').trim().slice(0, 2_000);
+    if (!cleanText) return res.status(400).json({ error: 'Напиши комментарий перед сохранением' });
+    const createdAt = new Date().toISOString();
     task.assigneeNotes = task.assigneeNotes || {};
+    const previousNote = task.assigneeNotes[targetAssigneeId] || {};
+    const previousHistory = previousNote.history?.length ? previousNote.history : [
+      ...(previousNote.executor ? [{
+        id: `task_comment_legacy_executor_${task.id}_${targetAssigneeId}`,
+        authorId: targetAssigneeId,
+        side: 'executor' as const,
+        text: previousNote.executor,
+        createdAt: previousNote.updatedAt || task.createdAt || createdAt,
+      }] : []),
+      ...(previousNote.coordinator ? [{
+        id: `task_comment_legacy_coordinator_${task.id}_${targetAssigneeId}`,
+        authorId: task.creatorId || requester.id,
+        side: 'coordinator' as const,
+        text: previousNote.coordinator,
+        createdAt: previousNote.updatedAt || task.createdAt || createdAt,
+      }] : []),
+    ];
     task.assigneeNotes[targetAssigneeId] = {
-      ...(task.assigneeNotes[targetAssigneeId] || {}),
-      [side]: String(text || '').trim().slice(0, 2_000),
-      updatedAt: new Date().toISOString(),
+      ...previousNote,
+      [side]: cleanText,
+      updatedAt: createdAt,
+      history: [...previousHistory, {
+        id: `task_comment_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        authorId: requester.id,
+        side,
+        text: cleanText,
+        createdAt,
+      }],
     };
     saveDatabase(state);
+    return res.json({ success: true, task });
+  });
+
+  app.post('/api/task/delete', async (req, res) => {
+    const { requesterId, taskId } = req.body || {};
+    const state = loadDatabase();
+    const task = state.tasks.find((item) => item.id === taskId);
+    const requester = state.users.find((user) => user.id === requesterId && user.registered);
+    if (!task) return res.status(404).json({ error: 'Задача не найдена' });
+    if (!requester) return res.status(403).json({ error: 'Нет доступа к задаче' });
+    if (task.creatorId !== requester.id && requester.role !== 'admin') {
+      return res.status(403).json({ error: 'Удалить задачу может только её автор или администратор' });
+    }
+    if (task.status === 'cancelled') return res.json({ success: true, task });
+
+    const recipientIds = assignedIds(task).filter((id) => id !== requester.id);
+    task.status = 'cancelled';
+    task.cancelledAt = new Date().toISOString();
+    task.cancelledBy = requester.id;
+    saveDatabase(state);
+
+    const notificationText = `Задача отменена автором.\n\n*${task.title}*`;
+    const sendJobs: Promise<boolean>[] = [];
+    for (const id of recipientIds) {
+      const target = state.users.find((user) => user.id === id);
+      if (!target) continue;
+      if (!state.messages[target.id]) state.messages[target.id] = [];
+      state.messages[target.id].push({
+        id: `task_cancelled_${Date.now()}_${target.id}`,
+        userId: target.id,
+        sender: 'bot',
+        text: notificationText,
+        timestamp: task.cancelledAt,
+      });
+      if (target.telegramId) sendJobs.push(sendTaskTelegramMessage(target.telegramId, notificationText, undefined, false, target));
+    }
+    if (recipientIds.length) saveDatabase(state);
+    await Promise.allSettled(sendJobs);
     return res.json({ success: true, task });
   });
 
@@ -4552,6 +4631,7 @@ async function startServer() {
     const state = loadDatabase();
     const task = state.tasks.find((item) => item.id === taskId);
     if (!task) return res.status(404).json({ error: 'Задача не найдена' });
+    if (task.status === 'cancelled') return res.status(409).json({ error: 'Задача отменена' });
     if (task.creatorId !== requesterId && !isAdminUser(state, requesterId)) {
       return res.status(403).json({ error: 'Отправить напоминание может автор или администратор' });
     }
@@ -4658,6 +4738,7 @@ async function startServer() {
 
     if (!task) return res.status(404).json({ error: 'Задача не найдена' });
     if (!user) return res.status(404).json({ error: 'Пользователь не найден' });
+    if (task.status === 'cancelled') return res.status(409).json({ error: 'Задача отменена' });
     if (!assignedIds(task).includes(userId)) {
       return res.status(403).json({ error: 'Эта задача не закреплена за тобой' });
     }
@@ -4689,6 +4770,7 @@ async function startServer() {
 
     const task = state.tasks.find(t => t.id === taskId);
     if (!task) return res.status(404).json({ error: 'Задача не найдена' });
+    if (task.status === 'cancelled') return res.status(409).json({ error: 'Отменённую задачу нельзя возобновить' });
     if (!['open', 'assigned', 'completed', 'waiting', 'in_progress'].includes(status)) {
       return res.status(400).json({ error: 'Неизвестный статус задачи' });
     }
@@ -4716,27 +4798,28 @@ async function startServer() {
       task.timeSpentMinutes = undefined;
     }
 
-    // If completed and was assigned to someone, notify admins
+    // Completion is relevant to the task creator, not to every administrator.
     if (status === 'completed' && task.assignedTo) {
       const workerName = assignedIds(task)
         .map((id) => state.users.find(u => u.id === id)?.realName)
         .filter(Boolean)
         .join(', ') || 'Участник';
       const sendJobs: Promise<boolean>[] = [];
-      state.users.filter(u => u.role === 'admin').forEach(admin => {
+      const creator = state.users.find((user) => user.id === task.creatorId && user.id !== requester.id);
+      if (creator) {
         const text = `Задача выполнена!\nБлоки: ${taskCompetencyNames(task).join(', ') || 'не указаны'}\nИсполнитель: ${workerName}\nЗадача: "${task.title}"${task.timeSpentMinutes ? `\nЗатрачено: ${taskDurationLabel(task.timeSpentMinutes)}` : ''}${String(completionComment || '').trim() ? `\nКомментарий: ${String(completionComment).trim()}` : ''}`;
-        if (!state.messages[admin.id]) state.messages[admin.id] = [];
-        state.messages[admin.id].push({
-          id: 'task_comp_admin_' + Date.now() + '_' + admin.id,
-          userId: admin.id,
+        if (!state.messages[creator.id]) state.messages[creator.id] = [];
+        state.messages[creator.id].push({
+          id: 'task_comp_creator_' + Date.now() + '_' + creator.id,
+          userId: creator.id,
           sender: 'bot',
           text,
           timestamp: new Date().toISOString()
         });
-        if (admin.telegramId) {
-          sendJobs.push(sendTaskTelegramMessage(admin.telegramId, text, undefined, false, admin));
+        if (creator.telegramId) {
+          sendJobs.push(sendTaskTelegramMessage(creator.telegramId, text, undefined, false, creator));
         }
-      });
+      }
       await Promise.allSettled(sendJobs);
     }
 
@@ -5079,7 +5162,7 @@ async function startServer() {
       } catch (error: any) {
         console.error('Google Sheets fallback reconciliation failed:', error.message || error);
       }
-    }, 15 * 1000);
+    }, Math.max(30_000, sheetAvailabilityPullMinIntervalMs));
   }
 
   if (calendarConfig?.enabled) {

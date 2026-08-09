@@ -33,6 +33,18 @@ function cleanTask(task: Task): Task {
   const rawCompetencies = Array.isArray(task.competencies) ? task.competencies : task.competency ? [task.competency] : [];
   const assignees = [...new Set(rawAssignees.map(String).filter(Boolean))];
   const competencies = [...new Set(rawCompetencies.map(String).filter(Boolean))];
+  const assigneeNotes = Object.fromEntries(Object.entries(task.assigneeNotes || {}).map(([userId, note]) => [userId, {
+    executor: optionalText(note.executor),
+    coordinator: optionalText(note.coordinator),
+    updatedAt: optionalText(note.updatedAt),
+    history: (note.history || []).map((comment) => ({
+      id: text(comment.id),
+      authorId: text(comment.authorId),
+      side: comment.side === 'coordinator' ? 'coordinator' as const : 'executor' as const,
+      text: text(comment.text),
+      createdAt: text(comment.createdAt),
+    })).filter((comment) => comment.id && comment.authorId && comment.text),
+  }]));
   return {
     id: text(task.id),
     title: text(task.title),
@@ -48,6 +60,8 @@ function cleanTask(task: Task): Task {
     priority: task.priority,
     createdAt: optionalText(task.createdAt),
     completedAt: optionalText(task.completedAt),
+    cancelledAt: optionalText(task.cancelledAt),
+    cancelledBy: optionalText(task.cancelledBy),
     timeSpentMinutes: Number.isFinite(Number(task.timeSpentMinutes)) ? Number(task.timeSpentMinutes) : undefined,
     facultyId: text(task.facultyId),
     eventId: text(task.eventId),
@@ -55,9 +69,7 @@ function cleanTask(task: Task): Task {
       id: text(reminder.id), type: reminder.type, value: Number(reminder.value), unit: reminder.unit,
       sentAt: optionalText(reminder.sentAt), lastSentAt: optionalText(reminder.lastSentAt),
     })),
-    assigneeNotes: Object.fromEntries(Object.entries(task.assigneeNotes || {}).map(([userId, note]) => [userId, {
-      executor: optionalText(note.executor), coordinator: optionalText(note.coordinator), updatedAt: optionalText(note.updatedAt),
-    }])),
+    assigneeNotes,
     completionComments: Object.fromEntries(Object.entries(task.completionComments || {}).map(([userId, comment]) => [userId, text(comment)])),
   };
 }

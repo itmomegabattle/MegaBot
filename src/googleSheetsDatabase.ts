@@ -9,7 +9,7 @@ export type GoogleSheetsDatabaseConfig = {
 
 type SchemaSheet = { title: string; headers: string[] };
 
-export const DATABASE_SCHEMA_VERSION = 4;
+export const DATABASE_SCHEMA_VERSION = 5;
 
 const SCHEMA: SchemaSheet[] = [
   { title: 'meta', headers: ['key', 'value'] },
@@ -22,9 +22,9 @@ const SCHEMA: SchemaSheet[] = [
   { title: 'availability_slots', headers: ['user_id', 'week_start', 'day_index', 'hour'] },
   { title: 'meetings', headers: ['id', 'title', 'type', 'date', 'time', 'duration_hours', 'host_id', 'participants_all', 'competency', 'topic', 'description', 'status', 'google_calendar_event_id'] },
   { title: 'meeting_participants', headers: ['meeting_id', 'user_id', 'kind'] },
-  { title: 'tasks', headers: ['id', 'event_id', 'faculty_id', 'title', 'description', 'deadline', 'creator_id', 'competency', 'competencies_json', 'sow', 'status', 'priority', 'created_at', 'completed_at', 'time_spent_minutes', 'tips_json'] },
+  { title: 'tasks', headers: ['id', 'event_id', 'faculty_id', 'title', 'description', 'deadline', 'creator_id', 'competency', 'competencies_json', 'sow', 'status', 'priority', 'created_at', 'completed_at', 'time_spent_minutes', 'tips_json', 'cancelled_at', 'cancelled_by'] },
   { title: 'task_assignees', headers: ['task_id', 'user_id'] },
-  { title: 'task_comments', headers: ['task_id', 'user_id', 'executor_comment', 'coordinator_comment', 'completion_comment', 'updated_at'] },
+  { title: 'task_comments', headers: ['task_id', 'user_id', 'executor_comment', 'coordinator_comment', 'completion_comment', 'updated_at', 'history_json'] },
   { title: 'task_reminders', headers: ['task_id', 'id', 'type', 'value', 'unit', 'sent_at', 'last_sent_at'] },
   { title: 'task_log', headers: ['Мероприятие', 'Блоки', 'Задача', 'Описание', 'ТЗ', 'Статус', 'Приоритет', 'Автор', 'Исполнители', 'Назначена', 'Дедлайн', 'Выполнена', 'Затрачено, мин', 'Комментарии исполнителей', 'Комментарии координатора', 'Комментарии при завершении', 'Напоминания', 'ID'] },
   { title: 'bot_messages', headers: ['owner_user_id', 'id', 'sender', 'text', 'timestamp', 'buttons_json'] },
@@ -189,13 +189,13 @@ function stateRows(state: SimulationState) {
   const commentRows: unknown[][] = [];
   const reminderRows: unknown[][] = [];
   state.tasks.forEach((task) => {
-    taskRows.push([task.id, task.eventId || '', task.facultyId || '', task.title, task.description, task.deadline, task.creatorId || '', task.competency || '', json(task.competencies || (task.competency ? [task.competency] : [])), task.sow || '', task.status, task.priority, task.createdAt || '', task.completedAt || '', task.timeSpentMinutes || '', json(task.tips || [])]);
+    taskRows.push([task.id, task.eventId || '', task.facultyId || '', task.title, task.description, task.deadline, task.creatorId || '', task.competency || '', json(task.competencies || (task.competency ? [task.competency] : [])), task.sow || '', task.status, task.priority, task.createdAt || '', task.completedAt || '', task.timeSpentMinutes || '', json(task.tips || []), task.cancelledAt || '', task.cancelledBy || '']);
     const assignees = task.assignedTo || [];
     assignees.forEach((userId) => assigneeRows.push([task.id, userId]));
     const commentUserIds = new Set([...Object.keys(task.assigneeNotes || {}), ...Object.keys(task.completionComments || {})]);
     commentUserIds.forEach((userId) => {
       const note = task.assigneeNotes?.[userId];
-      commentRows.push([task.id, userId, note?.executor || '', note?.coordinator || '', task.completionComments?.[userId] || '', note?.updatedAt || '']);
+      commentRows.push([task.id, userId, note?.executor || '', note?.coordinator || '', task.completionComments?.[userId] || '', note?.updatedAt || '', json(note?.history || [])]);
     });
     (task.reminders || []).forEach((reminder) => reminderRows.push([task.id, reminder.id, reminder.type, reminder.value, reminder.unit, reminder.sentAt || '', reminder.lastSentAt || '']));
   });
@@ -206,13 +206,18 @@ function stateRows(state: SimulationState) {
       const event = (state.events || []).find((item) => item.id === task.eventId);
       const creator = state.users.find((user) => user.id === task.creatorId);
       const assignees = (task.assignedTo || []).map((id) => state.users.find((user) => user.id === id)?.realName || id);
-      const executorComments = Object.entries(task.assigneeNotes || {}).map(([id, note]) => `${state.users.find((user) => user.id === id)?.realName || id}: ${note.executor || '—'}`).join('\n');
-      const coordinatorComments = Object.entries(task.assigneeNotes || {}).map(([id, note]) => `${state.users.find((user) => user.id === id)?.realName || id}: ${note.coordinator || '—'}`).join('\n');
+      const history = Object.values(task.assigneeNotes || {}).flatMap((note) => note.history || []);
+      const commentsBySide = (side: 'executor' | 'coordinator') => history
+        .filter((comment) => comment.side === side)
+        .map((comment) => `${humanDateTime(comment.createdAt)} · ${state.users.find((user) => user.id === comment.authorId)?.realName || comment.authorId}: ${comment.text}`)
+        .join('\n');
+      const executorComments = commentsBySide('executor') || Object.entries(task.assigneeNotes || {}).filter(([, note]) => note.executor).map(([id, note]) => `${state.users.find((user) => user.id === id)?.realName || id}: ${note.executor}`).join('\n');
+      const coordinatorComments = commentsBySide('coordinator') || Object.entries(task.assigneeNotes || {}).filter(([, note]) => note.coordinator).map(([id, note]) => `${state.users.find((user) => user.id === id)?.realName || id}: ${note.coordinator}`).join('\n');
       const completionComments = Object.entries(task.completionComments || {}).map(([id, comment]) => `${state.users.find((user) => user.id === id)?.realName || id}: ${comment}`).join('\n');
       const reminders = (task.reminders || []).map((reminder) => `${reminder.type === 'repeat' ? 'каждые' : 'за'} ${reminder.value} ${reminder.unit === 'hours' ? 'ч' : 'дн'}`).join(', ');
       return [
         event?.name || 'Без мероприятия', (task.competencies || (task.competency ? [task.competency] : [])).join(', ') || 'Без блока', task.title, task.description, task.sow || '',
-        task.status === 'completed' ? 'Выполнено' : task.status === 'open' ? 'Открытая' : 'В работе',
+        task.status === 'completed' ? 'Выполнено' : task.status === 'cancelled' ? 'Отменена' : task.status === 'open' ? 'Открытая' : 'В работе',
         task.priority === 'critical' ? 'Очень важная' : task.priority === 'important' ? 'Важная' : 'Обычная',
         creator?.realName || 'Не указан', assignees.join(', ') || 'Не назначены', humanDateTime(task.createdAt), task.deadline || '', humanDateTime(task.completedAt),
         task.timeSpentMinutes || '', executorComments, coordinatorComments, completionComments, reminders, task.id,
@@ -296,7 +301,7 @@ export async function importStateFromGoogleSheetsDatabase(config: GoogleSheetsDa
   const meta = Object.fromEntries(metaRows.map((row) => [String(row.key), row.value]));
   if (!bool(meta.data_present)) return { initialized: false, revision: 0, state: null, counts: null };
   if (String(meta.sync_state || '') !== 'ready') return { initialized: false, revision: Number(meta.revision || 0), state: null, counts: null };
-  if (![1, 2, 3, DATABASE_SCHEMA_VERSION].includes(Number(meta.schema_version))) throw new Error(`Unsupported Google Sheets database schema: ${meta.schema_version}`);
+  if (![1, 2, 3, 4, DATABASE_SCHEMA_VERSION].includes(Number(meta.schema_version))) throw new Error(`Unsupported Google Sheets database schema: ${meta.schema_version}`);
 
   const snapshotState = decodeGoogleSheetsDatabaseSnapshot(objects(valuesByTitle.get('snapshot')));
   if (snapshotState) {
@@ -355,9 +360,9 @@ export async function importStateFromGoogleSheetsDatabase(config: GoogleSheetsDa
     return {
       id: String(row.id), eventId: String(row.event_id || ''), facultyId: String(row.faculty_id || ''), title: String(row.title), description: String(row.description || ''), deadline: String(row.deadline || ''),
       creatorId: String(row.creator_id || ''), competency: String(row.competency || ''), competencies: parseJson<string[]>(row.competencies_json, String(row.competency || '') ? [String(row.competency)] : []), sow: String(row.sow || ''), status: String(row.status) as Task['status'], priority: String(row.priority) as Task['priority'],
-      createdAt: String(row.created_at || ''), completedAt: String(row.completed_at || ''), timeSpentMinutes: numberOrUndefined(row.time_spent_minutes), tips: parseJson<string[]>(row.tips_json, []),
+      createdAt: String(row.created_at || ''), completedAt: String(row.completed_at || ''), cancelledAt: String(row.cancelled_at || '') || undefined, cancelledBy: String(row.cancelled_by || '') || undefined, timeSpentMinutes: numberOrUndefined(row.time_spent_minutes), tips: parseJson<string[]>(row.tips_json, []),
       assignedTo: assignedTo.length ? assignedTo : null,
-      assigneeNotes: Object.fromEntries(taskComments.map((item) => [String(item.user_id), { executor: String(item.executor_comment || ''), coordinator: String(item.coordinator_comment || ''), updatedAt: String(item.updated_at || '') }])),
+      assigneeNotes: Object.fromEntries(taskComments.map((item) => [String(item.user_id), { executor: String(item.executor_comment || ''), coordinator: String(item.coordinator_comment || ''), updatedAt: String(item.updated_at || ''), history: parseJson(item.history_json, []) }])),
       completionComments: Object.fromEntries(taskComments.filter((item) => String(item.completion_comment || '')).map((item) => [String(item.user_id), String(item.completion_comment)])),
       reminders: reminders.filter((item) => item.task_id === row.id).map((item) => ({ id: String(item.id), type: String(item.type) as any, value: Number(item.value), unit: String(item.unit) as any, sentAt: String(item.sent_at || '') || undefined, lastSentAt: String(item.last_sent_at || '') || undefined })),
     } as Task;
