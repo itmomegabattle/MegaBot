@@ -8,6 +8,7 @@ import crypto from 'crypto';
 import { createServer as createViteServer } from 'vite';
 import { ProxyAgent } from 'undici';
 import { SimulationState, User, Availability, Meeting, Task, BotMessage, Faculty, TaskReminder, WorkEvent } from './src/types.js';
+import { isAvailabilityReminderTime, millisecondsUntilNextWholeHour, moscowClock } from './src/reminderSchedule.js';
 import {
   buildUserMappingReport,
   currentMoscowWeekStart,
@@ -2094,12 +2095,11 @@ async function startServer() {
     }
   }
 
-  async function sendSundayAvailabilityReminders() {
-    const today = new Date();
-    if (today.getDay() !== 0) return;
+  async function sendSundayAvailabilityReminders(now = new Date()) {
+    if (!isAvailabilityReminderTime(now)) return;
 
     const state = loadDatabase();
-    const dateKey = today.toISOString().split('T')[0];
+    const dateKey = moscowClock(now).dateKey;
     let changed = false;
 
     for (const user of state.users) {
@@ -5083,16 +5083,26 @@ async function startServer() {
     }
 
     await sendDueBirthdayReminders();
-    await sendSundayAvailabilityReminders();
     await sendTaskReminders();
     setInterval(() => {
       sendDueBirthdayReminders().catch((err) => {
         console.error('Birthday reminder check failed:', err.message);
       });
+    }, 24 * 60 * 60 * 1000);
+    const scheduleNextAvailabilityReminderCheck = () => {
+      const delayMs = millisecondsUntilNextWholeHour();
+      setTimeout(() => {
+        sendSundayAvailabilityReminders().catch((err) => {
+          console.error('Sunday availability reminder check failed:', err.message);
+        }).finally(scheduleNextAvailabilityReminderCheck);
+      }, delayMs);
+    };
+    if (isAvailabilityReminderTime()) {
       sendSundayAvailabilityReminders().catch((err) => {
         console.error('Sunday availability reminder check failed:', err.message);
       });
-    }, 24 * 60 * 60 * 1000);
+    }
+    scheduleNextAvailabilityReminderCheck();
     setInterval(() => {
       sendTaskReminders().catch((err) => {
         console.error('Task reminder check failed:', err.message);
