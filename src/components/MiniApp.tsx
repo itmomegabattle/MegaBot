@@ -353,7 +353,8 @@ export default function MiniApp({
   const [teamSearch, setTeamSearch] = useState('');
   const [expandedUserId, setExpandedUserId] = useState<string | null>(null);
   const [editingUserId, setEditingUserId] = useState<string | null>(null);
-  const [profileBlocksOpen, setProfileBlocksOpen] = useState(false);
+  const [profilePrimaryBlockOpen, setProfilePrimaryBlockOpen] = useState(false);
+  const [profileSecondaryBlocksOpen, setProfileSecondaryBlocksOpen] = useState(false);
   const [userDraft, setUserDraft] = useState({ realName: '', username: '', birthday: '', role: 'organizer' as User['role'], competencies: [] as string[], primaryCompetency: '' });
   const [newCompetency, setNewCompetency] = useState('');
   const [showAllCompetencies, setShowAllCompetencies] = useState(false);
@@ -1287,7 +1288,8 @@ export default function MiniApp({
 
   const startUserEdit = (user: User) => {
     setTeamError('');
-    setProfileBlocksOpen(false);
+    setProfilePrimaryBlockOpen(false);
+    setProfileSecondaryBlocksOpen(false);
     setEditingUserId(user.id);
     setUserDraft({
       realName: user.realName,
@@ -1567,7 +1569,7 @@ export default function MiniApp({
               <p className="mega-context truncate">{currentUser.realName} · {isAdmin ? 'администратор' : 'организатор'}</p>
               <h1 className="mega-page-title truncate">{pageTitle}</h1>
             </button>
-            <div className="flex items-center gap-2">
+            <div className="mega-header-actions flex shrink-0 items-center gap-2">
               <button
                 type="button"
                 onClick={() => void refreshPage()}
@@ -1655,39 +1657,21 @@ export default function MiniApp({
                   <Field label="Дата рождения">
                     <DatePickerField value={userDraft.birthday} onChange={(value) => setUserDraft((prev) => ({ ...prev, birthday: value }))} placeholder="Выбери дату" fullYear />
                   </Field>
-                  <div className="min-w-0">
-                    <button
-                      type="button"
-                      onClick={() => setProfileBlocksOpen((open) => !open)}
-                      aria-expanded={profileBlocksOpen}
-                      className={`${secondaryButtonClass} min-h-11 w-full justify-between px-3`}
-                    >
-                      <span className="min-w-0 truncate text-left">Блоки · {userDraft.competencies.length} выбрано</span>
-                      {profileBlocksOpen ? <CaretUp className="h-4 w-4 shrink-0" /> : <CaretDown className="h-4 w-4 shrink-0" />}
-                    </button>
-                    {profileBlocksOpen && <div className="mt-2 grid grid-cols-1 gap-2 rounded-2xl border border-slate-200 bg-white p-2">
-                      {competencies.length === 0 ? (
-                        <div className="px-2 py-1 text-xs font-bold text-slate-400">Админ ещё не добавил блоки</div>
-                      ) : competencies.map((name) => (
-                        <div key={name} className="flex min-h-11 min-w-0 items-center gap-3 rounded-xl px-3 py-2 text-sm font-semibold">
-                          <label className="flex min-w-0 flex-1 cursor-pointer items-center gap-3">
-                            <input type="checkbox" checked={userDraft.competencies.includes(name)} onChange={() => toggleDraftCompetency(name)} />
-                            <span className="min-w-0 break-words">{name}</span>
-                          </label>
-                          <label className={`flex shrink-0 cursor-pointer items-center gap-1.5 text-xs font-black ${userDraft.competencies.includes(name) ? 'text-[#0069E0]' : 'text-slate-300'}`}>
-                            <input
-                              type="radio"
-                              name="profile-primary-competency"
-                              disabled={!userDraft.competencies.includes(name)}
-                              checked={userDraft.primaryCompetency === name}
-                              onChange={() => setUserDraft((prev) => ({ ...prev, primaryCompetency: name }))}
-                            />
-                            Главный
-                          </label>
-                        </div>
-                      ))}
-                    </div>}
-                  </div>
+                  <ProfileBlockSelectors
+                    competencies={competencies}
+                    selected={userDraft.competencies}
+                    primary={userDraft.primaryCompetency}
+                    primaryOpen={profilePrimaryBlockOpen}
+                    secondaryOpen={profileSecondaryBlocksOpen}
+                    onTogglePrimary={() => setProfilePrimaryBlockOpen((open) => !open)}
+                    onToggleSecondary={() => setProfileSecondaryBlocksOpen((open) => !open)}
+                    onPrimaryChange={(name) => setUserDraft((prev) => ({
+                      ...prev,
+                      primaryCompetency: name,
+                      competencies: prev.competencies.includes(name) ? prev.competencies : [name, ...prev.competencies],
+                    }))}
+                    onSecondaryToggle={toggleDraftCompetency}
+                  />
                   {teamError && <p role="alert" className="text-sm font-bold text-rose-600">{teamError}</p>}
                   <div className="grid grid-cols-2 gap-2">
                     <button type="button" onClick={() => setEditingUserId(null)} className={secondaryButtonClass}>Отмена</button>
@@ -2719,7 +2703,7 @@ export default function MiniApp({
                 <Field label="Telegram">
                   <input value={newUserUsername} onChange={(e) => setNewUserUsername(e.target.value)} className={inputClass} placeholder="@username" />
                 </Field>
-                <div className="grid grid-cols-2 gap-3">
+                <div className="grid grid-cols-1 gap-3 min-[440px]:grid-cols-2">
                   <Field label="Роль">
                     <select value={newUserRole} onChange={(e) => setNewUserRole(e.target.value as any)} className={selectClass}>
                       <option value="organizer">Организатор</option>
@@ -2864,7 +2848,7 @@ export default function MiniApp({
                               <Field label="Telegram">
                                 <input value={userDraft.username} onChange={(e) => setUserDraft((prev) => ({ ...prev, username: e.target.value }))} className={inputClass} />
                               </Field>
-                              <div className={`grid gap-3 ${isAdminPanel ? 'grid-cols-2' : 'grid-cols-1'}`}>
+                              <div className={`grid min-w-0 grid-cols-1 gap-3 ${isAdminPanel ? 'min-[440px]:grid-cols-2' : ''}`}>
                                 <Field label="ДР">
                                   <DatePickerField value={userDraft.birthday} onChange={(value) => setUserDraft((prev) => ({ ...prev, birthday: value }))} placeholder="Выбери дату" fullYear />
                                 </Field>
@@ -2877,43 +2861,21 @@ export default function MiniApp({
                                   </Field>
                                 )}
                               </div>
-                              <Field label="Главный блок">
-                                <div className="grid grid-cols-1 gap-2 rounded-2xl border border-slate-200 bg-slate-50 p-2">
-                                  {competencies.length === 0 ? (
-                                    <div className="text-xs font-bold text-slate-400">Админ ещё не добавил блоки</div>
-                                  ) : (
-                                    competencies.map((name) => (
-                                      <label key={name} className="flex items-center justify-between rounded-xl bg-white px-3 py-2 text-sm font-semibold">
-                                        <span>{name}</span>
-                                        <input
-                                          type="radio"
-                                          name={`primary-${user.id}`}
-                                          checked={userDraft.primaryCompetency === name}
-                                          onChange={() => setUserDraft((prev) => ({
-                                            ...prev,
-                                            primaryCompetency: name,
-                                            competencies: prev.competencies.includes(name) ? prev.competencies : [name, ...prev.competencies],
-                                          }))}
-                                        />
-                                      </label>
-                                    ))
-                                  )}
-                                </div>
-                              </Field>
-                              <Field label="Блоки">
-                                <div className="grid grid-cols-1 gap-2 rounded-2xl border border-slate-200 bg-slate-50 p-2">
-                                  {competencies.length === 0 ? (
-                                    <div className="text-xs font-bold text-slate-400">Админ ещё не добавил блоки</div>
-                                  ) : (
-                                    competencies.map((name) => (
-                                      <label key={name} className="flex items-center justify-between rounded-xl bg-white px-3 py-2 text-sm font-semibold">
-                                        <span>{name}</span>
-                                        <input type="checkbox" checked={userDraft.competencies.includes(name)} onChange={() => toggleDraftCompetency(name)} />
-                                      </label>
-                                    ))
-                                  )}
-                                </div>
-                              </Field>
+                              <ProfileBlockSelectors
+                                competencies={competencies}
+                                selected={userDraft.competencies}
+                                primary={userDraft.primaryCompetency}
+                                primaryOpen={profilePrimaryBlockOpen}
+                                secondaryOpen={profileSecondaryBlocksOpen}
+                                onTogglePrimary={() => setProfilePrimaryBlockOpen((open) => !open)}
+                                onToggleSecondary={() => setProfileSecondaryBlocksOpen((open) => !open)}
+                                onPrimaryChange={(name) => setUserDraft((prev) => ({
+                                  ...prev,
+                                  primaryCompetency: name,
+                                  competencies: prev.competencies.includes(name) ? prev.competencies : [name, ...prev.competencies],
+                                }))}
+                                onSecondaryToggle={toggleDraftCompetency}
+                              />
                               <div className="flex gap-2">
                                 <button type="button" disabled={savingUserId === user.id} onClick={(event) => { event.stopPropagation(); void updateUser(user.id); }} className={`${miniButtonClass} disabled:opacity-60`}>
                                   {savingUserId === user.id ? 'Сохраняю...' : 'Сохранить'}
@@ -3439,6 +3401,72 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
     <div className="block min-w-0 max-w-full" role="group" aria-label={label}>
       <span className="mb-1.5 block text-xs font-black uppercase text-slate-500">{label}</span>
       {labelledChild}
+    </div>
+  );
+}
+
+function ProfileBlockSelectors({
+  competencies,
+  selected,
+  primary,
+  primaryOpen,
+  secondaryOpen,
+  onTogglePrimary,
+  onToggleSecondary,
+  onPrimaryChange,
+  onSecondaryToggle,
+}: {
+  competencies: string[];
+  selected: string[];
+  primary: string;
+  primaryOpen: boolean;
+  secondaryOpen: boolean;
+  onTogglePrimary: () => void;
+  onToggleSecondary: () => void;
+  onPrimaryChange: (name: string) => void;
+  onSecondaryToggle: (name: string) => void;
+}) {
+  const secondaryCompetencies = competencies.filter((name) => name !== primary);
+  const selectedSecondaryCount = selected.filter((name) => name !== primary).length;
+  const disclosure = (label: string, value: string, open: boolean, onToggle: () => void) => (
+    <button type="button" onClick={onToggle} aria-expanded={open} className={`${secondaryButtonClass} min-h-11 w-full justify-between px-3`}>
+      <span className="min-w-0 truncate text-left">{label} · {value}</span>
+      {open ? <CaretUp className="h-4 w-4 shrink-0" /> : <CaretDown className="h-4 w-4 shrink-0" />}
+    </button>
+  );
+
+  return (
+    <div className="space-y-2">
+      <div className="min-w-0">
+        {disclosure('Главный блок', primary || 'не выбран', primaryOpen, onTogglePrimary)}
+        {primaryOpen && (
+          <div className="mt-2 grid grid-cols-1 gap-2 rounded-2xl border border-slate-200 bg-white p-2">
+            {competencies.length === 0 ? (
+              <div className="px-2 py-1 text-xs font-bold text-slate-400">Админ ещё не добавил блоки</div>
+            ) : competencies.map((name) => (
+              <label key={name} className="flex min-h-11 cursor-pointer items-center justify-between gap-3 rounded-xl px-3 py-2 text-sm font-semibold">
+                <span className="min-w-0 break-words">{name}</span>
+                <input type="radio" name="profile-primary-competency" checked={primary === name} onChange={() => onPrimaryChange(name)} />
+              </label>
+            ))}
+          </div>
+        )}
+      </div>
+      <div className="min-w-0">
+        {disclosure('Второстепенные блоки', `${selectedSecondaryCount} выбрано`, secondaryOpen, onToggleSecondary)}
+        {secondaryOpen && (
+          <div className="mt-2 grid grid-cols-1 gap-2 rounded-2xl border border-slate-200 bg-white p-2">
+            {secondaryCompetencies.length === 0 ? (
+              <div className="px-2 py-1 text-xs font-bold text-slate-400">Других блоков пока нет</div>
+            ) : secondaryCompetencies.map((name) => (
+              <label key={name} className="flex min-h-11 cursor-pointer items-center justify-between gap-3 rounded-xl px-3 py-2 text-sm font-semibold">
+                <span className="min-w-0 break-words">{name}</span>
+                <input type="checkbox" checked={selected.includes(name)} onChange={() => onSecondaryToggle(name)} />
+              </label>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
