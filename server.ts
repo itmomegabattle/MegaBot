@@ -899,6 +899,12 @@ async function startServer() {
     completionTaskId?: string;
     completionTimeMinutes?: number;
   }>();
+  type StoredSlotDraft = {
+    userId: string;
+    weekStart: string;
+    slots: Record<number, number[]>;
+    dayBaseline?: { dayIndex: number; hours: number[] };
+  };
   type StoredChatUiState = {
     version: 2;
     panels: Record<string, { current?: number; known: number[] }>;
@@ -910,11 +916,7 @@ async function startServer() {
       active: boolean;
       updatedAt: string;
     }>>;
-    slotDrafts: Record<string, {
-      userId: string;
-      weekStart: string;
-      slots: Record<number, number[]>;
-    }>;
+    slotDrafts: Record<string, StoredSlotDraft>;
   };
   const loadChatUiState = (): StoredChatUiState => {
     try {
@@ -944,7 +946,7 @@ async function startServer() {
     Object.entries(chatUiState.panels)
       .map(([chatId, panel]) => [chatId, new Set(panel.known.filter(Number.isInteger))]),
   );
-  const chatSlotDrafts = new Map(Object.entries(chatUiState.slotDrafts || {}));
+  const chatSlotDrafts = new Map<string, StoredSlotDraft>(Object.entries(chatUiState.slotDrafts || {}));
   const pendingSheetAvailabilityExports = new Set(chatUiState.pendingSheetExports || []);
   const groupMembers = new Map(Object.entries(chatUiState.groupMembers || {}).map(([chatId, members]) => [
     chatId,
@@ -1898,8 +1900,14 @@ async function startServer() {
 
   function storeSlotDraft(chatKey: string, user: User, state: SimulationState, slots: Record<number, number[]>, slotDay?: number) {
     const safeSlots = cloneValidSlotSelection(state, slots);
+    const previousDraft = chatSlotDrafts.get(chatKey);
+    const dayBaseline = slotDay === undefined
+      ? undefined
+      : previousDraft?.dayBaseline?.dayIndex === slotDay
+        ? previousDraft.dayBaseline
+        : { dayIndex: slotDay, hours: [...(safeSlots[slotDay] || [])] };
     chatSessions.set(chatKey, { flow: 'slots_edit', slotDay, pendingSlots: safeSlots });
-    chatSlotDrafts.set(chatKey, { userId: user.id, weekStart: currentWeekStartIso(), slots: safeSlots });
+    chatSlotDrafts.set(chatKey, { userId: user.id, weekStart: currentWeekStartIso(), slots: safeSlots, dayBaseline });
     persistChatPanelMessageIds();
     return safeSlots;
   }
@@ -1922,8 +1930,9 @@ async function startServer() {
     }]);
     keyboard.push([
       { text: 'Сохранить', callback_data: 'slot_save' },
-      { text: 'К дням', callback_data: 'nav_slots' },
+      { text: 'Отменить', callback_data: `slot_cancel_day:${dayIndex}` },
     ]);
+    keyboard.push([{ text: 'К дням', callback_data: 'nav_slots' }]);
     return {
       text: `${slotsSummaryText(user, state, pendingSlots)}\n\n*${dayNames[dayIndex]}:* выбери свободные часы.`,
       keyboard,
@@ -2331,6 +2340,7 @@ async function startServer() {
         || action.startsWith('slots_day:')
         || action.startsWith('slot_toggle:')
         || action.startsWith('slot_toggle_day:')
+        || action.startsWith('slot_cancel_day:')
         || action === 'slot_toggle_week';
       if (isSlotPanelAction && currentPanelId && callbackMessageId !== currentPanelId) {
         await deleteTelegramMessage(chatId, callbackMessageId);
@@ -2410,6 +2420,23 @@ async function startServer() {
         const panel = slotDayPanel(user, state, dayIndex, pendingSlots);
         await answerCallback(callback.id, wasFull ? 'День очищен' : 'Выбран весь день');
         await updateInlinePanel(chatId, callbackMessageId, panel.text, panel.keyboard);
+        return res.json({ ok: true });
+      }
+
+      if (action.startsWith('slot_cancel_day:')) {
+        const dayIndex = Number(action.split(':')[1]);
+        const chatKey = String(chatId);
+        const draft = chatSlotDrafts.get(chatKey);
+        if (!Number.isInteger(dayIndex) || draft?.userId !== user.id || draft.dayBaseline?.dayIndex !== dayIndex) {
+          await answerCallback(callback.id, 'Не удалось восстановить начало редактирования');
+          return res.json({ ok: true });
+        }
+        const pendingSlots = currentSlotDraft(chatKey, user, state);
+        pendingSlots[dayIndex] = [...draft.dayBaseline.hours];
+        if (pendingSlots[dayIndex].length === 0) delete pendingSlots[dayIndex];
+        storeSlotDraft(chatKey, user, state, pendingSlots);
+        await answerCallback(callback.id, 'Изменения за день отменены');
+        await showSlotsPanel(chatId, user, state, pendingSlots, callbackMessageId);
         return res.json({ ok: true });
       }
 
@@ -2519,11 +2546,8 @@ async function startServer() {
         }
         await answerCallback(callback.id);
         const buttons = task.status === 'open'
-          ? [
-              [{ text: 'Взять задачу', callback_data: `task_claim:${task.id}` }],
-              [{ text: 'Назад', callback_data: 'nav_tasks' }],
-            ]
-          : [[{ text: 'Назад', callback_data: 'nav_tasks' }]];
+          ? [[{ text: 'Взять задачу', callback_data: `task_claim:${task.id}` }]]
+          : [];
         await sendTaskInlinePanel(chatId, taskDetailsText(task, state), buttons);
         return res.json({ ok: true });
       }
@@ -3464,7 +3488,6 @@ async function startServer() {
             : 'Свободных задач сейчас нет.',
           [
             ...openTasks.map((task) => [{ text: task.title.slice(0, 48), callback_data: `task_view:${task.id}` }]),
-            [{ text: 'Назад', callback_data: 'nav_tasks' }],
           ],
         );
         return res.json({ ok: true });
@@ -3496,7 +3519,6 @@ async function startServer() {
               { text: `✓ ${task.title.slice(0, 30)}`, callback_data: `task_complete:${task.id}` },
               { text: 'Отказаться', callback_data: `task_release:${task.id}` },
             ]),
-            [{ text: 'Назад', callback_data: 'nav_tasks' }],
           ],
         );
         return res.json({ ok: true });

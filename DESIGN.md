@@ -286,3 +286,10 @@ The Tasks event selector uses two equal columns for compact labels. An odd final
 - After save, show explicit confirmation plus `Edit slots` and `Profile`; the next service panel replaces it.
 - Reserve lasting chat messages for broadcasts and operational notifications. Navigation panels are temporary UI.
 - Future states must cover saving, synchronized, retry queued and failed with a user-actionable recovery path.
+
+## 2026-08-09 interface contract
+
+- Telegram `Назад` belongs to the persistent reply keyboard. Inline controls are reserved for actions on the current entity, including slot toggles and `Отменить`.
+- Avatar preview and exported avatar must be rendered by the same crop geometry; separate CSS preview math is prohibited.
+- Profile blocks use progressive disclosure: the list starts collapsed, supports multiple memberships, and marks exactly one selected membership as primary.
+- Native date controls must stay inside their container at 320 px viewport width (`inline-size`, `min-inline-size: 0`, and border-box are mandatory).

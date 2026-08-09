@@ -28,6 +28,7 @@ import {
 } from '@phosphor-icons/react';
 import { Meeting, SimulationState, Task, User, WorkEvent } from '../types';
 import { normalizeAvailabilityConfig } from '../availabilityConfig';
+import { drawAvatarCrop } from '../avatarCrop';
 
 /*
 THESIS: MegaBattle is a compact operations surface, not a generic blue card dashboard.
@@ -351,6 +352,7 @@ export default function MiniApp({
   const [teamSearch, setTeamSearch] = useState('');
   const [expandedUserId, setExpandedUserId] = useState<string | null>(null);
   const [editingUserId, setEditingUserId] = useState<string | null>(null);
+  const [profileBlocksOpen, setProfileBlocksOpen] = useState(false);
   const [userDraft, setUserDraft] = useState({ realName: '', username: '', birthday: '', role: 'organizer' as User['role'], competencies: [] as string[], primaryCompetency: '' });
   const [newCompetency, setNewCompetency] = useState('');
   const [showAllCompetencies, setShowAllCompetencies] = useState(false);
@@ -1254,6 +1256,7 @@ export default function MiniApp({
 
   const startUserEdit = (user: User) => {
     setTeamError('');
+    setProfileBlocksOpen(false);
     setEditingUserId(user.id);
     setUserDraft({
       realName: user.realName,
@@ -1622,27 +1625,39 @@ export default function MiniApp({
                   <Field label="Дата рождения">
                     <DatePickerField value={userDraft.birthday} onChange={(value) => setUserDraft((prev) => ({ ...prev, birthday: value }))} placeholder="Выбери дату" fullYear />
                   </Field>
-                  <Field label="Главный блок">
-                    <div className="grid grid-cols-1 gap-2 rounded-2xl border border-slate-200 bg-white p-2">
+                  <div className="min-w-0">
+                    <button
+                      type="button"
+                      onClick={() => setProfileBlocksOpen((open) => !open)}
+                      aria-expanded={profileBlocksOpen}
+                      className={`${secondaryButtonClass} min-h-11 w-full justify-between px-3`}
+                    >
+                      <span className="min-w-0 truncate text-left">Блоки · {userDraft.competencies.length} выбрано</span>
+                      {profileBlocksOpen ? <CaretUp className="h-4 w-4 shrink-0" /> : <CaretDown className="h-4 w-4 shrink-0" />}
+                    </button>
+                    {profileBlocksOpen && <div className="mt-2 grid grid-cols-1 gap-2 rounded-2xl border border-slate-200 bg-white p-2">
                       {competencies.length === 0 ? (
                         <div className="px-2 py-1 text-xs font-bold text-slate-400">Админ ещё не добавил блоки</div>
                       ) : competencies.map((name) => (
-                        <label key={name} className="flex min-h-11 items-center justify-between rounded-xl px-3 py-2 text-sm font-semibold">
-                          <span>{name}</span>
-                          <input
-                            type="radio"
-                            name="profile-primary-competency"
-                            checked={userDraft.primaryCompetency === name}
-                            onChange={() => setUserDraft((prev) => ({
-                              ...prev,
-                              primaryCompetency: name,
-                              competencies: prev.competencies.includes(name) ? prev.competencies : [name, ...prev.competencies],
-                            }))}
-                          />
-                        </label>
+                        <div key={name} className="flex min-h-11 min-w-0 items-center gap-3 rounded-xl px-3 py-2 text-sm font-semibold">
+                          <label className="flex min-w-0 flex-1 cursor-pointer items-center gap-3">
+                            <input type="checkbox" checked={userDraft.competencies.includes(name)} onChange={() => toggleDraftCompetency(name)} />
+                            <span className="min-w-0 break-words">{name}</span>
+                          </label>
+                          <label className={`flex shrink-0 cursor-pointer items-center gap-1.5 text-xs font-black ${userDraft.competencies.includes(name) ? 'text-[#0069E0]' : 'text-slate-300'}`}>
+                            <input
+                              type="radio"
+                              name="profile-primary-competency"
+                              disabled={!userDraft.competencies.includes(name)}
+                              checked={userDraft.primaryCompetency === name}
+                              onChange={() => setUserDraft((prev) => ({ ...prev, primaryCompetency: name }))}
+                            />
+                            Главный
+                          </label>
+                        </div>
                       ))}
-                    </div>
-                  </Field>
+                    </div>}
+                  </div>
                   {teamError && <p role="alert" className="text-sm font-bold text-rose-600">{teamError}</p>}
                   <div className="grid grid-cols-2 gap-2">
                     <button type="button" onClick={() => setEditingUserId(null)} className={secondaryButtonClass}>Отмена</button>
@@ -3433,7 +3448,7 @@ function DatePickerField({
           if (dirtyRef.current && !draft) onChange('');
           setDraft(shortDateToInputDate(draft ? inputDateToShortDate(draft, withYear, fullYear) : ''));
         }}
-        className={`${inputClass} cursor-pointer pr-3 ${error ? 'border-rose-300 bg-rose-50 focus:border-rose-500' : ''}`}
+        className={`${inputClass} mega-date-input block min-w-0 max-w-full cursor-pointer overflow-hidden pr-2 [inline-size:100%] [min-inline-size:0] ${error ? 'border-rose-300 bg-rose-50 focus:border-rose-500' : ''}`}
       />
       <div className={`mt-1 flex items-center gap-1.5 text-xs font-bold ${value ? 'text-[#0069E0]' : 'text-slate-400'}`}>
         <CalendarDots className="h-3.5 w-3.5" />
@@ -3527,10 +3542,18 @@ function UserAvatar({ user, className = '' }: { user: User; className?: string }
 
 function AvatarCropEditor({ source, saving, onCancel, onSave }: { source: string; saving: boolean; onCancel: () => void; onSave: (dataUrl: string) => Promise<void> }) {
   const imageRef = useRef<HTMLImageElement | null>(null);
+  const previewRef = useRef<HTMLCanvasElement | null>(null);
   const [imageLoaded, setImageLoaded] = useState(false);
   const [zoom, setZoom] = useState(1);
   const [offsetX, setOffsetX] = useState(0);
   const [offsetY, setOffsetY] = useState(0);
+
+  useEffect(() => {
+    const image = imageRef.current;
+    const canvas = previewRef.current;
+    if (!imageLoaded || !image || !canvas) return;
+    drawAvatarCrop(image, canvas, zoom, offsetX, offsetY);
+  }, [imageLoaded, offsetX, offsetY, source, zoom]);
 
   const crop = async () => {
     const image = imageRef.current;
@@ -3538,14 +3561,7 @@ function AvatarCropEditor({ source, saving, onCancel, onSave }: { source: string
     const canvas = document.createElement('canvas');
     canvas.width = 256;
     canvas.height = 256;
-    const context = canvas.getContext('2d');
-    if (!context) return;
-    const cropSize = Math.min(image.naturalWidth, image.naturalHeight) / zoom;
-    const maxX = Math.max(0, (image.naturalWidth - cropSize) / 2);
-    const maxY = Math.max(0, (image.naturalHeight - cropSize) / 2);
-    const sourceX = Math.max(0, Math.min(image.naturalWidth - cropSize, (image.naturalWidth - cropSize) / 2 + (offsetX / 100) * maxX));
-    const sourceY = Math.max(0, Math.min(image.naturalHeight - cropSize, (image.naturalHeight - cropSize) / 2 + (offsetY / 100) * maxY));
-    context.drawImage(image, sourceX, sourceY, cropSize, cropSize, 0, 0, 256, 256);
+    if (!drawAvatarCrop(image, canvas, zoom, offsetX, offsetY)) return;
     const dataUrl = canvas.toDataURL('image/webp', 0.82);
     await onSave(dataUrl.startsWith('data:image/webp') ? dataUrl : canvas.toDataURL('image/jpeg', 0.82));
   };
@@ -3558,7 +3574,8 @@ function AvatarCropEditor({ source, saving, onCancel, onSave }: { source: string
           <button type="button" onClick={onCancel} className={miniButtonClass} aria-label="Закрыть"><X className="h-4 w-4" /></button>
         </div>
         <div className="mx-auto mt-4 aspect-square w-full max-w-[280px] overflow-hidden rounded-3xl bg-slate-100">
-          <img ref={imageRef} src={source} onLoad={() => setImageLoaded(true)} alt="Предпросмотр аватара" className="h-full w-full object-cover" style={{ transform: `translate(${offsetX * 0.2}%, ${offsetY * 0.2}%) scale(${zoom})` }} />
+          <canvas ref={previewRef} width="560" height="560" aria-label="Предпросмотр аватара" className="h-full w-full" />
+          <img ref={imageRef} src={source} onLoad={() => setImageLoaded(true)} alt="" className="sr-only" />
         </div>
         <div className="mt-4 space-y-3">
           <Field label="Масштаб"><input type="range" min="1" max="3" step="0.05" value={zoom} onChange={(event) => setZoom(Number(event.target.value))} className="w-full" /></Field>

@@ -599,6 +599,13 @@ html.dark-theme .mega-shell .mega-bottom-nav {
   box-sizing: border-box;
 }
 
+.mega-shell .mega-date-input {
+  inline-size: 100%;
+  min-inline-size: 0;
+  max-inline-size: 100%;
+  overflow: hidden;
+}
+
 .mega-shell input[type='date']::-webkit-date-and-time-value,
 .mega-shell input[type='time']::-webkit-date-and-time-value {
   min-width: 0;

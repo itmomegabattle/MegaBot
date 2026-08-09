@@ -191,6 +191,7 @@ try {
       TELEGRAM_API_BASE: `http://127.0.0.1:${telegramPort}`,
       WEBAPP_URL: 'https://dead-tunnel.lhr.life',
       DISABLE_TELEGRAM_POLLING: 'true',
+      GOOGLE_SHEETS_DATABASE_ENABLED: 'false',
       ADMIN_USERNAMES: '@admin',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -437,9 +438,9 @@ try {
       text: 'Свободные задачи',
     },
   });
-  const openTasksPanel = telegramCalls.find((call) => call.path.endsWith('/sendMessage') && call.body.reply_markup?.inline_keyboard);
+  const openTasksPanel = telegramCalls.find((call) => call.path.endsWith('/sendMessage') && String(call.body.text || '').includes('Свободных задач'));
   assert.equal(openTasksPanel.body.disable_notification, true);
-  assert.ok(openTasksPanel.body.reply_markup.inline_keyboard.flat().some((button) => button.callback_data === 'nav_tasks' && button.text === 'Назад'));
+  assert.ok(!openTasksPanel.body.reply_markup?.inline_keyboard?.flat().some((button) => button.text === 'Назад'));
 
   telegramCalls.length = 0;
   await request('/api/telegram-webhook', {
@@ -531,6 +532,43 @@ try {
   const slotDraftState = JSON.parse(await readFile(`${testDatabasePath}.chat-panels.json`, 'utf8'));
   assert.deepEqual(slotDraftState.slotDrafts['200'].slots['2'], [17, 18, 19, 20, 21, 22, 23]);
   assert.ok(wholeDayEdit.body.reply_markup.inline_keyboard.flat().some((button) => button.text === 'Снять весь день'));
+  assert.ok(wholeDayEdit.body.reply_markup.inline_keyboard.flat().some((button) => button.text === 'Отменить' && button.callback_data === 'slot_cancel_day:2'));
+
+  telegramCalls.length = 0;
+  await request('/api/telegram-webhook', {
+    update_id: 1301,
+    callback_query: {
+      id: 'slots-cancel-day',
+      from: aliceTelegram,
+      data: 'slot_cancel_day:2',
+      message: { message_id: slotsPanelId, chat: { id: 200, type: 'private' } },
+    },
+  });
+  const cancelledDayEdit = telegramCalls.find((call) => call.path.endsWith('/editMessageText'));
+  assert.ok(cancelledDayEdit.body.reply_markup.inline_keyboard.flat().some((button) => button.callback_data === 'slots_day:2' && button.text === 'Ср · 0/7'));
+  const cancelledDraftState = JSON.parse(await readFile(`${testDatabasePath}.chat-panels.json`, 'utf8'));
+  assert.equal(cancelledDraftState.slotDrafts['200'].slots['2'], undefined);
+
+  telegramCalls.length = 0;
+  await request('/api/telegram-webhook', {
+    update_id: 1302,
+    callback_query: {
+      id: 'slots-day-again',
+      from: aliceTelegram,
+      data: 'slots_day:2',
+      message: { message_id: slotsPanelId, chat: { id: 200, type: 'private' } },
+    },
+  });
+  telegramCalls.length = 0;
+  await request('/api/telegram-webhook', {
+    update_id: 1303,
+    callback_query: {
+      id: 'slots-whole-day-again',
+      from: aliceTelegram,
+      data: 'slot_toggle_day:2',
+      message: { message_id: slotsPanelId, chat: { id: 200, type: 'private' } },
+    },
+  });
 
   telegramCalls.length = 0;
   await request('/api/telegram-webhook', {

@@ -76,3 +76,9 @@ Task coordination now includes a dedicated "Назначенные мной" vie
 Availability hours always form two balanced rows inside each day: the first row contains one more item only when the configured hour count is odd. Active-event controls use two equal columns for short names, stretch an unpaired final event across the row, and switch to one column when labels cannot share a row cleanly.
 
 Tasks are now scoped by simultaneous work events. Administrators create and finish events without deleting their history; ordinary and faculty task forms attach an event, and My/Open/Completed/Backlog views filter independently by event. Task assignment supports search by name, Telegram username and competency. Meeting duration is validated from 30 minutes through 6 hours.
+
+## Product update — 2026-08-09
+
+Chat navigation now has one rule: `Назад` is always in the reply keyboard. A day-level slot edit is reversible with `Отменить`, which restores the hours present when that day was opened. Profile editing supports one primary and multiple secondary blocks behind a collapsed disclosure. Avatar positioning uses identical preview and saved-image rendering.
+
+Current multi-assignee tasks still have one global task status: when any assignee completes the task, it becomes completed for every assignee. Planned, not implemented: an explicit creation mode — `Каждому лично` creates independent assignee states and finishes only after all personal copies are done; `Одна задача на всех` keeps one shared status and records who completed it. Existing tasks should migrate as shared to preserve current behavior.

@@ -8,6 +8,7 @@
     "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
     "start": "node dist/server.cjs",
     "verify:core": "npm run build && node scripts/verify-core-flows.mjs",
+    "verify:avatar": "tsx scripts/verify-avatar-crop.ts",
     "verify:sheets": "tsx scripts/verify-google-sheets-primary.ts",
     "verify:database-sheets": "tsx scripts/verify-google-sheets-database.ts",
     "deploy:selectel": "bash scripts/deploy-selectel.sh",

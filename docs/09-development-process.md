@@ -125,3 +125,13 @@
 Перед выпуском изменений слотов обязательны `npm run lint` и `npm run verify:core`. Fake Telegram должен выдавать монотонно растущие уникальные message ID. Тест обязан пройти stale callback, вход в день, массовый toggle, одиночный toggle, возврат без нового сообщения, сохранение точного массива часов и повторное открытие.
 
 На Selectel после деплоя запускается `npm run sheets:roundtrip-test`. Локальное отсутствие Google-переменных не считается успешной проверкой. Изменения не объявляются production-подтверждёнными, пока health, PM2 logs и server-side round-trip не проверены.
+
+## Повторяющиеся ошибки и профилактика — 2026-08-09
+
+- Разные `Назад`: не добавлять inline-`Назад`; тест проверяет reply-клавиатуру и отсутствие inline-дубля.
+- Потеря слотов: UI меняет draft, не availability; перед отменяемым редактированием сохраняется baseline; stale callback и двойное нажатие обязательны в тесте.
+- Preview не равен файлу: не поддерживать отдельную CSS-формулу; preview/export вызывают один crop helper, углы проверяет `npm run verify:avatar`.
+- Date input выходит за экран: проверять 320 px, `min-inline-size: 0`, `inline-size: 100%`, border-box и WebKit value.
+- Изменение глобальной модели задачи без миграции: сначала поле режима и backfill, затем UI и API.
+- Успешный build не равен успешному релизу: обязательны `lint`, `verify:avatar`, `verify:core`, production build, health, PM2 logs и серверные Sheets-проверки.
+- Изолированный core-тест не должен наследовать production backend: явно ставить `GOOGLE_SHEETS_DATABASE_ENABLED=false`, иначе он попытается загрузить тестовую базу из рабочих Google Sheets.

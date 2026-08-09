@@ -45,3 +45,9 @@ Turn the current generic blue card interface into a compact MegaBattle operation
 The redesign now treats the Telegram chat as a stateful product surface, not a collection of disposable messages. Slot editing remains in one message, selection counts are explicit, whole-day selection is visible inside every day, and save produces a stable confirmation with actions to edit again or open the profile.
 
 The next redesign pass should add visible `saving / synchronized / retrying` states to both chat and Mini App, validate Telegram username navigation on all supported clients, and visually align chat copy with Mini App terminology.
+
+## Completed follow-up — 2026-08-09
+
+The chat navigation contract is now consistent: back navigation stays in the reply keyboard and inline panels only contain contextual actions. Slot-day editing gained a snapshot-based cancel operation. The profile editor now collapses block selection by default and distinguishes memberships from the primary block. Avatar crop preview/export were consolidated onto one canvas path, eliminating coordinate drift.
+
+Future design work includes the unimplemented task assignment choice `Каждому лично` versus `Одна задача на всех`, plus visible per-assignee progress (`N из M`) for personal assignments.

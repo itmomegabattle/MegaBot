@@ -44,6 +44,12 @@ c.ns.selectel.ru
 d.ns.selectel.ru
 ```
 
+## Проверка релиза 2026-08-09
+
+Для изменений профиля и чатовых кнопок перед push запускать `npm run lint`, `npm run verify:avatar` и `npm run verify:core`. После pull на Selectel выполнять backup Google Sheets database до перезапуска, собирать production bundle, передавать `APP_REVISION=$(git rev-parse HEAD)` в `pm2 reload --update-env`, затем сверять `/api/health`, `pm2 describe`, свежие логи и `db:sheets:status`.
+
+Частая ловушка: старые строки в PM2 logs не означают новую ошибку. Сопоставлять timestamp с временем рестарта и при необходимости проверять время последней записи файла лога.
+
 В DNS-зоне настроены записи:
 
 ```text
