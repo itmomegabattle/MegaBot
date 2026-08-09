@@ -1,0 +1,40 @@
+.brand-background {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 0;
+  contain: strict;
+  background:
+    radial-gradient(circle at 52% 42%, rgba(0, 48, 112, 0.08), transparent 55%),
+    linear-gradient(145deg, var(--mega-ink), var(--mega-black));
+}
+
+.brand-background__canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  transform: translateZ(0);
+  backface-visibility: hidden;
+}
+
+html:not(.dark-theme) .brand-background {
+  background: linear-gradient(145deg, var(--mega-canvas), var(--mega-surface-soft));
+}
+
+.brand-app-layer {
+  position: relative;
+  z-index: 1;
+  min-height: 100svh;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .brand-background__canvas {
+    transform: none;
+  }
+}

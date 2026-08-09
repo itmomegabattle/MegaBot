@@ -279,7 +279,7 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-[100dvh] bg-slate-50 text-slate-900 flex flex-col">
+    <div className="min-h-[100dvh] text-slate-900 flex flex-col">
       <div className="fixed top-4 right-4 z-50 space-y-2 pointer-events-none max-w-sm">
         {notifications.map((n) => (
           <div

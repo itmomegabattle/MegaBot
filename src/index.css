@@ -88,7 +88,7 @@ textarea:focus-visible {
 .mega-gate {
   position: relative;
   overflow: hidden;
-  background: linear-gradient(160deg, var(--mega-black) 0%, var(--mega-ink) 100%);
+  background: transparent;
   color: var(--mega-white);
 }
 
@@ -120,13 +120,21 @@ textarea:focus-visible {
   object-fit: contain;
 }
 
+.mega-gate > .mega-gate-logo {
+  filter:
+    drop-shadow(0 2px 1px rgba(6, 18, 34, 0.72))
+    drop-shadow(0 8px 20px rgba(6, 18, 34, 0.26));
+}
+
+.mega-gate > p {
+  color: var(--mega-muted);
+}
+
 .mega-shell {
   position: relative;
   min-height: 100svh;
   font-family: "Raleway", "Segoe UI", sans-serif;
-  background:
-    linear-gradient(180deg, rgba(0, 105, 224, 0.07) 0, transparent 280px),
-    var(--mega-canvas);
+  background: transparent;
   color: var(--mega-ink);
 }
 
@@ -461,16 +469,13 @@ html.dark-theme {
 }
 
 html.dark-theme body,
-html.dark-theme .mega-shell,
 html.dark-theme .bg-slate-50,
 html.dark-theme .bg-\[\#f4f7ff\] {
   background-color: var(--mega-canvas);
 }
 
 html.dark-theme .mega-shell {
-  background:
-    linear-gradient(180deg, rgba(0, 105, 224, 0.13) 0, transparent 280px),
-    var(--mega-canvas);
+  background: transparent;
 }
 
 html.dark-theme .mega-header {

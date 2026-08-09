@@ -1554,7 +1554,7 @@ export default function MiniApp({
   }, [darkTheme]);
 
   return (
-    <div className={`mega-shell min-h-screen text-slate-950 ${darkTheme ? 'bg-[#07111f]' : 'bg-[#eef3fb]'}`}>
+    <div className="mega-shell min-h-screen text-slate-950">
       <header className="mega-header sticky top-0 z-30 overflow-hidden text-white">
         <div className="relative px-4 pb-3 pt-[calc(env(safe-area-inset-top)+10px)]">
           <div className="flex items-center justify-between gap-3">
