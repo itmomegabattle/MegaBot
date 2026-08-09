@@ -26,6 +26,7 @@ uniform vec3 uBackgroundTop;
 uniform vec3 uBackgroundBottom;
 uniform vec3 uLineColor;
 uniform vec3 uPulseColor;
+uniform float uLightTheme;
 
 out vec4 fragColor;
 
@@ -214,10 +215,22 @@ void accumulateThread(
   float hoverY = (y - uMouse.y) / 0.115;
   float hoverSegment = exp(-(hoverX * hoverX + hoverY * hoverY)) * uMouseActive;
 
-  color += uLineColor * (core * quietLight + halo * 0.075);
-  color += mix(uLineColor, uPulseColor, 0.84) * core * pulse * 1.55;
-  color += uPulseColor * halo * pulse * 0.13;
-  color += mix(uLineColor, uPulseColor, 0.92) * core * hoverSegment * 1.55;
+  vec3 darkColor = color;
+  darkColor += uLineColor * (core * quietLight + halo * 0.075);
+  darkColor += mix(uLineColor, uPulseColor, 0.84) * core * pulse * 1.55;
+  darkColor += uPulseColor * halo * pulse * 0.13;
+  darkColor += mix(uLineColor, uPulseColor, 0.92) * core * hoverSegment * 1.55;
+
+  float lightThread = saturate(core * (0.42 + quietLight * 0.1) + halo * 0.024);
+  float lightAccent = saturate(
+    core * pulse * 0.76
+    + halo * pulse * 0.05
+    + core * hoverSegment * 0.68
+  );
+  vec3 lightColor = mix(color, uLineColor, lightThread);
+  lightColor = mix(lightColor, uPulseColor, lightAccent);
+
+  color = mix(darkColor, lightColor, uLightTheme);
 }
 
 void main() {
@@ -285,10 +298,10 @@ const DARK_PALETTE = {
 };
 
 const LIGHT_PALETTE = {
-  backgroundTop: [0.925, 0.945, 0.975],
-  backgroundBottom: [0.855, 0.895, 0.955],
-  line: [0.0, 0.22, 0.55],
-  pulse: [0.0, 0.36, 0.9],
+  backgroundTop: [0.965, 0.976, 0.989],
+  backgroundBottom: [0.895, 0.925, 0.965],
+  line: [0.0, 0.255, 0.62],
+  pulse: [0.0, 0.412, 0.878],
 };
 
 function setVector(target, values) {
@@ -352,6 +365,7 @@ export default function Background() {
           uBackgroundBottom: { value: new Float32Array(3) },
           uLineColor: { value: new Float32Array(3) },
           uPulseColor: { value: new Float32Array(3) },
+          uLightTheme: { value: 0 },
         },
       });
       const mesh = new Mesh(gl, { geometry, program });
@@ -370,11 +384,13 @@ export default function Background() {
       const reducedMotionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
 
       const applyTheme = () => {
-        const palette = isLightTheme() ? LIGHT_PALETTE : DARK_PALETTE;
+        const lightTheme = isLightTheme();
+        const palette = lightTheme ? LIGHT_PALETTE : DARK_PALETTE;
         setVector(program.uniforms.uBackgroundTop.value, palette.backgroundTop);
         setVector(program.uniforms.uBackgroundBottom.value, palette.backgroundBottom);
         setVector(program.uniforms.uLineColor.value, palette.line);
         setVector(program.uniforms.uPulseColor.value, palette.pulse);
+        program.uniforms.uLightTheme.value = lightTheme ? 1 : 0;
       };
 
       const render = (time) => {
