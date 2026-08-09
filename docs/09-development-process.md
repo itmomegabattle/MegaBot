@@ -134,4 +134,4 @@
 - Date input выходит за экран: проверять 320 px, `min-inline-size: 0`, `inline-size: 100%`, border-box и WebKit value.
 - Изменение глобальной модели задачи без миграции: сначала поле режима и backfill, затем UI и API.
 - Успешный build не равен успешному релизу: обязательны `lint`, `verify:avatar`, `verify:core`, production build, health, PM2 logs и серверные Sheets-проверки.
-- Изолированный core-тест не должен наследовать production backend: явно ставить `GOOGLE_SHEETS_DATABASE_ENABLED=false`, иначе он попытается загрузить тестовую базу из рабочих Google Sheets.
+- Изолированный core-тест не должен наследовать production backend: явно отключать Sheets database и очищать IDs/credentials Sheets и Calendar, иначе тест затронет рабочие интеграции или получит внешний 5xx.
