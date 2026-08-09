@@ -87,27 +87,9 @@ textarea:focus-visible {
 
 .mega-gate {
   position: relative;
-  isolation: isolate;
   overflow: hidden;
-  background:
-    linear-gradient(180deg, rgba(0, 105, 224, 0.14), transparent 42%),
-    var(--mega-black);
+  background: linear-gradient(160deg, var(--mega-black) 0%, var(--mega-ink) 100%);
   color: var(--mega-white);
-}
-
-.mega-gate::before {
-  position: absolute;
-  z-index: -1;
-  inset: 0;
-  content: "";
-  background:
-    repeating-radial-gradient(ellipse 92% 30% at 110% 8%, transparent 0 28px, rgba(0, 105, 224, 0.58) 29px 31px, transparent 32px 46px),
-    repeating-radial-gradient(ellipse 84% 26% at -14% 68%, transparent 0 34px, rgba(38, 133, 187, 0.34) 35px 37px, transparent 38px 54px);
-  background-position: 0 0, 0 180px;
-  background-repeat: repeat-y;
-  background-size: 100% 620px, 100% 760px;
-  opacity: 0.86;
-  pointer-events: none;
 }
 
 .mega-gate-card {
@@ -140,54 +122,18 @@ textarea:focus-visible {
 
 .mega-shell {
   position: relative;
-  isolation: isolate;
   min-height: 100svh;
   font-family: "Raleway", "Segoe UI", sans-serif;
   background:
-    linear-gradient(180deg, rgba(0, 105, 224, 0.09), transparent 220px),
+    linear-gradient(180deg, rgba(0, 105, 224, 0.07) 0, transparent 280px),
     var(--mega-canvas);
   color: var(--mega-ink);
 }
 
-.mega-shell::before {
-  position: fixed;
-  z-index: -1;
-  inset: 72px 0 0;
-  content: "";
-  background:
-    radial-gradient(circle at 12% 24%, rgba(0, 105, 224, 0.65) 0 2px, transparent 3px),
-    radial-gradient(circle at 82% 18%, rgba(38, 133, 187, 0.68) 0 2px, transparent 3px),
-    radial-gradient(circle at 68% 54%, rgba(0, 105, 224, 0.44) 0 1.5px, transparent 2.5px),
-    repeating-radial-gradient(ellipse 92% 30% at 110% 8%, transparent 0 28px, rgba(0, 105, 224, 0.16) 29px 31px, transparent 32px 46px),
-    repeating-radial-gradient(ellipse 84% 26% at -14% 68%, transparent 0 34px, rgba(38, 133, 187, 0.11) 35px 37px, transparent 38px 54px);
-  background-position: 0 0, 0 0, 0 0, 0 0, 0 220px;
-  background-repeat: no-repeat, no-repeat, no-repeat, repeat-y, repeat-y;
-  background-size: auto, auto, auto, 100% 620px, 100% 760px;
-  opacity: 0.82;
-  pointer-events: none;
-}
-
 .mega-header {
   border-bottom: 1px solid rgba(255, 255, 255, 0.16);
-  background:
-    radial-gradient(ellipse at 58% -120%, rgba(255, 255, 255, 0.32), transparent 55%),
-    linear-gradient(105deg, #0058bd 0 55%, #eaf2fb 78%, #ffffff 100%);
+  background: linear-gradient(105deg, #0058bd 0%, #0069e0 52%, #eaf2fb 82%, #ffffff 100%);
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.24);
-}
-
-.mega-header::before {
-  position: absolute;
-  top: -20px;
-  right: 36%;
-  width: 72px;
-  height: 72px;
-  content: "";
-  background: rgba(255, 255, 255, 0.24);
-  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cpath fill='black' d='M50 2C54 24 58 30 73 12C67 34 69 37 91 27C75 42 75 46 98 50C75 54 75 58 91 73C69 63 67 66 73 88C58 70 54 76 50 98C46 76 42 70 27 88C33 66 31 63 9 73C25 58 25 54 2 50C25 46 25 42 9 27C31 37 33 34 27 12C42 30 46 24 50 2Z'/%3E%3C/svg%3E") center / contain no-repeat;
-  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cpath fill='black' d='M50 2C54 24 58 30 73 12C67 34 69 37 91 27C75 42 75 46 98 50C75 54 75 58 91 73C69 63 67 66 73 88C58 70 54 76 50 98C46 76 42 70 27 88C33 66 31 63 9 73C25 58 25 54 2 50C25 46 25 42 9 27C31 37 33 34 27 12C42 30 46 24 50 2Z'/%3E%3C/svg%3E") center / contain no-repeat;
-  opacity: 0.92;
-  transform: rotate(9deg);
-  pointer-events: none;
 }
 
 .mega-header .mega-header-actions button {
@@ -523,28 +469,12 @@ html.dark-theme .bg-\[\#f4f7ff\] {
 
 html.dark-theme .mega-shell {
   background:
-    linear-gradient(180deg, rgba(0, 105, 224, 0.2), transparent 240px),
+    linear-gradient(180deg, rgba(0, 105, 224, 0.13) 0, transparent 280px),
     var(--mega-canvas);
 }
 
-html.dark-theme .mega-shell::before {
-  background:
-    radial-gradient(circle at 12% 24%, rgba(101, 170, 255, 0.9) 0 2px, transparent 3px),
-    radial-gradient(circle at 82% 18%, rgba(38, 133, 187, 0.95) 0 2px, transparent 3px),
-    radial-gradient(circle at 68% 54%, rgba(255, 255, 255, 0.46) 0 1px, transparent 2px),
-    repeating-radial-gradient(ellipse 92% 30% at 110% 8%, transparent 0 28px, rgba(101, 170, 255, 0.22) 29px 31px, transparent 32px 46px),
-    repeating-radial-gradient(ellipse 84% 26% at -14% 68%, transparent 0 34px, rgba(38, 133, 187, 0.16) 35px 37px, transparent 38px 54px);
-  opacity: 0.88;
-}
-
 html.dark-theme .mega-header {
-  background:
-    radial-gradient(ellipse at 72% -110%, rgba(0, 105, 224, 0.9), transparent 58%),
-    linear-gradient(105deg, #05070a 0 66%, #07172a 100%);
-}
-
-html.dark-theme .mega-header::before {
-  background: rgba(255, 255, 255, 0.2);
+  background: linear-gradient(105deg, var(--mega-canvas) 0%, var(--mega-surface-soft) 100%);
 }
 
 html.dark-theme .mega-header .mega-header-actions button {
