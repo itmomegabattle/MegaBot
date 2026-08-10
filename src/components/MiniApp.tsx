@@ -258,6 +258,7 @@ export default function MiniApp({
   onRefreshState,
 }: MiniAppProps) {
   const [slots, setSlots] = useState<Record<number, number[]>>({});
+  const [hardUnavailableDays, setHardUnavailableDays] = useState<number[]>([]);
   const [visibleWeeks, setVisibleWeeks] = useState(2);
   const [savingWeekCount, setSavingWeekCount] = useState(false);
   const [slotSettingsWeeks, setSlotSettingsWeeks] = useState(2);
@@ -506,7 +507,7 @@ export default function MiniApp({
     hours: (profileAvailability[dayIndex] || []).length,
   })).sort((a, b) => b.hours - a.hours)[0];
   const profileUnavailableDays = new Set(alignedUnavailableDays(state.availabilities[currentUser.id]).filter((day) => day < 7));
-  const profileSlotsCompleted = activeDays.some((dayIndex) => (
+  const profileSlotsCompleted = activeDays.every((dayIndex) => (
     (profileAvailability[dayIndex] || []).length > 0 || profileUnavailableDays.has(dayIndex)
   ));
   const profileAge = ageFromBirthday(currentUser.birthday);
@@ -568,7 +569,7 @@ export default function MiniApp({
             daySlots: alignedSlots(state.availabilities[user.id])?.[dayIndex] || [],
           }))
           .filter((user) => user.daySlots.length > 0),
-        unavailableUsers: coreTeamUsers.filter((user) => (alignedSlots(state.availabilities[user.id])?.[dayIndex] || []).length === 0),
+        unavailableUsers: coreTeamUsers.filter((user) => alignedUnavailableDays(state.availabilities[user.id]).includes(dayIndex)),
         count: coreTeamUsers.filter((user) => {
           const daySlots = alignedSlots(state.availabilities[user.id])?.[dayIndex] || [];
           return daySlots.length > 0;
@@ -609,6 +610,7 @@ export default function MiniApp({
       .sort((a, b) => b - a)[0];
     setVisibleWeeks(Math.min(maxSlotWeeks, Math.max(configuredWeekCount, lastFilledDay === undefined ? configuredWeekCount : Math.floor(lastFilledDay / 7) + 1)));
     setSlots(nextSlots);
+    setHardUnavailableDays(alignedUnavailableDays(availability));
   }, [configuredWeekCount, currentUser.id, state.availabilities]);
 
   useEffect(() => {
@@ -653,6 +655,7 @@ export default function MiniApp({
     const weekIndex = Math.floor(day / 7);
     setSavedWeekIndexes((current) => current.filter((item) => item !== weekIndex));
     setDirtyWeekIndexes((current) => current.includes(weekIndex) ? current : [...current, weekIndex]);
+    setHardUnavailableDays((current) => current.filter((item) => item !== day));
     setSlots((prev) => {
       const daySlots = prev[day] || [];
       const nextDay = daySlots.includes(hour)
@@ -667,10 +670,23 @@ export default function MiniApp({
     const weekIndex = Math.floor(day / 7);
     setSavedWeekIndexes((current) => current.filter((item) => item !== weekIndex));
     setDirtyWeekIndexes((current) => current.includes(weekIndex) ? current : [...current, weekIndex]);
+    setHardUnavailableDays((current) => current.filter((item) => item !== day));
     setSlots((prev) => {
       const full = (prev[day] || []).length === hours.length;
       return { ...prev, [day]: full ? [] : [...hours] };
     });
+  };
+
+  const toggleUnavailableDay = (day: number) => {
+    setSlotError('');
+    const weekIndex = Math.floor(day / 7);
+    const unavailable = hardUnavailableDays.includes(day);
+    setSavedWeekIndexes((current) => current.filter((item) => item !== weekIndex));
+    setDirtyWeekIndexes((current) => current.includes(weekIndex) ? current : [...current, weekIndex]);
+    setHardUnavailableDays((current) => unavailable
+      ? current.filter((item) => item !== day)
+      : [...current.filter((item) => item !== day), day].sort((a, b) => a - b));
+    if (!unavailable) setSlots((current) => ({ ...current, [day]: [] }));
   };
 
   const nextDateForDay = (dayIndex: number) => {
@@ -723,7 +739,7 @@ export default function MiniApp({
   const saveWeek = async (weekIndex: number) => {
     setSlotError('');
     setSavingWeekIndex(weekIndex);
-    const ok = await onSaveAvailability(slots, currentWeekStart(), []);
+    const ok = await onSaveAvailability(slots, currentWeekStart(), hardUnavailableDays);
     setSavingWeekIndex(null);
     if (ok) {
       setSavedWeekIndexes((current) => current.includes(weekIndex) ? current : [...current, weekIndex]);
@@ -1747,7 +1763,7 @@ export default function MiniApp({
               </div>
               {!profileSlotsCompleted && (
                 <p className="mt-4 rounded-2xl bg-blue-50 px-3 py-2 text-sm font-bold text-[#005BC4]">
-                  Отметь хотя бы один свободный слот и сохрани неделю.
+                  Для каждого рабочего дня выбери свободные часы или нажми «Не смогу», затем сохрани неделю.
                 </p>
               )}
             </div>
@@ -2018,21 +2034,32 @@ export default function MiniApp({
                   {activeDayLabels.map((day) => {
                     const absoluteDayIndex = weekIndex * 7 + day.dayIndex;
                     const selected = slots[absoluteDayIndex] || [];
+                    const unavailable = hardUnavailableDays.includes(absoluteDayIndex);
                     const date = dateForSlotDay(absoluteDayIndex);
                     return (
                       <div key={`${weekIndex}-${day.full}`} className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
-                        <div className="mb-3 grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
-                          <div className="min-w-0">
-                            <h2 className="whitespace-nowrap text-sm font-black leading-tight sm:text-base"><span className="sm:hidden">{day.short},</span><span className="hidden sm:inline">{day.full},</span> {formatDayMonth(date)}</h2>
-                            <p className="text-xs text-slate-500">
-                              {selected.length ? `${selected.length} ч. свободно` : 'Пока ничего не выбрано'}
-                            </p>
-                          </div>
-                          <div className="min-w-0">
-                            <button onClick={() => selectWholeDay(absoluteDayIndex)} className={`${secondaryButtonClass} min-h-11 whitespace-nowrap px-2.5`}>
-                              {selected.length === hours.length ? 'Снять' : 'Весь день'}
-                            </button>
-                          </div>
+                        <div className="mb-3 min-w-0">
+                          <h2 className="whitespace-nowrap text-sm font-black leading-tight sm:text-base"><span className="sm:hidden">{day.short},</span><span className="hidden sm:inline">{day.full},</span> {formatDayMonth(date)}</h2>
+                          <p className="text-xs text-slate-500">
+                            {unavailable ? 'Отмечено: не смогу' : selected.length ? `${selected.length} ч. свободно` : 'День ещё не отмечен'}
+                          </p>
+                        </div>
+                        <div className="mb-3 grid grid-cols-2 gap-2">
+                          <button onClick={() => selectWholeDay(absoluteDayIndex)} className={`${secondaryButtonClass} min-h-11 min-w-0 px-2.5`}>
+                            {selected.length === hours.length ? 'Снять часы' : 'Весь день'}
+                          </button>
+                          <button
+                            type="button"
+                            aria-pressed={unavailable}
+                            onClick={() => toggleUnavailableDay(absoluteDayIndex)}
+                            className={`min-h-11 min-w-0 rounded-2xl border px-2.5 text-sm font-black ${pressClass} ${
+                              unavailable
+                                ? 'border-slate-800 bg-slate-800 text-white hover:bg-slate-700 active:bg-slate-950'
+                                : 'border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100 active:bg-slate-100'
+                            }`}
+                          >
+                            {unavailable ? '✓ Не смогу' : 'Не смогу'}
+                          </button>
                         </div>
                         <div className="grid gap-2" style={{ gridTemplateColumns: `repeat(${Math.max(1, Math.ceil(hours.length / 2))}, minmax(0, 1fr))` }}>
                           {hours.map((hour) => {

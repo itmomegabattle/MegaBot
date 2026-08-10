@@ -566,7 +566,7 @@ function hasSubmittedAvailabilityForWeek(availability: Availability | undefined,
   const slots = alignedAvailabilitySlots(availability);
   const unavailableDays = new Set(alignedHardUnavailableDays(availability));
   const firstDay = weekIndex * 7;
-  return normalizeAvailabilityConfig(settings).activeDays.map((dayOffset) => firstDay + dayOffset).some((dayIndex) => (
+  return normalizeAvailabilityConfig(settings).activeDays.map((dayOffset) => firstDay + dayOffset).every((dayIndex) => (
     (slots[dayIndex] || []).length > 0 || unavailableDays.has(dayIndex)
   ));
 }
@@ -908,7 +908,8 @@ async function startServer() {
     userId: string;
     weekStart: string;
     slots: Record<number, number[]>;
-    dayBaseline?: { dayIndex: number; hours: number[] };
+    hardUnavailableDays?: number[];
+    dayBaseline?: { dayIndex: number; hours: number[]; unavailable: boolean };
   };
   type StoredChatUiState = {
     version: 2;
@@ -1058,7 +1059,9 @@ async function startServer() {
       ...Object.fromEntries(Object.entries(previous?.slots || {}).filter(([day]) => Number(day) >= 7)),
       ...Object.fromEntries(Object.entries(imported.slots || {}).filter(([day]) => Number(day) >= 0 && Number(day) < 7)),
     },
-    hardUnavailableDays: previous?.hardUnavailableDays || [],
+    hardUnavailableDays: (previous?.hardUnavailableDays || []).filter((day) => (
+      Number(day) >= 7 || !(imported.slots?.[Number(day)] || []).length
+    )),
   });
   const reconcileAvailabilityFromPrimarySheet = async (maxAgeMs = 0) => {
     const now = Date.now();
@@ -1903,6 +1906,17 @@ async function startServer() {
     return filterSlotsByAvailabilityConfig(source, state.settings);
   }
 
+  function cloneValidUnavailableDays(state: SimulationState, source: number[] = [], slots: Record<number, number[]> = {}) {
+    const activeDays = new Set(normalizeAvailabilityConfig(state.settings).activeDays);
+    return [...new Set(source.map(Number).filter((day) => (
+      Number.isInteger(day)
+      && day >= 0
+      && day < 35
+      && activeDays.has(day % 7)
+      && (slots[day] || []).length === 0
+    )))].sort((a, b) => a - b);
+  }
+
   function currentSlotDraft(chatKey: string, user: User, state: SimulationState) {
     const savedDraft = chatSlotDrafts.get(chatKey);
     if (savedDraft?.userId === user.id && savedDraft.weekStart === currentWeekStartIso()) {
@@ -1911,24 +1925,61 @@ async function startServer() {
     return cloneValidSlotSelection(state, alignedAvailabilitySlots(state.availabilities[user.id]));
   }
 
-  function storeSlotDraft(chatKey: string, user: User, state: SimulationState, slots: Record<number, number[]>, slotDay?: number) {
+  function currentSlotUnavailableDays(chatKey: string, user: User, state: SimulationState, slots = currentSlotDraft(chatKey, user, state)) {
+    const savedDraft = chatSlotDrafts.get(chatKey);
+    const source = savedDraft?.userId === user.id && savedDraft.weekStart === currentWeekStartIso()
+      ? savedDraft.hardUnavailableDays ?? alignedHardUnavailableDays(state.availabilities[user.id])
+      : alignedHardUnavailableDays(state.availabilities[user.id]);
+    return cloneValidUnavailableDays(state, source, slots);
+  }
+
+  function storeSlotDraft(
+    chatKey: string,
+    user: User,
+    state: SimulationState,
+    slots: Record<number, number[]>,
+    slotDay?: number,
+    hardUnavailableDays?: number[],
+  ) {
     const safeSlots = cloneValidSlotSelection(state, slots);
+    const safeUnavailableDays = cloneValidUnavailableDays(
+      state,
+      hardUnavailableDays ?? currentSlotUnavailableDays(chatKey, user, state, safeSlots),
+      safeSlots,
+    );
     const previousDraft = chatSlotDrafts.get(chatKey);
     const dayBaseline = slotDay === undefined
       ? undefined
       : previousDraft?.dayBaseline?.dayIndex === slotDay
         ? previousDraft.dayBaseline
-        : { dayIndex: slotDay, hours: [...(safeSlots[slotDay] || [])] };
+        : {
+            dayIndex: slotDay,
+            hours: [...(safeSlots[slotDay] || [])],
+            unavailable: safeUnavailableDays.includes(slotDay),
+          };
     chatSessions.set(chatKey, { flow: 'slots_edit', slotDay, pendingSlots: safeSlots });
-    chatSlotDrafts.set(chatKey, { userId: user.id, weekStart: currentWeekStartIso(), slots: safeSlots, dayBaseline });
+    chatSlotDrafts.set(chatKey, {
+      userId: user.id,
+      weekStart: currentWeekStartIso(),
+      slots: safeSlots,
+      hardUnavailableDays: safeUnavailableDays,
+      dayBaseline,
+    });
     persistChatPanelMessageIds();
     return safeSlots;
   }
 
-  function slotDayPanel(user: User, state: SimulationState, dayIndex: number, pendingSlots: Record<number, number[]>) {
+  function slotDayPanel(
+    user: User,
+    state: SimulationState,
+    dayIndex: number,
+    pendingSlots: Record<number, number[]>,
+    hardUnavailableDays: number[],
+  ) {
     const dayNames = ['Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота', 'Воскресенье'];
     const { hours } = normalizeAvailabilityConfig(state.settings);
     const selected = pendingSlots[dayIndex] || [];
+    const unavailable = hardUnavailableDays.includes(dayIndex);
     const keyboard = hours.reduce<{ text: string; callback_data: string }[][]>((rows, hour, index) => {
       if (index % 2 === 0) rows.push([]);
       rows[rows.length - 1].push({
@@ -1941,13 +1992,17 @@ async function startServer() {
       text: selected.length === hours.length ? 'Снять весь день' : 'Выбрать весь день',
       callback_data: `slot_toggle_day:${dayIndex}`,
     }]);
+    keyboard.push([{
+      text: unavailable ? '✓ Не смогу' : 'Не смогу',
+      callback_data: `slot_unavailable:${dayIndex}`,
+    }]);
     keyboard.push([
       { text: 'Сохранить', callback_data: 'slot_save' },
       { text: 'Отменить', callback_data: `slot_cancel_day:${dayIndex}` },
     ]);
     keyboard.push([{ text: 'К дням', callback_data: 'nav_slots' }]);
     return {
-      text: `${slotsSummaryText(user, state, pendingSlots)}\n\n*${dayNames[dayIndex]}:* выбери свободные часы.`,
+      text: `${slotsSummaryText(user, state, pendingSlots)}\n\n*${dayNames[dayIndex]}:* ${unavailable ? 'отмечено «Не смогу».' : 'выбери свободные часы или нажми «Не смогу».'}`,
       keyboard,
     };
   }
@@ -1966,12 +2021,15 @@ async function startServer() {
     const availability = cloneValidSlotSelection(state, overrideSlots
       || (savedDraft?.userId === user.id && savedDraft.weekStart === currentWeekStartIso() ? savedDraft.slots : undefined)
       || alignedAvailabilitySlots(state.availabilities[user.id]));
-    storeSlotDraft(chatKey, user, state, availability);
+    const hardUnavailableDays = currentSlotUnavailableDays(chatKey, user, state, availability);
+    storeSlotDraft(chatKey, user, state, availability, undefined, hardUnavailableDays);
     const wholeWeekSelected = activeDays.every((dayIndex) => (
       (availability[dayIndex] || []).length === hours.length
     ));
     const dayButtons = activeDays.map((dayIndex) => ({
-      text: `${dayNames[dayIndex]} · ${(availability[dayIndex] || []).length}/${hours.length}`,
+      text: hardUnavailableDays.includes(dayIndex)
+        ? `${dayNames[dayIndex]} · не смогу`
+        : `${dayNames[dayIndex]} · ${(availability[dayIndex] || []).length}/${hours.length}`,
       callback_data: `slots_day:${dayIndex}`,
     }));
     const keyboard = [
@@ -2351,6 +2409,7 @@ async function startServer() {
         || action.startsWith('slots_day:')
         || action.startsWith('slot_toggle:')
         || action.startsWith('slot_toggle_day:')
+        || action.startsWith('slot_unavailable:')
         || action.startsWith('slot_cancel_day:')
         || action === 'slot_toggle_week';
       if (isSlotPanelAction && currentPanelId && callbackMessageId !== currentPanelId) {
@@ -2387,7 +2446,7 @@ async function startServer() {
         }
         const chatKey = String(chatId);
         const pendingSlots = storeSlotDraft(chatKey, user, state, currentSlotDraft(chatKey, user, state), dayIndex);
-        const panel = slotDayPanel(user, state, dayIndex, pendingSlots);
+        const panel = slotDayPanel(user, state, dayIndex, pendingSlots, currentSlotUnavailableDays(chatKey, user, state, pendingSlots));
         await answerCallback(callback.id);
         await updateInlinePanel(chatId, callbackMessageId, panel.text, panel.keyboard);
         return res.json({ ok: true });
@@ -2404,12 +2463,13 @@ async function startServer() {
         }
         const chatKey = String(chatId);
         const pendingSlots = currentSlotDraft(chatKey, user, state);
+        const hardUnavailableDays = currentSlotUnavailableDays(chatKey, user, state, pendingSlots).filter((day) => day !== dayIndex);
         const selected = new Set(pendingSlots[dayIndex] || []);
         if (selected.has(hour)) selected.delete(hour);
         else selected.add(hour);
         pendingSlots[dayIndex] = [...selected].sort((a, b) => a - b);
-        storeSlotDraft(chatKey, user, state, pendingSlots, dayIndex);
-        const panel = slotDayPanel(user, state, dayIndex, pendingSlots);
+        storeSlotDraft(chatKey, user, state, pendingSlots, dayIndex, hardUnavailableDays);
+        const panel = slotDayPanel(user, state, dayIndex, pendingSlots, hardUnavailableDays);
         await answerCallback(callback.id, selected.has(hour) ? `${hour}:00 добавлено` : `${hour}:00 снято`);
         await updateInlinePanel(chatId, callbackMessageId, panel.text, panel.keyboard);
         return res.json({ ok: true });
@@ -2424,12 +2484,35 @@ async function startServer() {
         }
         const chatKey = String(chatId);
         const pendingSlots = currentSlotDraft(chatKey, user, state);
+        const hardUnavailableDays = currentSlotUnavailableDays(chatKey, user, state, pendingSlots).filter((day) => day !== dayIndex);
         const fullDay = [...hours];
         const wasFull = (pendingSlots[dayIndex] || []).length === fullDay.length;
         pendingSlots[dayIndex] = wasFull ? [] : fullDay;
-        storeSlotDraft(chatKey, user, state, pendingSlots, dayIndex);
-        const panel = slotDayPanel(user, state, dayIndex, pendingSlots);
+        storeSlotDraft(chatKey, user, state, pendingSlots, dayIndex, hardUnavailableDays);
+        const panel = slotDayPanel(user, state, dayIndex, pendingSlots, hardUnavailableDays);
         await answerCallback(callback.id, wasFull ? 'День очищен' : 'Выбран весь день');
+        await updateInlinePanel(chatId, callbackMessageId, panel.text, panel.keyboard);
+        return res.json({ ok: true });
+      }
+
+      if (action.startsWith('slot_unavailable:')) {
+        const dayIndex = Number(action.split(':')[1]);
+        const { activeDays } = normalizeAvailabilityConfig(state.settings);
+        if (!Number.isInteger(dayIndex) || !activeDays.includes(dayIndex)) {
+          await answerCallback(callback.id, 'Неизвестный день');
+          return res.json({ ok: true });
+        }
+        const chatKey = String(chatId);
+        const pendingSlots = currentSlotDraft(chatKey, user, state);
+        const hardUnavailableDays = currentSlotUnavailableDays(chatKey, user, state, pendingSlots);
+        const wasUnavailable = hardUnavailableDays.includes(dayIndex);
+        const nextUnavailableDays = wasUnavailable
+          ? hardUnavailableDays.filter((day) => day !== dayIndex)
+          : [...hardUnavailableDays.filter((day) => day !== dayIndex), dayIndex].sort((a, b) => a - b);
+        if (!wasUnavailable) delete pendingSlots[dayIndex];
+        storeSlotDraft(chatKey, user, state, pendingSlots, dayIndex, nextUnavailableDays);
+        const panel = slotDayPanel(user, state, dayIndex, pendingSlots, nextUnavailableDays);
+        await answerCallback(callback.id, wasUnavailable ? 'Отметка снята' : 'Отмечено: не смогу');
         await updateInlinePanel(chatId, callbackMessageId, panel.text, panel.keyboard);
         return res.json({ ok: true });
       }
@@ -2443,9 +2526,12 @@ async function startServer() {
           return res.json({ ok: true });
         }
         const pendingSlots = currentSlotDraft(chatKey, user, state);
+        const hardUnavailableDays = currentSlotUnavailableDays(chatKey, user, state, pendingSlots)
+          .filter((day) => day !== dayIndex);
         pendingSlots[dayIndex] = [...draft.dayBaseline.hours];
         if (pendingSlots[dayIndex].length === 0) delete pendingSlots[dayIndex];
-        storeSlotDraft(chatKey, user, state, pendingSlots);
+        if (draft.dayBaseline.unavailable) hardUnavailableDays.push(dayIndex);
+        storeSlotDraft(chatKey, user, state, pendingSlots, undefined, hardUnavailableDays);
         await answerCallback(callback.id, 'Изменения за день отменены');
         await showSlotsPanel(chatId, user, state, pendingSlots, callbackMessageId);
         return res.json({ ok: true });
@@ -2454,13 +2540,15 @@ async function startServer() {
       if (action === 'slot_toggle_week') {
         const chatKey = String(chatId);
         const pendingSlots = currentSlotDraft(chatKey, user, state);
+        const hardUnavailableDays = currentSlotUnavailableDays(chatKey, user, state, pendingSlots)
+          .filter((day) => day >= 7);
         const { activeDays, hours } = normalizeAvailabilityConfig(state.settings);
         const wasFull = activeDays.every((dayIndex) => (pendingSlots[dayIndex] || []).length === hours.length);
         for (let dayIndex = 0; dayIndex < 7; dayIndex += 1) delete pendingSlots[dayIndex];
         for (const dayIndex of activeDays) {
           if (!wasFull) pendingSlots[dayIndex] = [...hours];
         }
-        storeSlotDraft(chatKey, user, state, pendingSlots);
+        storeSlotDraft(chatKey, user, state, pendingSlots, undefined, hardUnavailableDays);
         await answerCallback(callback.id, wasFull ? 'Все слоты сняты' : 'Выбраны все слоты недели');
         await showSlotsPanel(chatId, user, state, pendingSlots, callbackMessageId);
         return res.json({ ok: true });
@@ -2469,10 +2557,11 @@ async function startServer() {
       if (action === 'slot_save') {
         const chatKey = String(chatId);
         const pendingSlots = currentSlotDraft(chatKey, user, state);
+        const hardUnavailableDays = currentSlotUnavailableDays(chatKey, user, state, pendingSlots);
         state.availabilities[user.id] = {
           userId: user.id,
           slots: pendingSlots,
-          hardUnavailableDays: state.availabilities[user.id]?.hardUnavailableDays || [],
+          hardUnavailableDays,
           weekStart: currentWeekStartIso(),
           updatedAt: new Date().toISOString(),
         };
@@ -4147,12 +4236,20 @@ async function startServer() {
     }
 
     const cleanSlots = filterSlotsByAvailabilityConfig(slots && typeof slots === 'object' ? slots : {}, state.settings);
+    const activeDays = new Set(normalizeAvailabilityConfig(state.settings).activeDays);
+    const cleanUnavailableDays = Array.isArray(hardUnavailableDays)
+      ? [...new Set(hardUnavailableDays.map(Number).filter((day) => (
+          Number.isInteger(day)
+          && day >= 0
+          && day < 35
+          && activeDays.has(day % 7)
+          && (cleanSlots[day] || []).length === 0
+        )))].sort((a, b) => a - b)
+      : [];
     state.availabilities[userId] = {
       userId,
       slots: cleanSlots,
-      hardUnavailableDays: Array.isArray(hardUnavailableDays)
-        ? [...new Set(hardUnavailableDays.map(Number).filter((day) => Number.isInteger(day) && day >= 0 && day < 35))]
-        : [],
+      hardUnavailableDays: cleanUnavailableDays,
       weekStart: String(weekStart || ''),
       updatedAt: new Date().toISOString()
     };

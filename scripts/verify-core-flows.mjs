@@ -519,6 +519,46 @@ try {
   const dayPanelEdit = telegramCalls.find((call) => call.path.endsWith('/editMessageText'));
   assert.equal(dayPanelEdit.body.message_id, slotsPanelId);
   assert.ok(dayPanelEdit.body.reply_markup.inline_keyboard.flat().some((button) => button.text === 'Выбрать весь день'));
+  assert.ok(dayPanelEdit.body.reply_markup.inline_keyboard.flat().some((button) => button.text === 'Не смогу' && button.callback_data === 'slot_unavailable:2'));
+
+  telegramCalls.length = 0;
+  await request('/api/telegram-webhook', {
+    update_id: 129,
+    callback_query: {
+      id: 'slots-unavailable',
+      from: aliceTelegram,
+      data: 'slot_unavailable:2',
+      message: { message_id: slotsPanelId, chat: { id: 200, type: 'private' } },
+    },
+  });
+  const unavailableDayEdit = telegramCalls.find((call) => call.path.endsWith('/editMessageText'));
+  assert.ok(unavailableDayEdit.body.reply_markup.inline_keyboard.flat().some((button) => button.text === '✓ Не смогу'));
+  const unavailableDraftState = JSON.parse(await readFile(`${testDatabasePath}.chat-panels.json`, 'utf8'));
+  assert.deepEqual(unavailableDraftState.slotDrafts['200'].hardUnavailableDays, [2]);
+
+  telegramCalls.length = 0;
+  await request('/api/telegram-webhook', {
+    update_id: 1291,
+    callback_query: {
+      id: 'slots-unavailable-cancel',
+      from: aliceTelegram,
+      data: 'slot_cancel_day:2',
+      message: { message_id: slotsPanelId, chat: { id: 200, type: 'private' } },
+    },
+  });
+  const cancelledUnavailableDraft = JSON.parse(await readFile(`${testDatabasePath}.chat-panels.json`, 'utf8'));
+  assert.deepEqual(cancelledUnavailableDraft.slotDrafts['200'].hardUnavailableDays, []);
+
+  telegramCalls.length = 0;
+  await request('/api/telegram-webhook', {
+    update_id: 1292,
+    callback_query: {
+      id: 'slots-day-after-unavailable-cancel',
+      from: aliceTelegram,
+      data: 'slots_day:2',
+      message: { message_id: slotsPanelId, chat: { id: 200, type: 'private' } },
+    },
+  });
 
   telegramCalls.length = 0;
   await request('/api/telegram-webhook', {
@@ -1210,8 +1250,32 @@ try {
   });
   const missingSlotsMessage = telegramCalls.find((call) => call.path.endsWith('/sendMessage'));
   assert.ok(missingSlotsMessage);
-  assert.ok(!String(missingSlotsMessage.body.text || '').includes('@alice'));
+  assert.ok(String(missingSlotsMessage.body.text || '').includes('@alice'));
   assert.ok(String(missingSlotsMessage.body.text || '').includes('@admin'));
+
+  const completedAvailability = await request('/api/availability', {
+    userId: 'u_alice',
+    weekStart: currentWeekStart(),
+    slots: { 2: [18] },
+    hardUnavailableDays: [0, 1, 2, 3, 4],
+  });
+  assert.equal(completedAvailability.response.status, 200);
+  assert.deepEqual(completedAvailability.data.availability.hardUnavailableDays, [0, 1, 3, 4]);
+
+  telegramCalls.length = 0;
+  await request('/api/telegram-webhook', {
+    update_id: 202,
+    message: {
+      message_id: 202,
+      chat: { id: -100500, type: 'supergroup' },
+      from: { id: 100, username: 'admin', first_name: 'Админ' },
+      text: '/slots',
+    },
+  });
+  const completedSlotsMessage = telegramCalls.find((call) => call.path.endsWith('/sendMessage'));
+  assert.ok(completedSlotsMessage);
+  assert.ok(!String(completedSlotsMessage.body.text || '').includes('@alice'));
+  assert.ok(String(completedSlotsMessage.body.text || '').includes('@admin'));
 
   telegramCalls.length = 0;
   await request('/api/telegram-webhook', {
