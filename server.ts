@@ -431,11 +431,8 @@ function taskDetailsText(task: Task, state: SimulationState) {
 
 function meetingDetailsText(meeting: Meeting, state: SimulationState) {
   const host = state.users.find((user) => user.id === meeting.hostId);
-  const attendeeNames = (meeting.attendeeIds || [])
-    .map((id) => state.users.find((user) => user.id === id)?.realName)
-    .filter(Boolean);
   const durationMinutes = Math.round(Number(meeting.duration || 1) * 60);
-  return `*${meeting.title}*\n\n*Дата:* ${formatShortDate(meeting.date)}\n*Время:* ${meeting.time}\n*Длительность:* ${taskDurationLabel(durationMinutes)}\n*Организатор:* ${userMention(host)}${meeting.competency ? `\n*Блок:* ${meeting.competency}` : ''}${meeting.topic ? `\n*Тема:* ${meeting.topic}` : ''}${meeting.description ? `\n*Описание:* ${meeting.description}` : ''}\n*Придут:* ${attendeeNames.length}${attendeeNames.length ? ` — ${attendeeNames.join(', ')}` : ''}`;
+  return `*${meeting.title}*\n\n*Дата:* ${formatShortDate(meeting.date)}\n*Время:* ${meeting.time}\n*Длительность:* ${taskDurationLabel(durationMinutes)}\n*Организатор:* ${userMention(host)}${meeting.competency ? `\n*Блок:* ${meeting.competency}` : ''}${meeting.topic ? `\n*Тема:* ${meeting.topic}` : ''}${meeting.description ? `\n*Описание:* ${meeting.description}` : ''}`;
 }
 
 function roleLabel(role: User['role']) {
@@ -1211,15 +1208,12 @@ async function startServer() {
         is_persistent: true,
       };
     }
-    const keyboard: any[] = [];
-
-    keyboard.push(
-      [{ text: 'Профиль' }, { text: 'Слоты' }],
-      [{ text: 'Встречи' }, { text: 'Задачи' }],
-    );
-    keyboard.push(user?.role === 'admin'
-      ? [{ text: 'МФ' }, { text: 'Помощь' }]
-      : [{ text: 'Помощь' }]);
+    const keyboard: any[] = [
+      [{ text: 'Профиль' }, { text: 'Слоты' }, { text: 'Встречи' }],
+      user?.role === 'admin'
+        ? [{ text: 'Задачи' }, { text: 'МФ' }, { text: 'Помощь' }]
+        : [{ text: 'Задачи' }, { text: 'Помощь' }],
+    ];
 
     return {
       keyboard,
@@ -1260,6 +1254,31 @@ async function startServer() {
       forgetChatPanelMessage(chatId, messageId);
     }));
     persistChatPanelMessageIds();
+  }
+
+  async function editTelegramReplyMarkup(chatId: string | number, messageId: number, inlineKeyboard: any[][]) {
+    const botToken = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
+    if (!botToken || !messageId) return false;
+    const tgApiBase = process.env.TELEGRAM_API_BASE || 'https://api.telegram.org';
+    try {
+      const response = await telegramFetch(`${tgApiBase}/bot${botToken}/editMessageReplyMarkup`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: chatId,
+          message_id: messageId,
+          reply_markup: { inline_keyboard: inlineKeyboard },
+        }),
+      });
+      if (response.ok) return true;
+      const errorBody = await response.text();
+      if (response.status === 400 && errorBody.toLowerCase().includes('message is not modified')) return true;
+      console.error('Telegram reply markup edit failed:', response.status, errorBody);
+      return false;
+    } catch (error) {
+      console.error('Telegram reply markup edit failed:', error);
+      return false;
+    }
   }
 
   async function editTelegramPanel(
@@ -1891,9 +1910,8 @@ async function startServer() {
     const rows = isFacultyUser(user)
       ? [['Профиль', 'Мои задачи'], ['Помощь']]
       : [
-          ['Профиль', 'Слоты'],
-          ['Встречи', 'Задачи'],
-          ...(user.role === 'admin' ? [['МФ', 'Помощь']] : [['Помощь']]),
+          ['Профиль', 'Слоты', 'Встречи'],
+          user.role === 'admin' ? ['Задачи', 'МФ', 'Помощь'] : ['Задачи', 'Помощь'],
         ];
     await sendTelegramKeyboard(chatId, profileSummaryText(user, state), rows, false, user);
   }
@@ -2713,6 +2731,13 @@ async function startServer() {
         const result = updateMeetingAttendance(meeting, user.id, true);
         saveDatabase(state);
         await answerCallback(callback.id, result.changed ? 'Отлично, записал: вы придёте' : 'Вы уже отметили, что придёте');
+        const currentKeyboard = callback.message?.reply_markup?.inline_keyboard;
+        if (Array.isArray(currentKeyboard) && callbackMessageId) {
+          const confirmedKeyboard = currentKeyboard.map((row: any[]) => row.map((button: any) => (
+            button.callback_data === action ? { ...button, text: '✓ Я приду' } : button
+          )));
+          await editTelegramReplyMarkup(chatId, callbackMessageId, confirmedKeyboard);
+        }
         return res.json({ ok: true });
       }
 

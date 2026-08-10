@@ -277,7 +277,7 @@ try {
     },
   });
   const adminMenuCall = telegramCalls.find((call) => call.path.endsWith('/sendMessage') && call.body.reply_markup?.keyboard);
-  assert.deepEqual(adminMenuCall.body.reply_markup.keyboard.map((row) => row.length), [2, 2, 2]);
+  assert.deepEqual(adminMenuCall.body.reply_markup.keyboard.map((row) => row.length), [3, 3]);
   assert.deepEqual(
     adminMenuCall.body.reply_markup.keyboard.flat().map((button) => button.text),
     ['Профиль', 'Слоты', 'Встречи', 'Задачи', 'МФ', 'Помощь'],
@@ -1145,6 +1145,33 @@ try {
   assert.equal(weekendMeeting.response.status, 400);
   assert.equal(telegramCalls.filter((call) => call.path.endsWith('/sendMessage')).length, 3);
   assert.ok(!telegramCalls.some((call) => call.body.chat_id === '400'));
+  assert.ok(!telegramCalls.some((call) => String(call.body.text || '').includes('Придут:')), 'meeting notifications must not embed the attendee list');
+
+  telegramCalls.length = 0;
+  const meetingRsvpAction = `meeting_rsvp:${meetingResult.data.meeting.id}`;
+  await request('/api/telegram-webhook', {
+    update_id: 110,
+    callback_query: {
+      id: 'meeting-rsvp-callback',
+      from: aliceTelegram,
+      data: meetingRsvpAction,
+      message: {
+        message_id: 777,
+        chat: { id: 200, type: 'private' },
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: 'Я приду', callback_data: meetingRsvpAction }],
+            [{ text: 'Открыть встречи', web_app: { url: 'https://example.com' } }],
+          ],
+        },
+      },
+    },
+  });
+  const rsvpMarkupUpdate = telegramCalls.find((call) => call.path.endsWith('/editMessageReplyMarkup'));
+  assert.ok(rsvpMarkupUpdate, 'meeting RSVP must update the pressed button');
+  assert.equal(rsvpMarkupUpdate.body.reply_markup.inline_keyboard[0][0].text, '✓ Я приду');
+  assert.equal(rsvpMarkupUpdate.body.reply_markup.inline_keyboard[1][0].web_app.url, 'https://example.com');
+  assert.ok(telegramCalls.some((call) => call.path.endsWith('/answerCallbackQuery') && String(call.body.text || '').length > 0));
 
   telegramCalls.length = 0;
   const declineMeeting = await request('/api/meeting/rsvp', {
