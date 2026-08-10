@@ -920,8 +920,47 @@ try {
   assert.equal(manualReminder.data.queued, 2);
   assert.ok(telegramCalls.filter((call) => call.path.endsWith('/sendMessage')).every((call) => call.body.disable_notification === true));
 
+  const completedCurrentWeekForBroadcast = await request('/api/availability', {
+    userId: 'u_alice',
+    weekStart: currentWeekStart(),
+    slots: { 0: [18], 1: [18], 2: [18], 3: [18], 4: [18] },
+    hardUnavailableDays: [],
+  });
+  assert.equal(completedCurrentWeekForBroadcast.response.status, 200);
+
   const sessionBeforeBroadcast = sessionCookie;
   sessionCookie = adminSessionCookie;
+
+  telegramCalls.length = 0;
+  const missingSlotsBroadcast = await request('/api/team/broadcast', {
+    requesterId: 'u_admin',
+    recipientMode: 'missing_slots',
+    availabilityWeekIndex: 0,
+    body: 'Пожалуйста, отметьте слоты на эту неделю',
+  });
+  assert.equal(missingSlotsBroadcast.response.status, 200);
+  assert.equal(missingSlotsBroadcast.data.recipients, 2);
+  assert.equal(missingSlotsBroadcast.data.availabilityWeekIndex, 0);
+  assert.deepEqual(
+    telegramCalls.filter((call) => call.path.endsWith('/sendMessage')).map((call) => String(call.body.chat_id)).sort(),
+    ['100', '300'],
+  );
+
+  telegramCalls.length = 0;
+  const missingNextWeekBroadcast = await request('/api/team/broadcast', {
+    requesterId: 'u_admin',
+    recipientMode: 'missing_slots',
+    availabilityWeekIndex: 1,
+    body: 'Пожалуйста, отметьте слоты на следующую неделю',
+  });
+  assert.equal(missingNextWeekBroadcast.response.status, 200);
+  assert.equal(missingNextWeekBroadcast.data.recipients, 3);
+  assert.equal(missingNextWeekBroadcast.data.availabilityWeekIndex, 1);
+  assert.deepEqual(
+    telegramCalls.filter((call) => call.path.endsWith('/sendMessage')).map((call) => String(call.body.chat_id)).sort(),
+    ['100', '200', '300'],
+  );
+
   telegramCalls.length = 0;
   const blockBroadcast = await request('/api/team/broadcast', {
     requesterId: 'u_admin',

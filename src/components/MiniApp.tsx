@@ -227,6 +227,20 @@ const alignedUnavailableDays = (availability?: { hardUnavailableDays?: number[];
     .filter((day) => Number.isFinite(day) && day >= 0 && day < maxSlotWeeks * 7);
 };
 
+const hasSubmittedAvailabilityWeek = (
+  availability: { slots?: Record<number, number[]>; hardUnavailableDays?: number[]; weekStart?: string } | undefined,
+  activeDays: number[],
+  weekIndex: number,
+) => {
+  if (!availability) return false;
+  const slots = alignedSlots(availability);
+  const unavailableDays = new Set(alignedUnavailableDays(availability));
+  const firstDay = weekIndex * 7;
+  return activeDays.every((dayOffset) => (
+    (slots[firstDay + dayOffset] || []).length > 0 || unavailableDays.has(firstDay + dayOffset)
+  ));
+};
+
 const meetingDateTime = (meeting: Pick<Meeting, 'date' | 'time'>) => {
   const normalized = formatDateShort(meeting.date);
   const dateMatch = normalized.match(/^(\d{2})\.(\d{2})(?:\.(\d{2}|\d{4}))?$/);
@@ -359,7 +373,8 @@ export default function MiniApp({
   const [showAllCompetencies, setShowAllCompetencies] = useState(false);
   const [teamError, setTeamError] = useState('');
   const [broadcastOpen, setBroadcastOpen] = useState(false);
-  const [broadcastMode, setBroadcastMode] = useState<'all' | 'blocks' | 'people'>('all');
+  const [broadcastMode, setBroadcastMode] = useState<'all' | 'blocks' | 'people' | 'missing_slots'>('all');
+  const [broadcastWeekIndex, setBroadcastWeekIndex] = useState(0);
   const [broadcastTitle, setBroadcastTitle] = useState('');
   const [broadcastBody, setBroadcastBody] = useState('');
   const [broadcastBlocks, setBroadcastBlocks] = useState<string[]>([]);
@@ -420,6 +435,9 @@ export default function MiniApp({
   const { activeDays, hours } = availabilityConfig;
   const activeDayLabels = activeDays.map((dayIndex) => ({ ...dayLabels[dayIndex], dayIndex }));
   const configuredWeekCount = Math.min(maxSlotWeeks, Math.max(2, Number(state.settings?.availabilityWeekCount || 2)));
+  useEffect(() => {
+    if (broadcastWeekIndex >= configuredWeekCount) setBroadcastWeekIndex(0);
+  }, [broadcastWeekIndex, configuredWeekCount]);
   const coreTeamUsers = state.users.filter((user) => user.role === 'admin' || user.role === 'organizer');
   const activeEvents = (state.events || [])
     .filter((item) => item.status === 'active')
@@ -446,6 +464,9 @@ export default function MiniApp({
   const matchedBroadcastUsers = normalizedBroadcastSearch
     ? coreTeamUsers.filter((user) => `${user.realName} ${user.username} ${(user.competencies || []).join(' ')}`.toLowerCase().includes(normalizedBroadcastSearch))
     : coreTeamUsers;
+  const missingSlotBroadcastUsers = coreTeamUsers.filter((user) => (
+    !hasSubmittedAvailabilityWeek(state.availabilities[user.id], activeDays, broadcastWeekIndex)
+  ));
   const filterTasksBySelectedEvent = (tasks: Task[]) => selectedTaskEventId ? tasks.filter((task) => task.eventId === selectedTaskEventId) : [];
   const votedUsers = useMemo(
     () => state.users.filter((user) => {
@@ -1108,7 +1129,7 @@ export default function MiniApp({
     window.setTimeout(() => setRefreshNotice(''), 2500);
   };
 
-  const setBroadcastRecipientMode = (mode: 'all' | 'blocks' | 'people') => {
+  const setBroadcastRecipientMode = (mode: 'all' | 'blocks' | 'people' | 'missing_slots') => {
     setBroadcastMode(mode);
     setBroadcastSearch('');
     setShowBroadcastBlocks(false);
@@ -1148,6 +1169,10 @@ export default function MiniApp({
       setTeamError('Выбери хотя бы одного получателя.');
       return;
     }
+    if (broadcastMode === 'missing_slots' && !missingSlotBroadcastUsers.length) {
+      setTeamError('Все участники уже отметили слоты на выбранную неделю.');
+      return;
+    }
     setBroadcastSaving(true);
     try {
       const response = await fetch('/api/team/broadcast', {
@@ -1156,6 +1181,7 @@ export default function MiniApp({
         body: JSON.stringify({
           requesterId: currentUser.id,
           recipientMode: broadcastMode,
+          availabilityWeekIndex: broadcastWeekIndex,
           competencies: broadcastBlocks,
           recipientIds: broadcastRecipients,
           title: broadcastTitle,
@@ -2637,14 +2663,45 @@ export default function MiniApp({
                 {broadcastOpen && (
                   <form onSubmit={submitBroadcast} className="mt-4 space-y-3">
                     <Field label="Получатели">
-                      <div className="grid grid-cols-2 gap-1.5 rounded-2xl bg-slate-100 p-1.5 min-[520px]:grid-cols-3">
-                        {([['all', 'Все'], ['blocks', 'По блоку'], ['people', 'Конкретные люди']] as const).map(([mode, label]) => (
-                          <button key={mode} type="button" aria-pressed={broadcastMode === mode} onClick={() => setBroadcastRecipientMode(mode)} className={`min-h-11 min-w-0 rounded-xl px-1.5 py-2 text-xs font-black leading-tight ${mode === 'people' ? 'col-span-2 min-[520px]:col-span-1' : ''} ${pressClass} ${broadcastMode === mode ? 'bg-[#0069E0] text-white shadow-sm' : 'bg-white text-slate-700'}`}>
+                      <div className="grid grid-cols-2 gap-1.5 rounded-2xl bg-slate-100 p-1.5">
+                        {([['all', 'Все'], ['blocks', 'По блоку'], ['people', 'Конкретные люди'], ['missing_slots', 'Не отметили слоты']] as const).map(([mode, label]) => (
+                          <button key={mode} type="button" aria-pressed={broadcastMode === mode} onClick={() => setBroadcastRecipientMode(mode)} className={`min-h-11 min-w-0 rounded-xl px-1.5 py-2 text-xs font-black leading-tight ${pressClass} ${broadcastMode === mode ? 'bg-[#0069E0] text-white shadow-sm' : 'bg-white text-slate-700'}`}>
                             {label}
                           </button>
                         ))}
                       </div>
                     </Field>
+
+                    {broadcastMode === 'missing_slots' && (
+                      <div className="space-y-2 rounded-2xl border border-amber-200 bg-amber-50 p-2">
+                        <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Неделя для проверки слотов">
+                          {Array.from({ length: configuredWeekCount }, (_, weekIndex) => {
+                            const selected = broadcastWeekIndex === weekIndex;
+                            const fillsOddLastRow = configuredWeekCount % 2 === 1 && weekIndex === configuredWeekCount - 1;
+                            return (
+                              <button
+                                key={weekIndex}
+                                type="button"
+                                role="radio"
+                                aria-checked={selected}
+                                onClick={() => setBroadcastWeekIndex(weekIndex)}
+                                className={`min-h-11 min-w-0 rounded-xl border px-2 py-2 text-xs font-black leading-tight ${fillsOddLastRow ? 'col-span-2' : ''} ${pressClass} ${selected ? 'border-[#0069E0] bg-[#0069E0] text-white' : 'border-amber-200 bg-white text-slate-700'}`}
+                              >
+                                <span className="block">{weekIndex === 0 ? 'Эта неделя' : weekIndex === 1 ? 'Следующая неделя' : `Неделя ${weekIndex + 1}`}</span>
+                                <span className={`mt-0.5 block font-bold ${selected ? 'text-blue-100' : 'text-slate-500'}`}>
+                                  {formatDayMonth(dateForSlotDay(weekIndex * 7 + activeDays[0]))}–{formatDayMonth(dateForSlotDay(weekIndex * 7 + activeDays[activeDays.length - 1]))}
+                                </span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                        <p className={`rounded-xl bg-white px-3 py-2 text-sm font-black ${missingSlotBroadcastUsers.length ? 'text-amber-800' : 'text-emerald-700'}`}>
+                          {missingSlotBroadcastUsers.length
+                            ? `Получателей сейчас: ${missingSlotBroadcastUsers.length}`
+                            : 'Все участники уже отметили эту неделю.'}
+                        </p>
+                      </div>
+                    )}
 
                     {broadcastMode === 'blocks' && (
                       <div className="rounded-2xl border border-slate-200 bg-slate-50 p-2">
@@ -2664,7 +2721,7 @@ export default function MiniApp({
                       </div>
                     )}
 
-                    {broadcastMode !== 'all' && (
+                    {(broadcastMode === 'blocks' || broadcastMode === 'people') && (
                       <div className="rounded-2xl border border-slate-200 bg-slate-50 p-2">
                         <button type="button" onClick={() => setShowBroadcastPeople((value) => !value)} className={`${secondaryButtonClass} w-full justify-between`} aria-expanded={showBroadcastPeople}>
                           <span>{broadcastRecipients.length ? `Выбрано людей: ${broadcastRecipients.length}` : 'Выбрать людей'}</span>
@@ -2696,7 +2753,7 @@ export default function MiniApp({
 
                     <Field label="Заголовок — необязательно"><input value={broadcastTitle} onChange={(event) => setBroadcastTitle(event.target.value)} className={inputClass} maxLength={120} placeholder="Например, Важное обновление" /></Field>
                     <Field label="Текст рассылки"><textarea required value={broadcastBody} onChange={(event) => setBroadcastBody(event.target.value)} className={inputClass} rows={4} maxLength={4000} placeholder="Что нужно сообщить команде" /></Field>
-                    <button disabled={broadcastSaving} className={`${primaryButtonClass} disabled:opacity-60`}><PaperPlaneTilt className="h-4 w-4" /> {broadcastSaving ? 'Отправляю...' : 'Отправить рассылку'}</button>
+                    <button disabled={broadcastSaving || (broadcastMode === 'missing_slots' && !missingSlotBroadcastUsers.length)} className={`${primaryButtonClass} disabled:opacity-60`}><PaperPlaneTilt className="h-4 w-4" /> {broadcastSaving ? 'Отправляю...' : 'Отправить рассылку'}</button>
                     {broadcastNotice && <p role="status" className="rounded-2xl bg-emerald-50 px-3 py-2 text-sm font-black text-emerald-800">{broadcastNotice}</p>}
                   </form>
                 )}

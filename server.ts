@@ -4654,16 +4654,21 @@ async function startServer() {
   });
 
   app.post('/api/team/broadcast', async (req, res) => {
-    const { requesterId, recipientMode, competencies, recipientIds, title, body } = req.body || {};
+    const { requesterId, recipientMode, availabilityWeekIndex, competencies, recipientIds, title, body } = req.body || {};
     const state = loadDatabase();
     const author = state.users.find((user) => user.id === requesterId && user.registered && !isFacultyUser(user));
     if (!author) return res.status(403).json({ error: 'Рассылки доступны участникам основной команды' });
     const cleanBody = String(body || '').trim().slice(0, 4_000);
     const cleanTitle = String(title || '').trim().slice(0, 120);
     if (!cleanBody) return res.status(400).json({ error: 'Текст рассылки обязателен' });
-    if (!['all', 'blocks', 'people'].includes(recipientMode)) return res.status(400).json({ error: 'Выбери получателей рассылки' });
+    if (!['all', 'blocks', 'people', 'missing_slots'].includes(recipientMode)) return res.status(400).json({ error: 'Выбери получателей рассылки' });
 
     const teamUsers = state.users.filter((user) => !isFacultyUser(user));
+    const availabilityConfig = normalizeAvailabilityConfig(state.settings);
+    const requestedWeekIndex = Number(availabilityWeekIndex);
+    const cleanWeekIndex = Number.isInteger(requestedWeekIndex) && requestedWeekIndex >= 0 && requestedWeekIndex < availabilityConfig.weekCount
+      ? requestedWeekIndex
+      : 0;
     const cleanCompetencies = [...new Set((Array.isArray(competencies) ? competencies : []).map(String).filter((name) => state.competencies?.includes(name)))];
     const requestedIds = new Set((Array.isArray(recipientIds) ? recipientIds : []).map(String));
     let recipients: User[] = [];
@@ -4673,6 +4678,10 @@ async function startServer() {
       recipients = teamUsers.filter((user) => cleanCompetencies.some((name) => user.primaryCompetency === name || user.competencies?.includes(name)) || requestedIds.has(user.id));
     }
     if (recipientMode === 'people') recipients = teamUsers.filter((user) => requestedIds.has(user.id));
+    if (recipientMode === 'missing_slots') {
+      recipients = teamUsers.filter((user) => !hasSubmittedAvailabilityForWeek(state.availabilities[user.id], state.settings, cleanWeekIndex));
+      if (!recipients.length) return res.status(400).json({ error: 'Все участники уже отметили слоты на выбранную неделю' });
+    }
     recipients = [...new Map(recipients.map((user) => [user.id, user])).values()];
     if (!recipients.length) return res.status(400).json({ error: 'Не найдено ни одного доступного получателя' });
 
@@ -4720,7 +4729,7 @@ async function startServer() {
         failed,
       });
     }
-    return res.json({ success: true, recipients: recipients.length, queued: sendJobs.length, delivered, unavailable, failed });
+    return res.json({ success: true, recipients: recipients.length, queued: sendJobs.length, delivered, unavailable, failed, availabilityWeekIndex: cleanWeekIndex });
   });
 
   app.post('/api/task/notify', async (req, res) => {
