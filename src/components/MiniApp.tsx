@@ -318,9 +318,7 @@ export default function MiniApp({
   const [showTaskLog, setShowTaskLog] = useState(false);
   const [showFullCalendar, setShowFullCalendar] = useState(false);
   const [expandedAvailabilityDay, setExpandedAvailabilityDay] = useState<number | null>(null);
-  const [expandedUnavailableDay, setExpandedUnavailableDay] = useState<number | null>(null);
-  const [showAllAvailabilityUsers, setShowAllAvailabilityUsers] = useState(false);
-  const [showAllUnavailableUsers, setShowAllUnavailableUsers] = useState(false);
+  const [expandedAvailabilityGroup, setExpandedAvailabilityGroup] = useState<'available' | 'missing' | 'unavailable' | null>(null);
   const [showAllMeetingParticipants, setShowAllMeetingParticipants] = useState(false);
   const [showAllMeetings, setShowAllMeetings] = useState(false);
   const [darkTheme, setDarkTheme] = useState(() => {
@@ -560,21 +558,24 @@ export default function MiniApp({
 
   const availabilityByDay = useMemo(
     () =>
-      dayLabels.map((day, dayIndex) => ({
-        ...day,
-        dayIndex,
-        users: coreTeamUsers
-          .map((user) => ({
-            ...user,
-            daySlots: alignedSlots(state.availabilities[user.id])?.[dayIndex] || [],
-          }))
-          .filter((user) => user.daySlots.length > 0),
-        unavailableUsers: coreTeamUsers.filter((user) => alignedUnavailableDays(state.availabilities[user.id]).includes(dayIndex)),
-        count: coreTeamUsers.filter((user) => {
-          const daySlots = alignedSlots(state.availabilities[user.id])?.[dayIndex] || [];
-          return daySlots.length > 0;
-        }).length,
-      })),
+      dayLabels.map((day, dayIndex) => {
+        const people = coreTeamUsers.map((user) => ({
+          ...user,
+          daySlots: alignedSlots(state.availabilities[user.id])?.[dayIndex] || [],
+          unavailable: alignedUnavailableDays(state.availabilities[user.id]).includes(dayIndex),
+        }));
+        const users = people.filter((user) => user.daySlots.length > 0);
+        const unavailableUsers = people.filter((user) => user.unavailable);
+        const missingUsers = people.filter((user) => user.daySlots.length === 0 && !user.unavailable);
+        return {
+          ...day,
+          dayIndex,
+          users,
+          missingUsers,
+          unavailableUsers,
+          count: users.length,
+        };
+      }),
     [state.availabilities, state.users],
   );
 
@@ -2162,9 +2163,7 @@ export default function MiniApp({
                       type="button"
                       onClick={() => {
                         setExpandedAvailabilityDay((value) => (value === dayIndex ? null : dayIndex));
-                        setExpandedUnavailableDay(null);
-                        setShowAllAvailabilityUsers(false);
-                        setShowAllUnavailableUsers(false);
+                        setExpandedAvailabilityGroup(null);
                       }}
                       className={`rounded-2xl border p-2 text-center ${pressClass} ${expanded ? 'border-[#0069E0] bg-blue-50 shadow-[0_8px_22px_rgba(0,105,224,0.12)]' : 'border-blue-100 bg-slate-50 hover:bg-blue-50 active:bg-blue-100'}`}
                     >
@@ -2183,65 +2182,56 @@ export default function MiniApp({
                   <div className="font-black">
                     {dayLabels[expandedAvailabilityDay].full}, {formatDayMonth(dateForSlotDay(expandedAvailabilityDay))}
                   </div>
-                  {availabilityByDay[expandedAvailabilityDay].users.length > 3 && (
-                    <ListDisclosure
-                      expanded={showAllAvailabilityUsers}
-                      onToggle={() => setShowAllAvailabilityUsers((value) => !value)}
-                      total={availabilityByDay[expandedAvailabilityDay].users.length}
-                      className="mt-3"
-                    />
-                  )}
+                  <p className="mt-1 text-xs font-semibold text-slate-500">Выбери список, чтобы посмотреть участников.</p>
                   <div className="mt-3 space-y-2">
-                    {availabilityByDay[expandedAvailabilityDay].users.length === 0 ? (
-                      <div className="rounded-xl bg-white px-3 py-2 text-sm font-semibold text-slate-500">Никто не отметил свободное время.</div>
-                    ) : (
-                      (showAllAvailabilityUsers
-                        ? availabilityByDay[expandedAvailabilityDay].users
-                        : availabilityByDay[expandedAvailabilityDay].users.slice(0, 3)
-                      ).map((user) => (
-                        <div key={user.id} className="flex items-center justify-between gap-3 rounded-xl bg-white px-3 py-2 text-sm">
-                          <div>
-                            <div className="font-black">{user.realName}</div>
-                            <a href={telegramLink(user.username)} onClick={(event) => openTelegramProfile(event, telegramLink(user.username))} className="text-xs font-bold text-[#0069E0]">{user.username}</a>
+                    <AvailabilityGroupDisclosure
+                      title="Отметились"
+                      count={availabilityByDay[expandedAvailabilityDay].users.length}
+                      expanded={expandedAvailabilityGroup === 'available'}
+                      onToggle={() => setExpandedAvailabilityGroup((value) => value === 'available' ? null : 'available')}
+                      countClassName="bg-blue-100 text-[#005BC4]"
+                    >
+                      {availabilityByDay[expandedAvailabilityDay].users.length === 0 ? (
+                        <AvailabilityEmptyState>Никто не отметил свободное время.</AvailabilityEmptyState>
+                      ) : availabilityByDay[expandedAvailabilityDay].users.map((user) => (
+                        <div key={user.id} className="flex min-w-0 items-center justify-between gap-3 rounded-xl bg-white px-3 py-2 text-sm">
+                          <div className="min-w-0">
+                            <div className="truncate font-black">{user.realName}</div>
+                            <a href={telegramLink(user.username)} onClick={(event) => openTelegramProfile(event, telegramLink(user.username))} className="block truncate text-xs font-bold text-[#0069E0]">{user.username}</a>
                           </div>
-                          <div className="text-right font-black text-[#0069E0]">{formatHours(user.daySlots)}</div>
+                          <div className="shrink-0 text-right font-black text-[#0069E0]">{formatHours(user.daySlots)}</div>
                         </div>
-                      ))
-                    )}
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setExpandedUnavailableDay((value) => (value === expandedAvailabilityDay ? null : expandedAvailabilityDay));
-                      setShowAllUnavailableUsers(false);
-                    }}
-                    className={`${secondaryButtonClass} mt-3 w-full`}
-                  >
-                    {expandedUnavailableDay === expandedAvailabilityDay ? 'Скрыть тех, кто не сможет' : `Не смогут (${availabilityByDay[expandedAvailabilityDay].unavailableUsers.length})`}
-                  </button>
-                  {expandedUnavailableDay === expandedAvailabilityDay && (
-                    <div className="mt-3 grid grid-cols-1 gap-2">
-                      {availabilityByDay[expandedAvailabilityDay].unavailableUsers.length > 3 && (
-                        <ListDisclosure
-                          expanded={showAllUnavailableUsers}
-                          onToggle={() => setShowAllUnavailableUsers((value) => !value)}
-                          total={availabilityByDay[expandedAvailabilityDay].unavailableUsers.length}
-                        />
-                      )}
+                      ))}
+                    </AvailabilityGroupDisclosure>
+
+                    <AvailabilityGroupDisclosure
+                      title="Не отметились"
+                      count={availabilityByDay[expandedAvailabilityDay].missingUsers.length}
+                      expanded={expandedAvailabilityGroup === 'missing'}
+                      onToggle={() => setExpandedAvailabilityGroup((value) => value === 'missing' ? null : 'missing')}
+                      countClassName="bg-amber-100 text-amber-700"
+                    >
+                      {availabilityByDay[expandedAvailabilityDay].missingUsers.length === 0 ? (
+                        <AvailabilityEmptyState>Все отметили этот день.</AvailabilityEmptyState>
+                      ) : availabilityByDay[expandedAvailabilityDay].missingUsers.map((user) => (
+                        <React.Fragment key={user.id}><AvailabilityPersonLink user={user} /></React.Fragment>
+                      ))}
+                    </AvailabilityGroupDisclosure>
+
+                    <AvailabilityGroupDisclosure
+                      title="Не смогут"
+                      count={availabilityByDay[expandedAvailabilityDay].unavailableUsers.length}
+                      expanded={expandedAvailabilityGroup === 'unavailable'}
+                      onToggle={() => setExpandedAvailabilityGroup((value) => value === 'unavailable' ? null : 'unavailable')}
+                      countClassName="bg-slate-200 text-slate-700"
+                    >
                       {availabilityByDay[expandedAvailabilityDay].unavailableUsers.length === 0 ? (
-                        <div className="rounded-xl bg-white px-3 py-2 text-sm font-semibold text-emerald-600">Все отметили свободное время.</div>
-                      ) : (
-                        (showAllUnavailableUsers
-                          ? availabilityByDay[expandedAvailabilityDay].unavailableUsers
-                          : availabilityByDay[expandedAvailabilityDay].unavailableUsers.slice(0, 3)
-                        ).map((user) => (
-                          <a key={user.id} href={telegramLink(user.username)} onClick={(event) => openTelegramProfile(event, telegramLink(user.username))} className="rounded-xl bg-white px-3 py-2 text-sm font-bold text-slate-700">
-                            {user.realName} <span className="text-[#0069E0]">{user.username}</span>
-                          </a>
-                        ))
-                      )}
-                    </div>
-                  )}
+                        <AvailabilityEmptyState>Никто не выбрал «Не смогу».</AvailabilityEmptyState>
+                      ) : availabilityByDay[expandedAvailabilityDay].unavailableUsers.map((user) => (
+                        <React.Fragment key={user.id}><AvailabilityPersonLink user={user} /></React.Fragment>
+                      ))}
+                    </AvailabilityGroupDisclosure>
+                  </div>
                 </div>
               )}
             </div>
@@ -3952,6 +3942,66 @@ function TaskLogView({ tasksByCompetency, users, events, currentUser, onEditComp
         </div>
       ))}
     </div>
+  );
+}
+
+function AvailabilityGroupDisclosure({
+  title,
+  count,
+  expanded,
+  onToggle,
+  countClassName,
+  children,
+}: {
+  title: string;
+  count: number;
+  expanded: boolean;
+  onToggle: () => void;
+  countClassName: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className={`overflow-hidden rounded-2xl border bg-white transition-colors ${expanded ? 'border-[#0069E0]' : 'border-blue-100'}`}>
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={expanded}
+        className={`flex min-h-11 w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm font-black ${pressClass}`}
+      >
+        <span className="min-w-0 truncate">{title}</span>
+        <span className="flex shrink-0 items-center gap-2">
+          <span className={`min-w-7 rounded-full px-2 py-1 text-center text-xs tabular-nums ${countClassName}`}>{count}</span>
+          {expanded ? <CaretUp className="h-4 w-4" /> : <CaretDown className="h-4 w-4" />}
+        </span>
+      </button>
+      {expanded && (
+        <div className="max-h-[22rem] space-y-2 overflow-y-auto border-t border-blue-100 bg-slate-50 p-2">
+          {children}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AvailabilityEmptyState({ children }: { children: React.ReactNode }) {
+  return <div className="rounded-xl bg-white px-3 py-2 text-sm font-semibold text-slate-500">{children}</div>;
+}
+
+function AvailabilityPersonLink({ user }: { user: Pick<User, 'id' | 'realName' | 'username'> }) {
+  const content = (
+    <>
+      <span className="min-w-0 truncate font-black text-slate-700">{user.realName}</span>
+      {user.username && <span className="shrink-0 text-xs font-bold text-[#0069E0]">{user.username}</span>}
+    </>
+  );
+  if (!user.username) {
+    return <div className="flex min-h-11 items-center justify-between gap-3 rounded-xl bg-white px-3 py-2 text-sm">{content}</div>;
+  }
+  const href = telegramLink(user.username);
+  return (
+    <a href={href} onClick={(event) => openTelegramProfile(event, href)} className="flex min-h-11 items-center justify-between gap-3 rounded-xl bg-white px-3 py-2 text-sm">
+      {content}
+    </a>
   );
 }
 
