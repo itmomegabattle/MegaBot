@@ -5110,6 +5110,14 @@ async function startServer() {
     const state = loadDatabase();
     const teamUsers = state.users.filter((user) => !isFacultyUser(user) && !isOutForWeek(state.availabilities[user.id], 0));
     const availabilityConfig = normalizeAvailabilityConfig(state.settings);
+    const requestedDays: number[] = Array.isArray(req.body?.days) ? req.body.days.map(Number) : availabilityConfig.activeDays;
+    const selectedDays: number[] = [...new Set<number>(requestedDays.filter((day) => (
+      Number.isInteger(day) && availabilityConfig.activeDays.includes(day)
+    )))].sort((a, b) => a - b);
+    const requestedDuration = Number(req.body?.duration ?? 1);
+    const allowedDurations = [0.5, 1, 1.5, 2, 2.5, 3, 4, 5, 6];
+    if (!selectedDays.length) return res.status(400).json({ error: 'Выбери хотя бы один день для поиска' });
+    if (!allowedDurations.includes(requestedDuration)) return res.status(400).json({ error: 'Выбери корректную продолжительность собрания' });
 
     const windowScores: {
       day: number;
@@ -5117,74 +5125,64 @@ async function startServer() {
       endHour: number;
       duration: number;
       count: number;
-      score: number;
-      users: string[];
+      total: number;
+      canUsers: Pick<User, 'id' | 'realName' | 'username'>[];
+      cannotUsers: Pick<User, 'id' | 'realName' | 'username'>[];
     }[] = [];
 
-    const durations = [3, 4, 5, 2, 1];
-    for (const d of availabilityConfig.activeDays) {
-      for (const duration of durations) {
-        for (let h = availabilityConfig.startHour; h <= availabilityConfig.endHour - duration + 1; h++) {
-          const hoursWindow = Array.from({ length: duration }, (_, index) => h + index);
-          const availableUsers = teamUsers
-            .filter(u => {
-              const daySlots = alignedAvailabilitySlots(state.availabilities[u.id])?.[d] || [];
-              return hoursWindow.every(hour => daySlots.includes(hour));
-            })
-            .map(u => u.realName);
-
-          if (availableUsers.length > 0) {
-            windowScores.push({
-              day: d,
-              hour: h,
-              endHour: h + duration,
-              duration,
-              count: availableUsers.length,
-              score: availableUsers.length * duration,
-              users: availableUsers
-            });
-          }
+    for (const day of selectedDays) {
+      for (let hour = availabilityConfig.startHour; hour + requestedDuration <= availabilityConfig.endHour + 1; hour += 1) {
+        const hoursWindow = Array.from({ length: Math.ceil(requestedDuration) }, (_, index) => hour + index);
+        const markedUsers = teamUsers.filter((user) => {
+          const availability = state.availabilities[user.id];
+          const daySlots = alignedAvailabilitySlots(availability)?.[day] || [];
+          return daySlots.length > 0 || alignedHardUnavailableDays(availability).includes(day);
+        });
+        const canUsers = markedUsers.filter((user) => {
+          const daySlots = alignedAvailabilitySlots(state.availabilities[user.id])?.[day] || [];
+          return hoursWindow.every((slotHour) => daySlots.includes(slotHour));
+        }).map(({ id, realName, username }) => ({ id, realName, username }));
+        if (canUsers.length > 0) {
+          const canUserIds = new Set(canUsers.map((user) => user.id));
+          const cannotUsers = markedUsers
+            .filter((user) => !canUserIds.has(user.id))
+            .map(({ id, realName, username }) => ({ id, realName, username }));
+          windowScores.push({
+            day,
+            hour,
+            endHour: hour + requestedDuration,
+            duration: requestedDuration,
+            count: canUsers.length,
+            total: markedUsers.length,
+            canUsers,
+            cannotUsers,
+          });
         }
       }
     }
 
     windowScores.sort((a, b) => {
-      return b.score - a.score
-        || b.count - a.count
-        || b.duration - a.duration
+      return b.count - a.count
+        || (b.total ? b.count / b.total : 0) - (a.total ? a.count / a.total : 0)
         || a.day - b.day
         || a.hour - b.hour;
     });
 
-    const bestByDay = new Map<number, typeof windowScores[number]>();
-    for (const slot of windowScores) {
-      if (!bestByDay.has(slot.day)) bestByDay.set(slot.day, slot);
-    }
-    const picked = [...bestByDay.values()].slice(0, 5);
+    const picked = windowScores.slice(0, 5);
 
     const russianDays = ['Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота', 'Воскресенье'];
 
-    const suggestions = picked.map(s => {
-      const hoursWindow = Array.from({ length: s.duration }, (_, index) => s.hour + index);
-      const missingUsers = teamUsers.filter(u => {
-        const daySlots = alignedAvailabilitySlots(state.availabilities[u.id])?.[s.day] || [];
-        return !hoursWindow.every(hour => daySlots.includes(hour));
-      }).map(u => ({
-        id: u.id,
-        realName: u.realName,
-        username: u.username
-      }));
-
+    const suggestions = picked.map((slot) => {
       return {
-        dayName: russianDays[s.day],
-        dayIndex: s.day,
-        hour: s.hour,
-        endHour: s.endHour,
-        duration: s.duration,
-        count: s.count,
-        total: teamUsers.length,
-        users: s.users,
-        missingUsers: missingUsers,
+        dayName: russianDays[slot.day],
+        dayIndex: slot.day,
+        hour: slot.hour,
+        endHour: slot.endHour,
+        duration: slot.duration,
+        count: slot.count,
+        total: slot.total,
+        canUsers: slot.canUsers,
+        cannotUsers: slot.cannotUsers,
       };
     });
 

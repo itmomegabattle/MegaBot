@@ -60,8 +60,8 @@ type MeetingSuggestion = {
   duration?: number;
   count: number;
   total: number;
-  users: string[];
-  missingUsers: Pick<User, 'id' | 'realName' | 'username'>[];
+  canUsers: Pick<User, 'id' | 'realName' | 'username'>[];
+  cannotUsers: Pick<User, 'id' | 'realName' | 'username'>[];
 };
 
 const dayLabels = [
@@ -75,6 +75,11 @@ const dayLabels = [
 ];
 
 const maxSlotWeeks = 5;
+const formatDecimalHour = (value: number) => {
+  const hour = Math.floor(value);
+  const minutes = Math.round((value - hour) * 60);
+  return `${String(hour).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+};
 const telegramLink = (username: string) => `https://t.me/${username.replace('@', '')}`;
 const openTelegramProfile = (event: React.MouseEvent<HTMLAnchorElement>, url: string) => {
   event.preventDefault();
@@ -292,6 +297,9 @@ export default function MiniApp({
   const [slotSettingsEndHour, setSlotSettingsEndHour] = useState(23);
   const [suggestions, setSuggestions] = useState<MeetingSuggestion[]>([]);
   const [suggesting, setSuggesting] = useState(false);
+  const [suggestionDays, setSuggestionDays] = useState<number[]>(() => normalizeAvailabilityConfig(state.settings).activeDays);
+  const [suggestionDuration, setSuggestionDuration] = useState('1');
+  const [suggestionError, setSuggestionError] = useState('');
   const [savingWeekIndex, setSavingWeekIndex] = useState<number | null>(null);
   const [savedWeekIndexes, setSavedWeekIndexes] = useState<number[]>([]);
   const [dirtyWeekIndexes, setDirtyWeekIndexes] = useState<number[]>([]);
@@ -656,6 +664,14 @@ export default function MiniApp({
     setSlotSettingsEndHour(availabilityConfig.endHour);
   }, [activeDays, availabilityConfig.endHour, availabilityConfig.startHour, configuredWeekCount]);
 
+  useEffect(() => {
+    setSuggestionDays((current) => {
+      const valid = current.filter((day) => activeDays.includes(day));
+      const next = valid.length ? valid : [...activeDays];
+      return next.length === current.length && next.every((day, index) => day === current[index]) ? current : next;
+    });
+  }, [activeDays]);
+
   const updateAvailabilitySettings = async (notifyTeam = false) => {
     setSavingWeekCount(true);
     setSlotError('');
@@ -755,14 +771,38 @@ export default function MiniApp({
   };
 
   const findSuggestions = async () => {
+    setSuggestionError('');
+    if (!suggestionDays.length) {
+      setSuggestionError('Выбери хотя бы один день для поиска.');
+      return;
+    }
     setSuggesting(true);
     try {
-      const res = await fetch('/api/meeting/suggest', { method: 'POST' });
+      const res = await fetch('/api/meeting/suggest', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ days: suggestionDays, duration: Number(suggestionDuration) }),
+      });
       const data = await res.json();
-      if (data.success) setSuggestions(data.topSuggestions || []);
+      if (!res.ok) throw new Error(data.error || 'Не удалось найти слоты');
+      if (data.success) {
+        setSuggestions(data.topSuggestions || []);
+        if (!data.topSuggestions?.length) setSuggestionError('Для выбранных дней и длительности пока нет подходящих слотов.');
+      }
+    } catch (error: any) {
+      setSuggestions([]);
+      setSuggestionError(error.message || 'Не удалось найти слоты');
     } finally {
       setSuggesting(false);
     }
+  };
+
+  const toggleSuggestionDay = (dayIndex: number) => {
+    setSuggestionError('');
+    setSuggestions([]);
+    setSuggestionDays((current) => current.includes(dayIndex)
+      ? current.filter((day) => day !== dayIndex)
+      : [...current, dayIndex].sort((a, b) => a - b));
   };
 
   const applySuggestion = (suggestion: MeetingSuggestion) => {
@@ -770,6 +810,7 @@ export default function MiniApp({
     setMeetingTitle('Общее собрание');
     setMeetingDate(nextDateForDay(suggestion.dayIndex));
     setMeetingTime(`${String(suggestion.hour).padStart(2, '0')}:00`);
+    setMeetingDuration(String(suggestion.duration || 1));
   };
 
   const selectMeetingCompetency = (name: string) => {
@@ -2321,12 +2362,59 @@ export default function MiniApp({
               <div className="flex items-center justify-between gap-3">
                 <div>
                   <h2 className="font-black">Лучшие слоты</h2>
-                  <p className="text-xs text-slate-500">По максимуму свободных людей</p>
+                  <p className="text-xs text-slate-500">Среди тех, кто отметил выбранный день</p>
                 </div>
                 <button onClick={findSuggestions} disabled={suggesting} className={`mega-primary-button rounded-full bg-[#0069E0] px-5 py-2.5 text-xs font-black text-white shadow-[0_10px_24px_rgba(0,105,224,0.28)] hover:bg-[#1677E8] active:bg-[#0058BD] ${pressClass} disabled:opacity-70`}>
                   {suggesting ? 'Считаю...' : 'Найти'}
                 </button>
               </div>
+              <div className="mt-4 space-y-3 rounded-2xl bg-slate-50 p-3">
+                <div>
+                  <div className="mb-2 text-xs font-black text-slate-600">Дни поиска</div>
+                  <div className="grid gap-2" style={{ gridTemplateColumns: `repeat(${activeDays.length}, minmax(0, 1fr))` }}>
+                    {activeDays.map((dayIndex) => {
+                      const selected = suggestionDays.includes(dayIndex);
+                      return (
+                        <button
+                          key={dayIndex}
+                          type="button"
+                          aria-pressed={selected}
+                          onClick={() => toggleSuggestionDay(dayIndex)}
+                          className={`min-h-11 min-w-0 rounded-xl border px-1 text-xs font-black ${pressClass} ${
+                            selected
+                              ? 'border-[#0069E0] bg-[#0069E0] text-white'
+                              : 'border-slate-200 bg-white text-slate-600 hover:bg-blue-50'
+                          }`}
+                        >
+                          {dayLabels[dayIndex].short}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+                <Field label="Продолжительность собрания">
+                  <select
+                    value={suggestionDuration}
+                    onChange={(event) => {
+                      setSuggestionDuration(event.target.value);
+                      setSuggestions([]);
+                      setSuggestionError('');
+                    }}
+                    className={selectClass}
+                  >
+                    <option value="0.5">30 минут</option>
+                    <option value="1">1 час</option>
+                    <option value="1.5">1,5 часа</option>
+                    <option value="2">2 часа</option>
+                    <option value="2.5">2,5 часа</option>
+                    <option value="3">3 часа</option>
+                    <option value="4">4 часа</option>
+                    <option value="5">5 часов</option>
+                    <option value="6">6 часов</option>
+                  </select>
+                </Field>
+              </div>
+              {suggestionError && <div role="alert" className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-bold text-amber-800">{suggestionError}</div>}
               <div className="mt-4 space-y-3">
                 {suggestions.length === 0 ? (
                   <EmptyState text="Нажми «Найти», когда команда заполнит слоты." />
@@ -2336,17 +2424,17 @@ export default function MiniApp({
                       <button onClick={() => applySuggestion(suggestion)} className={`w-full p-3 text-left hover:bg-blue-100 active:bg-blue-200 ${pressClass}`}>
                       <div className="flex items-center justify-between gap-2">
                         <div className="font-black">
-                          {index + 1}. {dayLabels[suggestion.dayIndex]?.full}, {suggestion.hour}:00-{suggestion.endHour || suggestion.hour + (suggestion.duration || 1)}:00
+                          {index + 1}. {dayLabels[suggestion.dayIndex]?.full}, {formatDecimalHour(suggestion.hour)}–{formatDecimalHour(suggestion.endHour || suggestion.hour + (suggestion.duration || 1))}
                         </div>
                         <div className="rounded-full bg-white px-2.5 py-1 text-xs font-black text-[#0069E0]">
                           {suggestion.count}/{suggestion.total}
                         </div>
                       </div>
                       <div className="mt-1 text-xs font-semibold text-slate-500">
-                        Окно: {suggestion.duration || 1} ч. подряд
+                        Окно: {taskDurationText(Math.round((suggestion.duration || 1) * 60))}
                       </div>
                       </button>
-                      <CompactUserLinks users={suggestion.missingUsers} />
+                      <SuggestionPeopleLists canUsers={suggestion.canUsers} cannotUsers={suggestion.cannotUsers} />
                     </div>
                   ))
                 )}
@@ -4141,36 +4229,38 @@ function ListDisclosure({
   );
 }
 
-function CompactUserLinks({ users }: { users: Pick<User, 'id' | 'realName' | 'username'>[] }) {
-  const [expanded, setExpanded] = useState(false);
-  const visibleUsers = expanded ? users : users.slice(0, 3);
-
+function SuggestionPeopleLists({
+  canUsers,
+  cannotUsers,
+}: {
+  canUsers: Pick<User, 'id' | 'realName' | 'username'>[];
+  cannotUsers: Pick<User, 'id' | 'realName' | 'username'>[];
+}) {
+  const [expandedGroup, setExpandedGroup] = useState<'can' | 'cannot' | null>(null);
   return (
-    <div className="border-t border-blue-100 px-3 py-3 text-xs text-slate-600">
-      {users.length > 3 && (
-        <ListDisclosure
-          expanded={expanded}
-          onToggle={() => setExpanded((value) => !value)}
-          total={users.length}
-          className="mb-2"
-        />
-      )}
-      <div>
-        Не смогут:{' '}
-        {users.length === 0 ? (
-          <span className="font-bold text-emerald-600">никто</span>
-        ) : (
-          visibleUsers.map((user, userIndex) => (
-            <React.Fragment key={user.id}>
-              <a href={telegramLink(user.username)} onClick={(event) => openTelegramProfile(event, telegramLink(user.username))} className="font-bold text-[#0069E0] underline decoration-blue-200">
-                {user.realName}
-              </a>
-              {userIndex < visibleUsers.length - 1 ? ', ' : ''}
-            </React.Fragment>
-          ))
+    <div className="space-y-2 border-t border-blue-100 p-3">
+      <AvailabilityGroupDisclosure
+        title="Смогут"
+        count={canUsers.length}
+        expanded={expandedGroup === 'can'}
+        onToggle={() => setExpandedGroup((value) => value === 'can' ? null : 'can')}
+        countClassName="bg-emerald-100 text-emerald-700"
+      >
+        {canUsers.length ? canUsers.map((user) => <React.Fragment key={user.id}><AvailabilityPersonLink user={user} /></React.Fragment>) : (
+          <AvailabilityEmptyState>Никто из отметившихся не сможет прийти.</AvailabilityEmptyState>
         )}
-        {!expanded && users.length > 3 ? <span className="text-slate-400"> …</span> : null}
-      </div>
+      </AvailabilityGroupDisclosure>
+      <AvailabilityGroupDisclosure
+        title="Не смогут"
+        count={cannotUsers.length}
+        expanded={expandedGroup === 'cannot'}
+        onToggle={() => setExpandedGroup((value) => value === 'cannot' ? null : 'cannot')}
+        countClassName="bg-slate-200 text-slate-700"
+      >
+        {cannotUsers.length ? cannotUsers.map((user) => <React.Fragment key={user.id}><AvailabilityPersonLink user={user} /></React.Fragment>) : (
+          <AvailabilityEmptyState>Все отметившиеся смогут прийти.</AvailabilityEmptyState>
+        )}
+      </AvailabilityGroupDisclosure>
     </div>
   );
 }

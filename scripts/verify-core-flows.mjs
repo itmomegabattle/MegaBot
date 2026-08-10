@@ -1311,6 +1311,30 @@ try {
   });
   assert.equal(oneDayAvailability.response.status, 200);
 
+  const sessionBeforeSuggestionSetup = sessionCookie;
+  sessionCookie = adminSessionCookie;
+  const unavailableAdmin = await request('/api/availability', {
+    userId: 'u_admin',
+    weekStart: currentWeekStart(),
+    slots: {},
+    hardUnavailableDays: [2],
+  });
+  assert.equal(unavailableAdmin.response.status, 200);
+  sessionCookie = sessionBeforeSuggestionSetup;
+  const filteredSuggestions = await request('/api/meeting/suggest', {
+    days: [2],
+    duration: 1,
+  });
+  assert.equal(filteredSuggestions.response.status, 200);
+  assert.equal(filteredSuggestions.data.topSuggestions.length, 1);
+  assert.equal(filteredSuggestions.data.topSuggestions[0].dayIndex, 2);
+  assert.equal(filteredSuggestions.data.topSuggestions[0].hour, 18);
+  assert.deepEqual(filteredSuggestions.data.topSuggestions[0].canUsers.map((user) => user.id), ['u_alice']);
+  assert.deepEqual(filteredSuggestions.data.topSuggestions[0].cannotUsers.map((user) => user.id), ['u_admin']);
+  assert.equal(filteredSuggestions.data.topSuggestions[0].total, 2, 'unmarked users must not appear in either list');
+  const invalidSuggestionDays = await request('/api/meeting/suggest', { days: [], duration: 1 });
+  assert.equal(invalidSuggestionDays.response.status, 400);
+
   telegramCalls.length = 0;
   await request('/api/telegram-webhook', {
     update_id: 201,
