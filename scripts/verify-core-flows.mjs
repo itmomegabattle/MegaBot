@@ -1313,6 +1313,13 @@ try {
 
   const sessionBeforeSuggestionSetup = sessionCookie;
   sessionCookie = adminSessionCookie;
+  const unmarkedSuggestionUser = await request('/api/user/add', {
+    requesterId: 'u_admin',
+    realName: 'Неотметившийся Участник',
+    username: '@not_marked_suggestion',
+    role: 'organizer',
+  });
+  assert.equal(unmarkedSuggestionUser.response.status, 200);
   const unavailableAdmin = await request('/api/availability', {
     userId: 'u_admin',
     weekStart: currentWeekStart(),
@@ -1320,6 +1327,22 @@ try {
     hardUnavailableDays: [2],
   });
   assert.equal(unavailableAdmin.response.status, 200);
+  const bobAuth = await request('/api/user/get-or-create', {
+    telegramId: '300',
+    username: 'bob',
+    initData: telegramInitData({ id: 300, username: 'bob', first_name: 'Борис' }),
+  });
+  assert.equal(bobAuth.response.status, 200);
+  const bobSessionCookie = bobAuth.response.headers.get('set-cookie').split(';')[0];
+  sessionCookie = bobSessionCookie;
+  const outBob = await request('/api/availability', {
+    userId: 'u_bob',
+    weekStart: currentWeekStart(),
+    slots: {},
+    hardUnavailableDays: [],
+    outWeekIndexes: [0],
+  });
+  assert.equal(outBob.response.status, 200);
   sessionCookie = sessionBeforeSuggestionSetup;
   const filteredSuggestions = await request('/api/meeting/suggest', {
     days: [2],
@@ -1330,10 +1353,24 @@ try {
   assert.equal(filteredSuggestions.data.topSuggestions[0].dayIndex, 2);
   assert.equal(filteredSuggestions.data.topSuggestions[0].hour, 18);
   assert.deepEqual(filteredSuggestions.data.topSuggestions[0].canUsers.map((user) => user.id), ['u_alice']);
-  assert.deepEqual(filteredSuggestions.data.topSuggestions[0].cannotUsers.map((user) => user.id), ['u_admin']);
-  assert.equal(filteredSuggestions.data.topSuggestions[0].total, 2, 'unmarked users must not appear in either list');
+  const cannotReasons = Object.fromEntries(filteredSuggestions.data.topSuggestions[0].cannotUsers.map((user) => [user.id, user.reason]));
+  assert.equal(cannotReasons.u_admin, 'inconvenient');
+  assert.equal(cannotReasons.u_bob, 'out');
+  assert.equal(cannotReasons[unmarkedSuggestionUser.data.user.id], 'not_marked');
+  assert.equal(filteredSuggestions.data.topSuggestions[0].total, 4);
   const invalidSuggestionDays = await request('/api/meeting/suggest', { days: [], duration: 1 });
   assert.equal(invalidSuggestionDays.response.status, 400);
+  sessionCookie = bobSessionCookie;
+  const restoreBobAvailability = await request('/api/availability', {
+    userId: 'u_bob', weekStart: currentWeekStart(), slots: {}, hardUnavailableDays: [], outWeekIndexes: [],
+  });
+  assert.equal(restoreBobAvailability.response.status, 200);
+  sessionCookie = adminSessionCookie;
+  const removeSuggestionUser = await request('/api/user/delete', {
+    requesterId: 'u_admin', userId: unmarkedSuggestionUser.data.user.id,
+  });
+  assert.equal(removeSuggestionUser.response.status, 200);
+  sessionCookie = sessionBeforeSuggestionSetup;
 
   telegramCalls.length = 0;
   await request('/api/telegram-webhook', {

@@ -5108,7 +5108,7 @@ async function startServer() {
   // Suggest meeting windows with a pure algorithm.
   app.post('/api/meeting/suggest', async (req, res) => {
     const state = loadDatabase();
-    const teamUsers = state.users.filter((user) => !isFacultyUser(user) && !isOutForWeek(state.availabilities[user.id], 0));
+    const teamUsers = state.users.filter((user) => !isFacultyUser(user));
     const availabilityConfig = normalizeAvailabilityConfig(state.settings);
     const requestedDays: number[] = Array.isArray(req.body?.days) ? req.body.days.map(Number) : availabilityConfig.activeDays;
     const selectedDays: number[] = [...new Set<number>(requestedDays.filter((day) => (
@@ -5127,33 +5127,39 @@ async function startServer() {
       count: number;
       total: number;
       canUsers: Pick<User, 'id' | 'realName' | 'username'>[];
-      cannotUsers: Pick<User, 'id' | 'realName' | 'username'>[];
+      cannotUsers: (Pick<User, 'id' | 'realName' | 'username'> & { reason: 'out' | 'not_marked' | 'inconvenient' })[];
     }[] = [];
 
     for (const day of selectedDays) {
       for (let hour = availabilityConfig.startHour; hour + requestedDuration <= availabilityConfig.endHour + 1; hour += 1) {
         const hoursWindow = Array.from({ length: Math.ceil(requestedDuration) }, (_, index) => hour + index);
-        const markedUsers = teamUsers.filter((user) => {
-          const availability = state.availabilities[user.id];
-          const daySlots = alignedAvailabilitySlots(availability)?.[day] || [];
-          return daySlots.length > 0 || alignedHardUnavailableDays(availability).includes(day);
-        });
-        const canUsers = markedUsers.filter((user) => {
+        const canUsers = teamUsers.filter((user) => {
+          if (isOutForWeek(state.availabilities[user.id], 0)) return false;
           const daySlots = alignedAvailabilitySlots(state.availabilities[user.id])?.[day] || [];
           return hoursWindow.every((slotHour) => daySlots.includes(slotHour));
         }).map(({ id, realName, username }) => ({ id, realName, username }));
         if (canUsers.length > 0) {
           const canUserIds = new Set(canUsers.map((user) => user.id));
-          const cannotUsers = markedUsers
+          const cannotUsers = teamUsers
             .filter((user) => !canUserIds.has(user.id))
-            .map(({ id, realName, username }) => ({ id, realName, username }));
+            .map(({ id, realName, username }) => {
+              const availability = state.availabilities[id];
+              const daySlots = alignedAvailabilitySlots(availability)?.[day] || [];
+              const markedDay = daySlots.length > 0 || alignedHardUnavailableDays(availability).includes(day);
+              const reason = isOutForWeek(availability, 0)
+                ? 'out' as const
+                : !markedDay
+                  ? 'not_marked' as const
+                  : 'inconvenient' as const;
+              return { id, realName, username, reason };
+            });
           windowScores.push({
             day,
             hour,
             endHour: hour + requestedDuration,
             duration: requestedDuration,
             count: canUsers.length,
-            total: markedUsers.length,
+            total: teamUsers.length,
             canUsers,
             cannotUsers,
           });

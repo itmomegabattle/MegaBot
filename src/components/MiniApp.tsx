@@ -61,7 +61,7 @@ type MeetingSuggestion = {
   count: number;
   total: number;
   canUsers: Pick<User, 'id' | 'realName' | 'username'>[];
-  cannotUsers: Pick<User, 'id' | 'realName' | 'username'>[];
+  cannotUsers: (Pick<User, 'id' | 'realName' | 'username'> & { reason: 'out' | 'not_marked' | 'inconvenient' })[];
 };
 
 const dayLabels = [
@@ -2362,7 +2362,7 @@ export default function MiniApp({
               <div className="flex items-center justify-between gap-3">
                 <div>
                   <h2 className="font-black">Лучшие слоты</h2>
-                  <p className="text-xs text-slate-500">Среди тех, кто отметил выбранный день</p>
+                  <p className="text-xs text-slate-500">По всей команде — с причиной недоступности</p>
                 </div>
                 <button onClick={findSuggestions} disabled={suggesting} className={`mega-primary-button rounded-full bg-[#0069E0] px-5 py-2.5 text-xs font-black text-white shadow-[0_10px_24px_rgba(0,105,224,0.28)] hover:bg-[#1677E8] active:bg-[#0058BD] ${pressClass} disabled:opacity-70`}>
                   {suggesting ? 'Считаю...' : 'Найти'}
@@ -4234,7 +4234,7 @@ function SuggestionPeopleLists({
   cannotUsers,
 }: {
   canUsers: Pick<User, 'id' | 'realName' | 'username'>[];
-  cannotUsers: Pick<User, 'id' | 'realName' | 'username'>[];
+  cannotUsers: (Pick<User, 'id' | 'realName' | 'username'> & { reason: 'out' | 'not_marked' | 'inconvenient' })[];
 }) {
   const [expandedGroup, setExpandedGroup] = useState<'can' | 'cannot' | null>(null);
   return (
@@ -4257,10 +4257,36 @@ function SuggestionPeopleLists({
         onToggle={() => setExpandedGroup((value) => value === 'cannot' ? null : 'cannot')}
         countClassName="bg-slate-200 text-slate-700"
       >
-        {cannotUsers.length ? cannotUsers.map((user) => <React.Fragment key={user.id}><AvailabilityPersonLink user={user} /></React.Fragment>) : (
-          <AvailabilityEmptyState>Все отметившиеся смогут прийти.</AvailabilityEmptyState>
+        {cannotUsers.length ? cannotUsers.map((user) => <React.Fragment key={user.id}><SuggestionUnavailablePerson user={user} /></React.Fragment>) : (
+          <AvailabilityEmptyState>Вся команда сможет прийти.</AvailabilityEmptyState>
         )}
       </AvailabilityGroupDisclosure>
+    </div>
+  );
+}
+
+function SuggestionUnavailablePerson({
+  user,
+}: {
+  user: Pick<User, 'id' | 'realName' | 'username'> & { reason: 'out' | 'not_marked' | 'inconvenient' };
+}) {
+  const reason = {
+    out: { label: 'в ауте', className: 'bg-rose-100 text-rose-700' },
+    not_marked: { label: 'не отметился', className: 'bg-amber-100 text-amber-800' },
+    inconvenient: { label: 'неудобный слот', className: 'bg-slate-200 text-slate-700' },
+  }[user.reason];
+  const identity = (
+    <span className="min-w-0">
+      <span className="block truncate font-black text-slate-700">{user.realName}</span>
+      {user.username && <span className="block truncate text-xs font-bold text-[#0069E0]">{user.username}</span>}
+    </span>
+  );
+  return (
+    <div className="grid min-h-11 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 rounded-xl bg-white px-3 py-2 text-sm">
+      {user.username ? (
+        <a href={telegramLink(user.username)} onClick={(event) => openTelegramProfile(event, telegramLink(user.username))} className="min-w-0">{identity}</a>
+      ) : identity}
+      <span className={`shrink-0 rounded-full px-2 py-1 text-[10px] font-black ${reason.className}`}>{reason.label}</span>
     </div>
   );
 }
