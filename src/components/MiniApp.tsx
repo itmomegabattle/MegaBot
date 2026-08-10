@@ -2162,8 +2162,8 @@ export default function MiniApp({
                           </p>
                         </div>
                         <div className="mb-3 grid grid-cols-2 gap-2">
-                          <button onClick={() => selectWholeDay(absoluteDayIndex)} className={`${secondaryButtonClass} min-h-11 min-w-0 px-2.5`}>
-                            {selected.length === hours.length ? 'Снять часы' : 'Весь день'}
+                          <button onClick={() => selectWholeDay(absoluteDayIndex)} className={`${secondaryButtonClass} min-h-11 min-w-0 !rounded-2xl px-2.5`}>
+                            {selected.length === hours.length ? 'Очистить' : 'Весь день'}
                           </button>
                           <button
                             type="button"
@@ -2360,11 +2360,11 @@ export default function MiniApp({
 
             <div className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
               <div className="flex items-center justify-between gap-3">
-                <div>
+                <div className="min-w-0 flex-1">
                   <h2 className="font-black">Лучшие слоты</h2>
                   <p className="text-xs text-slate-500">По всей команде — с причиной недоступности</p>
                 </div>
-                <button onClick={findSuggestions} disabled={suggesting} className={`mega-primary-button rounded-full bg-[#0069E0] px-5 py-2.5 text-xs font-black text-white shadow-[0_10px_24px_rgba(0,105,224,0.28)] hover:bg-[#1677E8] active:bg-[#0058BD] ${pressClass} disabled:opacity-70`}>
+                <button onClick={findSuggestions} disabled={suggesting} className={`mega-primary-button min-w-[5.5rem] shrink-0 whitespace-nowrap rounded-full bg-[#0069E0] px-5 py-2.5 text-xs font-black text-white shadow-[0_10px_24px_rgba(0,105,224,0.28)] hover:bg-[#1677E8] active:bg-[#0058BD] ${pressClass} disabled:opacity-70`}>
                   {suggesting ? 'Считаю...' : 'Найти'}
                 </button>
               </div>
