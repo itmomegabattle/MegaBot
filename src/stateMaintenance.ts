@@ -98,6 +98,9 @@ export function sanitizeSimulationState(input: SimulationState): SimulationState
         userId,
         slots: filterSlotsByAvailabilityConfig(availability.slots, cleanSettings),
         hardUnavailableDays: [...new Set((availability.hardUnavailableDays || []).map(Number).filter(Number.isFinite))].sort((a, b) => a - b),
+        outWeekIndexes: [...new Set((availability.outWeekIndexes || []).map(Number).filter((weekIndex) => (
+          Number.isInteger(weekIndex) && weekIndex >= 0 && weekIndex < cleanSettings.availabilityWeekCount!
+        )))].sort((a, b) => a - b),
         updatedAt: text(availability.updatedAt),
         weekStart: optionalText(availability.weekStart),
       }])),

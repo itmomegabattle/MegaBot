@@ -3,7 +3,7 @@ import crypto from 'node:crypto';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { ensurePrimaryWeekSheet, migratePrimaryWeekSheet, currentMoscowWeekStart, type GoogleSheetsConfig } from '../src/googleSheetsSync.js';
+import { ensurePrimaryWeekSheet, migratePrimaryWeekSheet, currentMoscowWeekStart, importAvailabilitiesFromSheet, exportAvailabilityToSheet, type GoogleSheetsConfig } from '../src/googleSheetsSync.js';
 
 const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'megabot-sheets-primary-'));
 const credentialsFile = path.join(tempRoot, 'service-account.json');
@@ -212,7 +212,19 @@ try {
   const fixedValuesWrite = calls.find((call) => call.body?.valueInputOption === 'RAW' && call.body.data.some((item: any) => item.range.includes('!D3')));
   assert.ok(fixedValuesWrite?.body.data.some((item: any) => item.range.includes('!N3')));
   assert.ok(fixedValuesWrite?.body.data.some((item: any) => item.range.includes('!AR3')));
-  console.log('Google Sheets primary-sheet verification passed: backup-before-rotation, ОСНОВА-only sync, checkboxes, legacy hiding, and idempotency.');
+  raw[4][2] = true;
+  formatted[4][2] = 'TRUE';
+  const importedOut = await importAvailabilitiesFromSheet(config, users);
+  assert.deepEqual(importedOut.imported.find((item) => item.userId === 'u_alice')?.outWeekIndexes, [0]);
+  assert.ok(Object.entries(importedOut.imported.find((item) => item.userId === 'u_alice')?.slots || {})
+    .filter(([dayIndex]) => Number(dayIndex) < 7)
+    .every(([, hours]) => hours.length === 0));
+  await exportAvailabilityToSheet(config, users, {
+    userId: 'u_alice', weekStart: currentWeek, updatedAt: new Date().toISOString(), slots: { 0: [17], 7: [17] }, outWeekIndexes: [0],
+  });
+  assert.equal(raw[4][2], true);
+  assert.equal(raw[4][3], false, 'current-week slots must be cleared while the person is out');
+  console.log('Google Sheets primary-sheet verification passed: backup-before-rotation, ОСНОВА-only sync, out-week column, checkboxes, legacy hiding, and idempotency.');
 } finally {
   globalThis.fetch = originalFetch;
   await rm(tempRoot, { recursive: true, force: true });

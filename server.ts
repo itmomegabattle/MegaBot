@@ -561,8 +561,22 @@ function alignedHardUnavailableDays(availability?: Availability) {
     .filter((day) => Number.isFinite(day) && day >= 0 && day < 35);
 }
 
+function alignedOutWeekIndexes(availability?: Availability) {
+  if (!availability?.outWeekIndexes) return [];
+  const savedWeekStart = availability.weekStart || currentWeekStartIso();
+  const weekOffset = Math.floor((new Date(currentWeekStartIso()).getTime() - new Date(savedWeekStart).getTime()) / (7 * 24 * 60 * 60 * 1000));
+  return availability.outWeekIndexes
+    .map((weekIndex) => Number(weekIndex) - weekOffset)
+    .filter((weekIndex) => Number.isInteger(weekIndex) && weekIndex >= 0 && weekIndex < 5);
+}
+
+function isOutForWeek(availability: Availability | undefined, weekIndex = 0) {
+  return alignedOutWeekIndexes(availability).includes(weekIndex);
+}
+
 function hasSubmittedAvailabilityForWeek(availability: Availability | undefined, settings: SimulationState['settings'], weekIndex = 0) {
   if (!availability) return false;
+  if (isOutForWeek(availability, weekIndex)) return true;
   const slots = alignedAvailabilitySlots(availability);
   const unavailableDays = new Set(alignedHardUnavailableDays(availability));
   const firstDay = weekIndex * 7;
@@ -764,6 +778,7 @@ function pruneExpiredAvailabilityWeeks() {
       ...availability,
       slots: alignedAvailabilitySlots(availability),
       hardUnavailableDays: alignedHardUnavailableDays(availability),
+      outWeekIndexes: alignedOutWeekIndexes(availability),
       weekStart,
       updatedAt: new Date().toISOString(),
     };
@@ -909,6 +924,7 @@ async function startServer() {
     weekStart: string;
     slots: Record<number, number[]>;
     hardUnavailableDays?: number[];
+    outWeekIndexes?: number[];
     dayBaseline?: { dayIndex: number; hours: number[]; unavailable: boolean };
   };
   type StoredChatUiState = {
@@ -1062,6 +1078,15 @@ async function startServer() {
     hardUnavailableDays: (previous?.hardUnavailableDays || []).filter((day) => (
       Number(day) >= 7 || !(imported.slots?.[Number(day)] || []).length
     )),
+    outWeekIndexes: [
+      ...(previous?.outWeekIndexes || []).filter((weekIndex) => Number(weekIndex) >= 1),
+      ...(imported.outWeekIndexes?.includes(0) ? [0] : []),
+    ],
+  });
+  const sameAvailability = (left: Availability | undefined, right: Availability) => JSON.stringify({
+    slots: left?.slots || {}, hardUnavailableDays: left?.hardUnavailableDays || [], outWeekIndexes: left?.outWeekIndexes || [],
+  }) === JSON.stringify({
+    slots: right.slots || {}, hardUnavailableDays: right.hardUnavailableDays || [], outWeekIndexes: right.outWeekIndexes || [],
   });
   const reconcileAvailabilityFromPrimarySheet = async (maxAgeMs = 0) => {
     const now = Date.now();
@@ -1075,7 +1100,7 @@ async function startServer() {
       for (const availability of result.imported) {
         const previous = state.availabilities[availability.userId];
         const merged = mergePrimarySheetAvailability(previous, availability);
-        if (JSON.stringify(previous?.slots || {}) === JSON.stringify(merged.slots || {})) continue;
+        if (sameAvailability(previous, merged)) continue;
         state.availabilities[availability.userId] = merged;
         changed = true;
       }
@@ -1145,7 +1170,7 @@ async function startServer() {
       result.imported.forEach((availability) => {
         const previous = state.availabilities[availability.userId];
         const merged = mergePrimarySheetAvailability(previous, availability);
-        if (JSON.stringify(previous?.slots || {}) !== JSON.stringify(merged.slots || {})) {
+        if (!sameAvailability(previous, merged)) {
           state.availabilities[availability.userId] = merged;
           changed = true;
         }
@@ -1933,6 +1958,17 @@ async function startServer() {
     return cloneValidUnavailableDays(state, source, slots);
   }
 
+  function currentSlotOutWeekIndexes(chatKey: string, user: User, state: SimulationState) {
+    const savedDraft = chatSlotDrafts.get(chatKey);
+    const source = savedDraft?.userId === user.id && savedDraft.weekStart === currentWeekStartIso()
+      ? savedDraft.outWeekIndexes ?? alignedOutWeekIndexes(state.availabilities[user.id])
+      : alignedOutWeekIndexes(state.availabilities[user.id]);
+    const weekCount = normalizeAvailabilityConfig(state.settings).weekCount;
+    return [...new Set(source.map(Number).filter((weekIndex) => (
+      Number.isInteger(weekIndex) && weekIndex >= 0 && weekIndex < weekCount
+    )))].sort((a, b) => a - b);
+  }
+
   function storeSlotDraft(
     chatKey: string,
     user: User,
@@ -1940,13 +1976,19 @@ async function startServer() {
     slots: Record<number, number[]>,
     slotDay?: number,
     hardUnavailableDays?: number[],
+    outWeekIndexes?: number[],
   ) {
     const safeSlots = cloneValidSlotSelection(state, slots);
+    const safeOutWeekIndexes = (outWeekIndexes ?? currentSlotOutWeekIndexes(chatKey, user, state))
+      .filter((weekIndex) => slotDay === undefined || weekIndex !== Math.floor(slotDay / 7));
+    for (const weekIndex of safeOutWeekIndexes) {
+      for (let dayIndex = weekIndex * 7; dayIndex < weekIndex * 7 + 7; dayIndex += 1) delete safeSlots[dayIndex];
+    }
     const safeUnavailableDays = cloneValidUnavailableDays(
       state,
       hardUnavailableDays ?? currentSlotUnavailableDays(chatKey, user, state, safeSlots),
-      safeSlots,
-    );
+      Object.fromEntries(Object.entries(safeSlots).filter(([day]) => !safeOutWeekIndexes.includes(Math.floor(Number(day) / 7)))),
+    ).filter((day) => !safeOutWeekIndexes.includes(Math.floor(day / 7)));
     const previousDraft = chatSlotDrafts.get(chatKey);
     const dayBaseline = slotDay === undefined
       ? undefined
@@ -1963,6 +2005,7 @@ async function startServer() {
       weekStart: currentWeekStartIso(),
       slots: safeSlots,
       hardUnavailableDays: safeUnavailableDays,
+      outWeekIndexes: safeOutWeekIndexes,
       dayBaseline,
     });
     persistChatPanelMessageIds();
@@ -2022,17 +2065,22 @@ async function startServer() {
       || (savedDraft?.userId === user.id && savedDraft.weekStart === currentWeekStartIso() ? savedDraft.slots : undefined)
       || alignedAvailabilitySlots(state.availabilities[user.id]));
     const hardUnavailableDays = currentSlotUnavailableDays(chatKey, user, state, availability);
-    storeSlotDraft(chatKey, user, state, availability, undefined, hardUnavailableDays);
+    const outWeekIndexes = currentSlotOutWeekIndexes(chatKey, user, state);
+    storeSlotDraft(chatKey, user, state, availability, undefined, hardUnavailableDays, outWeekIndexes);
     const wholeWeekSelected = activeDays.every((dayIndex) => (
       (availability[dayIndex] || []).length === hours.length
     ));
-    const dayButtons = activeDays.map((dayIndex) => ({
+    const dayButtons = outWeekIndexes.includes(0) ? [] : activeDays.map((dayIndex) => ({
       text: hardUnavailableDays.includes(dayIndex)
         ? `${dayNames[dayIndex]} · не смогу`
         : `${dayNames[dayIndex]} · ${(availability[dayIndex] || []).length}/${hours.length}`,
       callback_data: `slots_day:${dayIndex}`,
     }));
     const keyboard = [
+      ...Array.from({ length: normalizeAvailabilityConfig(state.settings).weekCount }, (_, weekIndex) => ([{
+        text: `${outWeekIndexes.includes(weekIndex) ? '✓ ' : ''}Я в ауте · ${weekIndex === 0 ? 'эта неделя' : `неделя ${weekIndex + 1}`}`,
+        callback_data: `slot_out_week:${weekIndex}`,
+      }])),
       ...dayButtons.reduce<{ text: string; callback_data: string }[][]>((rows, button, index) => {
         if (index % 3 === 0) rows.push([]);
         rows[rows.length - 1].push(button);
@@ -2044,7 +2092,9 @@ async function startServer() {
       }],
       [{ text: 'Сохранить', callback_data: 'slot_save' }],
     ];
-    const text = `${slotsSummaryText(user, state, availability)}\n\nВыбери день. Внутри можно отметить отдельные часы или нажать «Выбрать весь день».`;
+    const text = outWeekIndexes.includes(0)
+      ? '*Мои слоты на эту неделю*\n\nТы отметил «Я в ауте». Команда не будет учитывать тебя при планировании этой недели.'
+      : `${slotsSummaryText(user, state, availability)}\n\nВыбери день. Внутри можно отметить отдельные часы или нажать «Выбрать весь день».`;
     if (messageId) await updateInlinePanel(chatId, messageId, text, keyboard);
     else await sendInlinePanel(chatId, text, keyboard);
   }
@@ -2410,6 +2460,7 @@ async function startServer() {
         || action.startsWith('slot_toggle:')
         || action.startsWith('slot_toggle_day:')
         || action.startsWith('slot_unavailable:')
+        || action.startsWith('slot_out_week:')
         || action.startsWith('slot_cancel_day:')
         || action === 'slot_toggle_week';
       if (isSlotPanelAction && currentPanelId && callbackMessageId !== currentPanelId) {
@@ -2537,6 +2588,38 @@ async function startServer() {
         return res.json({ ok: true });
       }
 
+      if (action.startsWith('slot_out_week:')) {
+        const weekIndex = Number(action.split(':')[1]);
+        const weekCount = normalizeAvailabilityConfig(state.settings).weekCount;
+        if (!Number.isInteger(weekIndex) || weekIndex < 0 || weekIndex >= weekCount) {
+          await answerCallback(callback.id, 'Неизвестная неделя');
+          return res.json({ ok: true });
+        }
+        const chatKey = String(chatId);
+        const pendingSlots = currentSlotDraft(chatKey, user, state);
+        const hardUnavailableDays = currentSlotUnavailableDays(chatKey, user, state, pendingSlots);
+        const outWeekIndexes = currentSlotOutWeekIndexes(chatKey, user, state);
+        const wasOut = outWeekIndexes.includes(weekIndex);
+        const nextOutWeekIndexes = wasOut
+          ? outWeekIndexes.filter((item) => item !== weekIndex)
+          : [...outWeekIndexes, weekIndex].sort((a, b) => a - b);
+        if (!wasOut) {
+          for (let dayIndex = weekIndex * 7; dayIndex < weekIndex * 7 + 7; dayIndex += 1) delete pendingSlots[dayIndex];
+        }
+        storeSlotDraft(
+          chatKey,
+          user,
+          state,
+          pendingSlots,
+          undefined,
+          hardUnavailableDays.filter((day) => Math.floor(day / 7) !== weekIndex),
+          nextOutWeekIndexes,
+        );
+        await answerCallback(callback.id, wasOut ? 'Ты снова в строю' : 'Отмечено: я в ауте');
+        await showSlotsPanel(chatId, user, state, pendingSlots, callbackMessageId);
+        return res.json({ ok: true });
+      }
+
       if (action === 'slot_toggle_week') {
         const chatKey = String(chatId);
         const pendingSlots = currentSlotDraft(chatKey, user, state);
@@ -2548,7 +2631,7 @@ async function startServer() {
         for (const dayIndex of activeDays) {
           if (!wasFull) pendingSlots[dayIndex] = [...hours];
         }
-        storeSlotDraft(chatKey, user, state, pendingSlots, undefined, hardUnavailableDays);
+        storeSlotDraft(chatKey, user, state, pendingSlots, undefined, hardUnavailableDays, currentSlotOutWeekIndexes(chatKey, user, state).filter((weekIndex) => weekIndex !== 0));
         await answerCallback(callback.id, wasFull ? 'Все слоты сняты' : 'Выбраны все слоты недели');
         await showSlotsPanel(chatId, user, state, pendingSlots, callbackMessageId);
         return res.json({ ok: true });
@@ -2558,10 +2641,12 @@ async function startServer() {
         const chatKey = String(chatId);
         const pendingSlots = currentSlotDraft(chatKey, user, state);
         const hardUnavailableDays = currentSlotUnavailableDays(chatKey, user, state, pendingSlots);
+        const outWeekIndexes = currentSlotOutWeekIndexes(chatKey, user, state);
         state.availabilities[user.id] = {
           userId: user.id,
           slots: pendingSlots,
           hardUnavailableDays,
+          outWeekIndexes,
           weekStart: currentWeekStartIso(),
           updatedAt: new Date().toISOString(),
         };
@@ -4228,7 +4313,7 @@ async function startServer() {
 
   // Save/Update User Availability
   app.post('/api/availability', async (req, res) => {
-    const { userId, slots, weekStart, hardUnavailableDays } = req.body;
+    const { userId, slots, weekStart, hardUnavailableDays, outWeekIndexes } = req.body;
     const state = loadDatabase();
 
     if (!isRegisteredUser(state, userId)) {
@@ -4237,11 +4322,21 @@ async function startServer() {
 
     const cleanSlots = filterSlotsByAvailabilityConfig(slots && typeof slots === 'object' ? slots : {}, state.settings);
     const activeDays = new Set(normalizeAvailabilityConfig(state.settings).activeDays);
+    const weekCount = normalizeAvailabilityConfig(state.settings).weekCount;
+    const cleanOutWeekIndexes = Array.isArray(outWeekIndexes)
+      ? [...new Set(outWeekIndexes.map(Number).filter((weekIndex) => (
+          Number.isInteger(weekIndex) && weekIndex >= 0 && weekIndex < weekCount
+        )))].sort((a, b) => a - b)
+      : [];
+    for (const weekIndex of cleanOutWeekIndexes) {
+      for (let dayIndex = weekIndex * 7; dayIndex < weekIndex * 7 + 7; dayIndex += 1) delete cleanSlots[dayIndex];
+    }
     const cleanUnavailableDays = Array.isArray(hardUnavailableDays)
       ? [...new Set(hardUnavailableDays.map(Number).filter((day) => (
           Number.isInteger(day)
           && day >= 0
           && day < 35
+          && !cleanOutWeekIndexes.includes(Math.floor(day / 7))
           && activeDays.has(day % 7)
           && (cleanSlots[day] || []).length === 0
         )))].sort((a, b) => a - b)
@@ -4250,6 +4345,7 @@ async function startServer() {
       userId,
       slots: cleanSlots,
       hardUnavailableDays: cleanUnavailableDays,
+      outWeekIndexes: cleanOutWeekIndexes,
       weekStart: String(weekStart || ''),
       updatedAt: new Date().toISOString()
     };
@@ -5012,7 +5108,7 @@ async function startServer() {
   // Suggest meeting windows with a pure algorithm.
   app.post('/api/meeting/suggest', async (req, res) => {
     const state = loadDatabase();
-    const teamUsers = state.users.filter((user) => !isFacultyUser(user));
+    const teamUsers = state.users.filter((user) => !isFacultyUser(user) && !isOutForWeek(state.availabilities[user.id], 0));
     const availabilityConfig = normalizeAvailabilityConfig(state.settings);
 
     const windowScores: {
@@ -5265,7 +5361,10 @@ async function startServer() {
   if (sheetsConfig) {
     const maintainPrimarySheetWeek = async () => {
       const state = loadDatabase();
-      await ensurePrimaryWeekSheet(sheetsConfig, state.users, state.settings);
+      const result = await ensurePrimaryWeekSheet(sheetsConfig, state.users, state.settings);
+      if (result.rotated || result.layoutChanged) {
+        await exportAvailabilitiesToSheet(sheetsConfig, state.users, state.availabilities);
+      }
     };
     maintainPrimarySheetWeek().catch((error: any) => console.error('Google Sheets primary week maintenance failed:', error.message || error));
     setInterval(() => {

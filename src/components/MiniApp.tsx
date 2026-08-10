@@ -44,7 +44,7 @@ interface MiniAppProps {
   currentUser: User;
   activeTab: string;
   setActiveTab: (tab: string) => void;
-  onSaveAvailability: (slots: Record<number, number[]>, weekStart: string, hardUnavailableDays?: number[]) => Promise<boolean>;
+  onSaveAvailability: (slots: Record<number, number[]>, weekStart: string, hardUnavailableDays?: number[], outWeekIndexes?: number[]) => Promise<boolean>;
   onScheduleMeeting: (meetingData: any) => Promise<boolean>;
   onCreateTask: (taskData: any) => Promise<boolean>;
   onClaimTask: (taskId: string) => Promise<boolean>;
@@ -227,12 +227,22 @@ const alignedUnavailableDays = (availability?: { hardUnavailableDays?: number[];
     .filter((day) => Number.isFinite(day) && day >= 0 && day < maxSlotWeeks * 7);
 };
 
+const alignedOutWeekIndexes = (availability?: { outWeekIndexes?: number[]; weekStart?: string }) => {
+  if (!availability?.outWeekIndexes) return [];
+  const savedWeekStart = availability.weekStart || currentWeekStart();
+  const weekOffset = Math.floor((new Date(currentWeekStart()).getTime() - new Date(savedWeekStart).getTime()) / (7 * 24 * 60 * 60 * 1000));
+  return availability.outWeekIndexes
+    .map((weekIndex) => Number(weekIndex) - weekOffset)
+    .filter((weekIndex) => Number.isInteger(weekIndex) && weekIndex >= 0 && weekIndex < maxSlotWeeks);
+};
+
 const hasSubmittedAvailabilityWeek = (
-  availability: { slots?: Record<number, number[]>; hardUnavailableDays?: number[]; weekStart?: string } | undefined,
+  availability: { slots?: Record<number, number[]>; hardUnavailableDays?: number[]; outWeekIndexes?: number[]; weekStart?: string } | undefined,
   activeDays: number[],
   weekIndex: number,
 ) => {
   if (!availability) return false;
+  if (alignedOutWeekIndexes(availability).includes(weekIndex)) return true;
   const slots = alignedSlots(availability);
   const unavailableDays = new Set(alignedUnavailableDays(availability));
   const firstDay = weekIndex * 7;
@@ -273,6 +283,7 @@ export default function MiniApp({
 }: MiniAppProps) {
   const [slots, setSlots] = useState<Record<number, number[]>>({});
   const [hardUnavailableDays, setHardUnavailableDays] = useState<number[]>([]);
+  const [outWeekIndexes, setOutWeekIndexes] = useState<number[]>([]);
   const [visibleWeeks, setVisibleWeeks] = useState(2);
   const [savingWeekCount, setSavingWeekCount] = useState(false);
   const [slotSettingsWeeks, setSlotSettingsWeeks] = useState(2);
@@ -584,10 +595,11 @@ export default function MiniApp({
           ...user,
           daySlots: alignedSlots(state.availabilities[user.id])?.[dayIndex] || [],
           unavailable: alignedUnavailableDays(state.availabilities[user.id]).includes(dayIndex),
+          outForWeek: alignedOutWeekIndexes(state.availabilities[user.id]).includes(0),
         }));
-        const users = people.filter((user) => user.daySlots.length > 0);
-        const unavailableUsers = people.filter((user) => user.unavailable);
-        const missingUsers = people.filter((user) => user.daySlots.length === 0 && !user.unavailable);
+        const users = people.filter((user) => !user.outForWeek && user.daySlots.length > 0);
+        const unavailableUsers = people.filter((user) => user.unavailable || user.outForWeek);
+        const missingUsers = people.filter((user) => !user.outForWeek && user.daySlots.length === 0 && !user.unavailable);
         return {
           ...day,
           dayIndex,
@@ -595,6 +607,7 @@ export default function MiniApp({
           missingUsers,
           unavailableUsers,
           count: users.length,
+          total: people.filter((user) => !user.outForWeek).length,
         };
       }),
     [state.availabilities, state.users],
@@ -633,6 +646,7 @@ export default function MiniApp({
     setVisibleWeeks(Math.min(maxSlotWeeks, Math.max(configuredWeekCount, lastFilledDay === undefined ? configuredWeekCount : Math.floor(lastFilledDay / 7) + 1)));
     setSlots(nextSlots);
     setHardUnavailableDays(alignedUnavailableDays(availability));
+    setOutWeekIndexes(alignedOutWeekIndexes(availability));
   }, [configuredWeekCount, currentUser.id, state.availabilities]);
 
   useEffect(() => {
@@ -675,6 +689,7 @@ export default function MiniApp({
   const toggleSlot = (day: number, hour: number) => {
     setSlotError('');
     const weekIndex = Math.floor(day / 7);
+    setOutWeekIndexes((current) => current.filter((item) => item !== weekIndex));
     setSavedWeekIndexes((current) => current.filter((item) => item !== weekIndex));
     setDirtyWeekIndexes((current) => current.includes(weekIndex) ? current : [...current, weekIndex]);
     setHardUnavailableDays((current) => current.filter((item) => item !== day));
@@ -690,6 +705,7 @@ export default function MiniApp({
   const selectWholeDay = (day: number) => {
     setSlotError('');
     const weekIndex = Math.floor(day / 7);
+    setOutWeekIndexes((current) => current.filter((item) => item !== weekIndex));
     setSavedWeekIndexes((current) => current.filter((item) => item !== weekIndex));
     setDirtyWeekIndexes((current) => current.includes(weekIndex) ? current : [...current, weekIndex]);
     setHardUnavailableDays((current) => current.filter((item) => item !== day));
@@ -702,6 +718,7 @@ export default function MiniApp({
   const toggleUnavailableDay = (day: number) => {
     setSlotError('');
     const weekIndex = Math.floor(day / 7);
+    setOutWeekIndexes((current) => current.filter((item) => item !== weekIndex));
     const unavailable = hardUnavailableDays.includes(day);
     setSavedWeekIndexes((current) => current.filter((item) => item !== weekIndex));
     setDirtyWeekIndexes((current) => current.includes(weekIndex) ? current : [...current, weekIndex]);
@@ -709,6 +726,20 @@ export default function MiniApp({
       ? current.filter((item) => item !== day)
       : [...current.filter((item) => item !== day), day].sort((a, b) => a - b));
     if (!unavailable) setSlots((current) => ({ ...current, [day]: [] }));
+  };
+
+  const toggleOutWeek = (weekIndex: number) => {
+    setSlotError('');
+    const wasOut = outWeekIndexes.includes(weekIndex);
+    setSavedWeekIndexes((current) => current.filter((item) => item !== weekIndex));
+    setDirtyWeekIndexes((current) => current.includes(weekIndex) ? current : [...current, weekIndex]);
+    setOutWeekIndexes((current) => wasOut
+      ? current.filter((item) => item !== weekIndex)
+      : [...current.filter((item) => item !== weekIndex), weekIndex].sort((a, b) => a - b));
+    if (!wasOut) {
+      setSlots((current) => Object.fromEntries(Object.entries(current).filter(([day]) => Math.floor(Number(day) / 7) !== weekIndex)));
+      setHardUnavailableDays((current) => current.filter((day) => Math.floor(day / 7) !== weekIndex));
+    }
   };
 
   const nextDateForDay = (dayIndex: number) => {
@@ -761,7 +792,7 @@ export default function MiniApp({
   const saveWeek = async (weekIndex: number) => {
     setSlotError('');
     setSavingWeekIndex(weekIndex);
-    const ok = await onSaveAvailability(slots, currentWeekStart(), hardUnavailableDays);
+    const ok = await onSaveAvailability(slots, currentWeekStart(), hardUnavailableDays, outWeekIndexes);
     setSavingWeekIndex(null);
     if (ok) {
       setSavedWeekIndexes((current) => current.includes(weekIndex) ? current : [...current, weekIndex]);
@@ -2058,7 +2089,25 @@ export default function MiniApp({
                     </div>
                   </div>
 
-                  {activeDayLabels.map((day) => {
+                  <button
+                    type="button"
+                    aria-pressed={outWeekIndexes.includes(weekIndex)}
+                    onClick={() => toggleOutWeek(weekIndex)}
+                    className={`w-full rounded-2xl border px-4 py-3 text-left ${pressClass} ${
+                      outWeekIndexes.includes(weekIndex)
+                        ? 'border-rose-300 bg-rose-50 text-rose-800'
+                        : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50 active:bg-slate-100'
+                    }`}
+                  >
+                    <span className="block text-sm font-black">{outWeekIndexes.includes(weekIndex) ? '✓ Я в ауте' : 'Я в ауте'}</span>
+                    <span className="mt-0.5 block text-xs font-semibold opacity-75">
+                      {outWeekIndexes.includes(weekIndex)
+                        ? 'Команда не ориентируется на тебя всю эту неделю. Нажми ещё раз, чтобы вернуться.'
+                        : 'Полностью исключить себя из планирования на эту неделю'}
+                    </span>
+                  </button>
+
+                  {!outWeekIndexes.includes(weekIndex) && activeDayLabels.map((day) => {
                     const absoluteDayIndex = weekIndex * 7 + day.dayIndex;
                     const selected = slots[absoluteDayIndex] || [];
                     const unavailable = hardUnavailableDays.includes(absoluteDayIndex);
@@ -2161,11 +2210,14 @@ export default function MiniApp({
                           <div className="font-bold text-[#0069E0]">{user.username}</div>
                         </td>
                         {activeDayLabels.map((day) => {
-                          const text = formatHours(alignedSlots(state.availabilities[user.id])?.[day.dayIndex] || []);
+                          const outForWeek = alignedOutWeekIndexes(state.availabilities[user.id]).includes(0);
+                          const text = outForWeek
+                            ? 'В ауте'
+                            : formatHours(alignedSlots(state.availabilities[user.id])?.[day.dayIndex] || []);
                           const filled = text !== '—';
                           return (
                             <td key={day.dayIndex} className="px-2 py-2 align-top">
-                              <div className={`min-h-10 rounded-xl px-2 py-1.5 text-center font-bold ${filled ? 'bg-blue-50 text-[#0069E0]' : 'bg-slate-50 text-[#718293]'}`}>{text}</div>
+                              <div className={`min-h-10 rounded-xl px-2 py-1.5 text-center font-bold ${outForWeek ? 'bg-rose-50 text-rose-700' : filled ? 'bg-blue-50 text-[#0069E0]' : 'bg-slate-50 text-[#718293]'}`}>{text}</div>
                             </td>
                           );
                         })}
@@ -2180,7 +2232,7 @@ export default function MiniApp({
               <h2 className="font-black">Календарь свободных дней</h2>
               <div className="mt-3 grid gap-1.5" style={{ gridTemplateColumns: `repeat(${activeDays.length}, minmax(0, 1fr))` }}>
                 {availabilityByDay.filter((day) => activeDays.includes(day.dayIndex)).map((day) => {
-                  const ratio = coreTeamUsers.length ? day.count / coreTeamUsers.length : 0;
+                  const ratio = day.total ? day.count / day.total : 0;
                   const expanded = expandedAvailabilityDay === dayLabels.findIndex((item) => item.short === day.short);
                   const dayIndex = dayLabels.findIndex((item) => item.short === day.short);
                   return (
@@ -2195,7 +2247,7 @@ export default function MiniApp({
                     >
                       <div className="text-xs font-black text-slate-500">{day.short}</div>
                       <div className="mt-2 text-lg font-black text-[#0069E0]">{day.count}</div>
-                      <div className="text-xs font-bold text-slate-400">из {coreTeamUsers.length}</div>
+                      <div className="text-xs font-bold text-slate-400">из {day.total}</div>
                       <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-blue-100">
                         <div className="h-full rounded-full bg-[#0069E0]" style={{ width: `${Math.round(ratio * 100)}%` }} />
                       </div>
@@ -2254,7 +2306,10 @@ export default function MiniApp({
                       {availabilityByDay[expandedAvailabilityDay].unavailableUsers.length === 0 ? (
                         <AvailabilityEmptyState>Никто не выбрал «Не смогу».</AvailabilityEmptyState>
                       ) : availabilityByDay[expandedAvailabilityDay].unavailableUsers.map((user) => (
-                        <React.Fragment key={user.id}><AvailabilityPersonLink user={user} /></React.Fragment>
+                        <div key={user.id} className="flex items-center justify-between gap-2">
+                          <div className="min-w-0 flex-1"><AvailabilityPersonLink user={user} /></div>
+                          {user.outForWeek && <span className="shrink-0 rounded-full bg-rose-100 px-2 py-1 text-[10px] font-black text-rose-700">В ауте всю неделю</span>}
+                        </div>
                       ))}
                     </AvailabilityGroupDisclosure>
                   </div>

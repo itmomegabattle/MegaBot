@@ -491,7 +491,39 @@ try {
   const slotsSendCall = telegramCalls.find((call) => (
     call.path.endsWith('/sendMessage') && call.body.reply_markup?.inline_keyboard
   ));
+  assert.ok(slotsSendCall.body.reply_markup.inline_keyboard.flat().some((button) => (
+    button.callback_data === 'slot_out_week:0' && button.text.includes('Я в ауте')
+  )));
+  assert.ok(slotsSendCall.body.reply_markup.inline_keyboard.flat().some((button) => (
+    button.callback_data === 'slot_out_week:1' && button.text.includes('Я в ауте')
+  )));
   const slotsPanelId = slotsSendCall.resultMessageId;
+
+  telegramCalls.length = 0;
+  await request('/api/telegram-webhook', {
+    update_id: 1101,
+    callback_query: {
+      id: 'slots-out-next-week',
+      from: aliceTelegram,
+      data: 'slot_out_week:1',
+      message: { message_id: slotsPanelId, chat: { id: 200, type: 'private' } },
+    },
+  });
+  let outDraftState = JSON.parse(await readFile(`${testDatabasePath}.chat-panels.json`, 'utf8'));
+  assert.deepEqual(outDraftState.slotDrafts['200'].outWeekIndexes, [1]);
+
+  telegramCalls.length = 0;
+  await request('/api/telegram-webhook', {
+    update_id: 1102,
+    callback_query: {
+      id: 'slots-out-next-week-cancel',
+      from: aliceTelegram,
+      data: 'slot_out_week:1',
+      message: { message_id: slotsPanelId, chat: { id: 200, type: 'private' } },
+    },
+  });
+  outDraftState = JSON.parse(await readFile(`${testDatabasePath}.chat-panels.json`, 'utf8'));
+  assert.deepEqual(outDraftState.slotDrafts['200'].outWeekIndexes, []);
 
   telegramCalls.length = 0;
   await request('/api/telegram-webhook', {
@@ -823,9 +855,11 @@ try {
     weekStart: '2030-01-07',
     slots: { 0: [18, 19] },
     hardUnavailableDays: [1, 2, 2, 99, 'bad'],
+    outWeekIndexes: [1, 1, 9, 'bad'],
   });
   assert.equal(availability.response.status, 200);
   assert.deepEqual(availability.data.availability.hardUnavailableDays, [1, 2]);
+  assert.deepEqual(availability.data.availability.outWeekIndexes, [1]);
 
   telegramCalls.length = 0;
   const taskResult = await request('/api/task/create', {

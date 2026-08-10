@@ -28,7 +28,7 @@ const state: SimulationState = {
   faculties: [{ id: 'f1', name: 'Организаторы' }],
   competencies: ['Продакшн', 'Дизайн'],
   facultyCompetencies: ['Продакшн'],
-  availabilities: { u1: { userId: 'u1', weekStart: '2026-08-03', updatedAt: '2026-08-05T00:00:00.000Z', slots: { 0: [9, 10] }, hardUnavailableDays: [] } },
+  availabilities: { u1: { userId: 'u1', weekStart: '2026-08-03', updatedAt: '2026-08-05T00:00:00.000Z', slots: { 0: [9, 10] }, hardUnavailableDays: [], outWeekIndexes: [1] } },
   meetings: [{ id: 'm1', title: 'Планёрка', type: 'custom', date: '2026-08-06', time: '12:00', duration: 6, hostId: 'u1', participants: ['u1'], attendeeIds: ['u1'], status: 'scheduled', googleCalendarEventId: 'megabot-calendar-event' }],
   events: [{ id: 'e1', name: 'Мегабатл', status: 'active', createdAt: '2026-08-05T00:00:00.000Z' }],
   tasks: [{ id: 't1', eventId: 'e1', title: 'Сцена', description: 'Очень длинное описание '.repeat(5_000), deadline: '2026-08-07', assignedTo: ['u1'], competency: 'Продакшн', competencies: ['Продакшн', 'Дизайн'], sow: '', tips: [], status: 'assigned', priority: 'critical', reminders: [{ id: 'r1', type: 'before_deadline', value: 2, unit: 'hours' }], assigneeNotes: { u1: { executor: 'В процессе' } }, completionComments: {} }],

@@ -30,6 +30,7 @@ type SheetAvailability = {
   userId: string;
   slots: Record<number, number[]>;
   hardUnavailableDays?: number[];
+  outWeekIndexes?: number[];
   weekStart?: string;
   updatedAt: string;
 };
@@ -313,7 +314,13 @@ function discover(grid: SheetGrid, users: SheetUser[], weekStart = currentMoscow
     allRows.push({ rowIndex: row, name, user, matchSource });
     if (user) rows.push({ rowIndex: row, name, user, matchSource });
   }
-  return { dateRow, hourRow, columnDates, columnHours, rows, allRows };
+  let outColumn = -1;
+  for (let row = 0; row < headerDateRows && outColumn < 0; row += 1) {
+    outColumn = (grid.formatted[row] || []).findIndex((value) => (
+      String(value || '').trim().toLocaleLowerCase('ru-RU').replace(/\s+/g, ' ') === 'я в ауте'
+    ));
+  }
+  return { dateRow, hourRow, outColumn, columnDates, columnHours, rows, allRows };
 }
 
 function isSelected(value: unknown) {
@@ -334,7 +341,10 @@ export async function importAvailabilitiesFromSheet(config: GoogleSheetsConfig, 
     for (const row of layout.rows) {
       allMatches.push({ sheet: grid.title, sheetRow: row.rowIndex + 1, sheetName: row.name, userId: row.user?.id, telegramId: row.user?.telegramId });
       if (!row.user || (changedRow && row.rowIndex + 1 !== changedRow)) continue;
-      const availability = byUser.get(row.user.id) || { userId: row.user.id, slots: {}, hardUnavailableDays: [], weekStart, updatedAt: now };
+      const availability = byUser.get(row.user.id) || { userId: row.user.id, slots: {}, hardUnavailableDays: [], outWeekIndexes: [], weekStart, updatedAt: now };
+      if (layout.outColumn >= 0 && isSelected(grid.raw[row.rowIndex]?.[layout.outColumn])) {
+        availability.outWeekIndexes = [0];
+      }
       for (let col = 0; col < layout.columnHours.length; col += 1) {
         const hour = layout.columnHours[col];
         const date = layout.columnDates[col];
@@ -350,7 +360,12 @@ export async function importAvailabilitiesFromSheet(config: GoogleSheetsConfig, 
   }
   if (!activeColumns) throw new Error('Active sheets do not contain current or future week headers yet');
   const imported = [...byUser.values()];
-  imported.forEach((availability) => Object.values(availability.slots).forEach((hours) => hours.sort((a, b) => a - b)));
+  imported.forEach((availability) => {
+    if (availability.outWeekIndexes?.includes(0)) {
+      for (let dayIndex = 0; dayIndex < 7; dayIndex += 1) delete availability.slots[dayIndex];
+    }
+    Object.values(availability.slots).forEach((hours) => hours.sort((a, b) => a - b));
+  });
   return { imported, matches: allMatches };
 }
 
@@ -371,13 +386,18 @@ export async function exportAvailabilityToSheet(config: GoogleSheetsConfig, user
     const row = layout.rows.find((item) => item.user?.id === availability.userId);
     if (!row) continue;
     matchedRow = row.rowIndex + 1;
+    if (layout.outColumn >= 0) data.push({
+      range: `${quotedSheet(grid.title)}!${columnName(layout.outColumn)}${row.rowIndex + 1}`,
+      values: [[Boolean(availability.outWeekIndexes?.includes(0))]],
+    });
     for (let col = 0; col < layout.columnHours.length; col += 1) {
       const hour = layout.columnHours[col];
       const date = layout.columnDates[col];
       if (hour === null || !date) continue;
       const dayIndex = dayIndexFor(date, weekStart);
       if (dayIndex < 0 || dayIndex >= 35) continue;
-      data.push({ range: `${quotedSheet(grid.title)}!${columnName(col)}${row.rowIndex + 1}`, values: [[Boolean(availability.slots[dayIndex]?.includes(hour))]] });
+      const outForWeek = availability.outWeekIndexes?.includes(Math.floor(dayIndex / 7));
+      data.push({ range: `${quotedSheet(grid.title)}!${columnName(col)}${row.rowIndex + 1}`, values: [[!outForWeek && Boolean(availability.slots[dayIndex]?.includes(hour))]] });
     }
   }
   if (!matchedRow) throw new Error(`User ${availability.userId} was not matched to a row in Google Sheets`);
@@ -398,6 +418,10 @@ export async function exportAvailabilitiesToSheet(config: GoogleSheetsConfig, us
     for (const row of layout.rows) {
       if (!row.user) continue;
       const availability = availabilities[row.user.id];
+      if (layout.outColumn >= 0) data.push({
+        range: `${quotedSheet(grid.title)}!${columnName(layout.outColumn)}${row.rowIndex + 1}`,
+        values: [[Boolean(availability?.outWeekIndexes?.includes(0))]],
+      });
       for (let col = 0; col < layout.columnHours.length; col += 1) {
         const hour = layout.columnHours[col];
         const date = layout.columnDates[col];
@@ -406,7 +430,7 @@ export async function exportAvailabilitiesToSheet(config: GoogleSheetsConfig, us
         if (dayIndex < 0 || dayIndex >= 35) continue;
         data.push({
           range: `${quotedSheet(grid.title)}!${columnName(col)}${row.rowIndex + 1}`,
-          values: [[Boolean(availability?.slots[dayIndex]?.includes(hour))]],
+          values: [[!availability?.outWeekIndexes?.includes(Math.floor(dayIndex / 7)) && Boolean(availability?.slots[dayIndex]?.includes(hour))]],
         });
       }
     }
@@ -535,6 +559,14 @@ async function ensurePrimaryCheckboxes(
   layout: ReturnType<typeof discover>,
 ) {
   const regions = availabilityRegions(grid, layout);
+  if (layout.outColumn >= 0 && layout.allRows.length) {
+    regions.unshift({
+      start: layout.outColumn,
+      end: layout.outColumn + 1,
+      startRow: Math.min(...layout.allRows.map((row) => row.rowIndex)),
+      endRow: Math.max(...layout.allRows.map((row) => row.rowIndex)) + 1,
+    });
+  }
   await googleRequest(config, ':batchUpdate', {
     method: 'POST',
     body: JSON.stringify({ requests: regions.map((region) => ({ setDataValidation: {

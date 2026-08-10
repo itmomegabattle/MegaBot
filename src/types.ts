@@ -21,6 +21,7 @@ export interface Availability {
   userId: string;
   slots: Record<number, number[]>;
   hardUnavailableDays?: number[];
+  outWeekIndexes?: number[];
   updatedAt: string;
   weekStart?: string;
 }

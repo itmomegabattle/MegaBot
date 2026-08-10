@@ -9,7 +9,7 @@ export type GoogleSheetsDatabaseConfig = {
 
 type SchemaSheet = { title: string; headers: string[] };
 
-export const DATABASE_SCHEMA_VERSION = 5;
+export const DATABASE_SCHEMA_VERSION = 6;
 
 const SCHEMA: SchemaSheet[] = [
   { title: 'meta', headers: ['key', 'value'] },
@@ -18,7 +18,7 @@ const SCHEMA: SchemaSheet[] = [
   { title: 'users', headers: ['id', 'telegram_id', 'username', 'real_name', 'role', 'registered', 'birthday', 'competencies_json', 'primary_competency', 'faculty_id', 'joined_at', 'last_seen_at', 'avatar_seed'] },
   { title: 'user_avatars', headers: ['user_id', 'chunk_index', 'data'] },
   { title: 'faculties', headers: ['id', 'name'] },
-  { title: 'availability_weeks', headers: ['user_id', 'week_start', 'updated_at', 'hard_unavailable_days_json'] },
+  { title: 'availability_weeks', headers: ['user_id', 'week_start', 'updated_at', 'hard_unavailable_days_json', 'out_week_indexes_json'] },
   { title: 'availability_slots', headers: ['user_id', 'week_start', 'day_index', 'hour'] },
   { title: 'meetings', headers: ['id', 'title', 'type', 'date', 'time', 'duration_hours', 'host_id', 'participants_all', 'competency', 'topic', 'description', 'status', 'google_calendar_event_id'] },
   { title: 'meeting_participants', headers: ['meeting_id', 'user_id', 'kind'] },
@@ -172,7 +172,7 @@ function stateRows(state: SimulationState) {
   const availabilityWeekRows: unknown[][] = [];
   const availabilitySlotRows: unknown[][] = [];
   Object.values(state.availabilities || {}).forEach((availability) => {
-    availabilityWeekRows.push([availability.userId, availability.weekStart || '', availability.updatedAt || '', json(availability.hardUnavailableDays || [])]);
+    availabilityWeekRows.push([availability.userId, availability.weekStart || '', availability.updatedAt || '', json(availability.hardUnavailableDays || []), json(availability.outWeekIndexes || [])]);
     Object.entries(availability.slots || {}).forEach(([dayIndex, hours]) => {
       hours.forEach((hour) => availabilitySlotRows.push([availability.userId, availability.weekStart || '', Number(dayIndex), Number(hour)]));
     });
@@ -301,7 +301,7 @@ export async function importStateFromGoogleSheetsDatabase(config: GoogleSheetsDa
   const meta = Object.fromEntries(metaRows.map((row) => [String(row.key), row.value]));
   if (!bool(meta.data_present)) return { initialized: false, revision: 0, state: null, counts: null };
   if (String(meta.sync_state || '') !== 'ready') return { initialized: false, revision: Number(meta.revision || 0), state: null, counts: null };
-  if (![1, 2, 3, 4, DATABASE_SCHEMA_VERSION].includes(Number(meta.schema_version))) throw new Error(`Unsupported Google Sheets database schema: ${meta.schema_version}`);
+  if (![1, 2, 3, 4, 5, DATABASE_SCHEMA_VERSION].includes(Number(meta.schema_version))) throw new Error(`Unsupported Google Sheets database schema: ${meta.schema_version}`);
 
   const snapshotState = decodeGoogleSheetsDatabaseSnapshot(objects(valuesByTitle.get('snapshot')));
   if (snapshotState) {
@@ -334,10 +334,10 @@ export async function importStateFromGoogleSheetsDatabase(config: GoogleSheetsDa
   const faculties = objects(valuesByTitle.get('faculties')).map((row) => ({ id: String(row.id), name: String(row.name) }));
   const availabilities: SimulationState['availabilities'] = {};
   objects(valuesByTitle.get('availability_weeks')).forEach((row) => {
-    availabilities[String(row.user_id)] = { userId: String(row.user_id), weekStart: String(row.week_start || ''), updatedAt: String(row.updated_at || ''), hardUnavailableDays: parseJson<number[]>(row.hard_unavailable_days_json, []), slots: {} };
+    availabilities[String(row.user_id)] = { userId: String(row.user_id), weekStart: String(row.week_start || ''), updatedAt: String(row.updated_at || ''), hardUnavailableDays: parseJson<number[]>(row.hard_unavailable_days_json, []), outWeekIndexes: parseJson<number[]>(row.out_week_indexes_json, []), slots: {} };
   });
   objects(valuesByTitle.get('availability_slots')).forEach((row) => {
-    const availability = availabilities[String(row.user_id)] || { userId: String(row.user_id), weekStart: String(row.week_start || ''), updatedAt: '', hardUnavailableDays: [], slots: {} };
+    const availability = availabilities[String(row.user_id)] || { userId: String(row.user_id), weekStart: String(row.week_start || ''), updatedAt: '', hardUnavailableDays: [], outWeekIndexes: [], slots: {} };
     const dayIndex = Number(row.day_index);
     if (!availability.slots[dayIndex]) availability.slots[dayIndex] = [];
     availability.slots[dayIndex].push(Number(row.hour));
