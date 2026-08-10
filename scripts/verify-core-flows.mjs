@@ -1166,6 +1166,7 @@ try {
   assert.equal(telegramCalls.filter((call) => call.path.endsWith('/sendMessage')).length, 3);
   assert.ok(!telegramCalls.some((call) => call.body.chat_id === '400'));
   assert.ok(!telegramCalls.some((call) => String(call.body.text || '').includes('Придут:')), 'meeting notifications must not embed the attendee list');
+  assert.ok(telegramCalls.some((call) => String(call.body.text || '').includes('Среда, 02.01.30')), 'meeting notifications must include the weekday and date');
   const meetingRsvpAction = `meeting_rsvp:${meetingResult.data.meeting.id}`;
   const isMeetingRsvpNotification = (call) => call.path.endsWith('/sendMessage')
     && call.body.reply_markup?.inline_keyboard?.flat().some((button) => button.callback_data === meetingRsvpAction);
@@ -1258,6 +1259,7 @@ try {
   assert.equal(meetingDelete.response.status, 200);
   assert.equal(meetingDelete.data.meeting.status, 'cancelled');
   assert.equal(telegramCalls.filter((call) => call.path.endsWith('/sendMessage')).length, 1);
+  assert.ok(telegramCalls.some((call) => String(call.body.text || '').includes('Среда, 02.01.30')));
 
   telegramCalls.length = 0;
   const completed = await request('/api/task/status', {

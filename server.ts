@@ -281,6 +281,16 @@ function formatShortDate(value?: string) {
   return value;
 }
 
+function formatMeetingDate(value?: string) {
+  const formatted = formatShortDate(value);
+  const match = formatted.match(/^(\d{2})\.(\d{2})\.(\d{2}|\d{4})$/);
+  if (!match) return formatted;
+  const year = match[3].length === 2 ? 2000 + Number(match[3]) : Number(match[3]);
+  const date = new Date(Date.UTC(year, Number(match[2]) - 1, Number(match[1])));
+  const weekdays = ['Воскресенье', 'Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота'];
+  return `${weekdays[date.getUTCDay()]}, ${formatted}`;
+}
+
 function birthdayParts(value?: string) {
   const rawValue = String(value || '').trim();
   const isoMatch = rawValue.match(/^(\d{4})-(\d{2})-(\d{2})$/);
@@ -432,7 +442,7 @@ function taskDetailsText(task: Task, state: SimulationState) {
 function meetingDetailsText(meeting: Meeting, state: SimulationState) {
   const host = state.users.find((user) => user.id === meeting.hostId);
   const durationMinutes = Math.round(Number(meeting.duration || 1) * 60);
-  return `*${meeting.title}*\n\n*Дата:* ${formatShortDate(meeting.date)}\n*Время:* ${meeting.time}\n*Длительность:* ${taskDurationLabel(durationMinutes)}\n*Организатор:* ${userMention(host)}${meeting.competency ? `\n*Блок:* ${meeting.competency}` : ''}${meeting.topic ? `\n*Тема:* ${meeting.topic}` : ''}${meeting.description ? `\n*Описание:* ${meeting.description}` : ''}`;
+  return `*${meeting.title}*\n\n*Дата:* ${formatMeetingDate(meeting.date)}\n*Время:* ${meeting.time}\n*Длительность:* ${taskDurationLabel(durationMinutes)}\n*Организатор:* ${userMention(host)}${meeting.competency ? `\n*Блок:* ${meeting.competency}` : ''}${meeting.topic ? `\n*Тема:* ${meeting.topic}` : ''}${meeting.description ? `\n*Описание:* ${meeting.description}` : ''}`;
 }
 
 function meetingRsvpButtons(meeting: Meeting, userId: string) {
@@ -4520,7 +4530,7 @@ async function startServer() {
     await notifyMeetingRecipients(
       state,
       recipients,
-      `Встреча отменена.\n\n${meeting.title}\nДата: ${formatShortDate(meeting.date)}\nВремя: ${meeting.time}`,
+      `Встреча отменена.\n\n${meeting.title}\nДата: ${formatMeetingDate(meeting.date)}\nВремя: ${meeting.time}`,
       'meeting_cancelled',
     );
     await syncMeetingCalendar(state, meeting);
