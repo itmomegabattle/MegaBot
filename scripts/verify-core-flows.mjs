@@ -1146,6 +1146,7 @@ try {
   assert.equal(telegramCalls.filter((call) => call.path.endsWith('/sendMessage')).length, 3);
   assert.ok(!telegramCalls.some((call) => call.body.chat_id === '400'));
 
+  telegramCalls.length = 0;
   const declineMeeting = await request('/api/meeting/rsvp', {
     requesterId: 'u_alice',
     meetingId: meetingResult.data.meeting.id,
@@ -1161,6 +1162,7 @@ try {
   assert.equal(attendMeeting.response.status, 200);
   assert.equal(attendMeeting.data.attending, true);
   assert.ok(attendMeeting.data.meeting.attendeeIds.includes('u_alice'));
+  assert.equal(telegramCalls.filter((call) => call.path.endsWith('/sendMessage')).length, 0, 'RSVP changes must not notify the meeting host');
 
   telegramCalls.length = 0;
   const meetingUpdate = await request('/api/meeting/update', {

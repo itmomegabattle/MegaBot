@@ -2713,12 +2713,6 @@ async function startServer() {
         const result = updateMeetingAttendance(meeting, user.id, true);
         saveDatabase(state);
         await answerCallback(callback.id, result.changed ? 'Отлично, записал: вы придёте' : 'Вы уже отметили, что придёте');
-        if (result.changed && meeting.hostId !== user.id) {
-          const host = state.users.find((member) => member.id === meeting.hostId);
-          if (host?.telegramId) {
-            void sendTelegramMessage(host.telegramId, `${userMention(user)} присоединится к собранию «${meeting.title}».`, undefined, false, host);
-          }
-        }
         return res.json({ ok: true });
       }
 
@@ -4493,12 +4487,6 @@ async function startServer() {
     const result = updateMeetingAttendance(meeting, requester.id, Boolean(attending));
     if (result.changed) await syncMeetingCalendar(state, meeting);
     saveDatabase(state);
-    if (result.changed && result.attending && meeting.hostId !== requester.id) {
-      const host = state.users.find((user) => user.id === meeting.hostId);
-      if (host?.telegramId) {
-        void sendTelegramMessage(host.telegramId, `${userMention(requester)} присоединится к собранию «${meeting.title}».`, undefined, false, host);
-      }
-    }
     return res.json({ success: true, meeting, attending: result.attending });
   });
 
