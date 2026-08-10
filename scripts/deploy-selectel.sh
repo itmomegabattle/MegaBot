@@ -35,21 +35,37 @@ restart_bot_on_error() {
 }
 trap restart_bot_on_error ERR
 
-# Stop the only database writer before taking the deploy backup. Otherwise the
-# retiring process can leave a snapshot in the transient `writing` state while
-# PM2 starts the replacement process.
-pm2 stop megabot
-BOT_STOPPED=true
+# Capture a verified recovery point while the current process is still alive.
+# If it is writing at this exact moment, wait until the snapshot becomes ready.
+PRE_STOP_BACKUP=""
 for backup_attempt in {1..5}; do
   if npm run db:sheets:backup; then
+    PRE_STOP_BACKUP="$(ls -t "${BACKUP_DIR}"/google-sheets-database-*.json | head -n 1)"
     break
   fi
   if [[ "${backup_attempt}" == "5" ]]; then
-    echo "ERROR: Google Sheets database backup failed after 5 attempts." >&2
+    echo "ERROR: Could not create a verified pre-stop database backup after 5 attempts." >&2
     exit 1
   fi
   sleep 3
 done
+
+# Stop the only database writer, then verify that shutdown did not interrupt a
+# snapshot. If it did, recover the just-created copy before starting new code.
+pm2 stop megabot
+BOT_STOPPED=true
+POST_STOP_BACKUP_OK=false
+for backup_attempt in {1..5}; do
+  if npm run db:sheets:backup; then
+    POST_STOP_BACKUP_OK=true
+    break
+  fi
+  sleep 3
+done
+if [[ "${POST_STOP_BACKUP_OK}" != "true" ]]; then
+  echo "Database snapshot was interrupted during shutdown; restoring ${PRE_STOP_BACKUP}." >&2
+  npm run db:sheets:restore -- "${PRE_STOP_BACKUP}" --confirm
+fi
 
 export APP_REVISION="$(git rev-parse HEAD)"
 pm2 startOrReload ecosystem.config.cjs --update-env
