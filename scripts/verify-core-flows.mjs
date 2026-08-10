@@ -416,6 +416,25 @@ try {
   assert.ok(menuAfterMeetings.body.reply_markup.keyboard.flat().some((button) => button.text === 'Профиль'));
 
   telegramCalls.length = 0;
+  for (const [updateId, messageText] of [[1021, 'Назначить собрание'], [1022, 'Выбрать блок']]) {
+    await request('/api/telegram-webhook', {
+      update_id: updateId,
+      message: { message_id: updateId, chat: { id: 200, type: 'private' }, from: aliceTelegram, text: messageText },
+    });
+  }
+  const competencyPicker = telegramCalls.filter((call) => call.path.endsWith('/sendMessage') && call.body.reply_markup?.keyboard).at(-1);
+  assert.equal(competencyPicker.body.reply_markup.keyboard[0][0].text, 'Назад');
+  assert.ok(competencyPicker.body.reply_markup.keyboard.every((row) => row.length <= 2));
+
+  telegramCalls.length = 0;
+  await request('/api/telegram-webhook', {
+    update_id: 1023,
+    message: { message_id: 1023, chat: { id: 200, type: 'private' }, from: aliceTelegram, text: '/start' },
+  });
+  const menuAfterStaleFlowReset = telegramCalls.find((call) => call.path.endsWith('/sendMessage') && call.body.reply_markup?.keyboard);
+  assert.ok(menuAfterStaleFlowReset.body.reply_markup.keyboard.flat().some((button) => button.text === 'Профиль'));
+
+  telegramCalls.length = 0;
   await request('/api/telegram-webhook', {
     update_id: 103,
     message: {
@@ -1129,6 +1148,7 @@ try {
   });
   assert.equal(meetingResult.response.status, 200);
   assert.equal(meetingResult.data.meeting.duration, 6);
+  assert.deepEqual(meetingResult.data.meeting.attendeeIds, ['u_alice']);
   const invalidMeetingDuration = await request('/api/meeting', {
     title: 'Слишком длинная встреча',
     type: 'general',
@@ -1146,21 +1166,27 @@ try {
   assert.equal(telegramCalls.filter((call) => call.path.endsWith('/sendMessage')).length, 3);
   assert.ok(!telegramCalls.some((call) => call.body.chat_id === '400'));
   assert.ok(!telegramCalls.some((call) => String(call.body.text || '').includes('Придут:')), 'meeting notifications must not embed the attendee list');
+  const meetingRsvpAction = `meeting_rsvp:${meetingResult.data.meeting.id}`;
+  const isMeetingRsvpNotification = (call) => call.path.endsWith('/sendMessage')
+    && call.body.reply_markup?.inline_keyboard?.flat().some((button) => button.callback_data === meetingRsvpAction);
+  const hostMeetingNotification = telegramCalls.find((call) => isMeetingRsvpNotification(call) && String(call.body.chat_id) === '100');
+  const aliceMeetingNotification = telegramCalls.find((call) => isMeetingRsvpNotification(call) && String(call.body.chat_id) === '200');
+  assert.equal(hostMeetingNotification.body.reply_markup.inline_keyboard[0][0].text, '✓ Я приду');
+  assert.equal(aliceMeetingNotification.body.reply_markup.inline_keyboard[0][0].text, '✕ Я не приду');
 
   telegramCalls.length = 0;
-  const meetingRsvpAction = `meeting_rsvp:${meetingResult.data.meeting.id}`;
   await request('/api/telegram-webhook', {
     update_id: 110,
     callback_query: {
       id: 'meeting-rsvp-callback',
-      from: aliceTelegram,
+      from: { id: 100, username: 'admin', first_name: 'Администратор' },
       data: meetingRsvpAction,
       message: {
         message_id: 777,
-        chat: { id: 200, type: 'private' },
+        chat: { id: 100, type: 'private' },
         reply_markup: {
           inline_keyboard: [
-            [{ text: 'Я приду', callback_data: meetingRsvpAction }],
+            [{ text: '✓ Я приду', callback_data: meetingRsvpAction }],
             [{ text: 'Открыть встречи', web_app: { url: 'https://example.com' } }],
           ],
         },
@@ -1169,9 +1195,32 @@ try {
   });
   const rsvpMarkupUpdate = telegramCalls.find((call) => call.path.endsWith('/editMessageReplyMarkup'));
   assert.ok(rsvpMarkupUpdate, 'meeting RSVP must update the pressed button');
-  assert.equal(rsvpMarkupUpdate.body.reply_markup.inline_keyboard[0][0].text, '✓ Я приду');
+  assert.equal(rsvpMarkupUpdate.body.reply_markup.inline_keyboard[0][0].text, '✕ Я не приду');
   assert.equal(rsvpMarkupUpdate.body.reply_markup.inline_keyboard[1][0].web_app.url, 'https://example.com');
   assert.ok(telegramCalls.some((call) => call.path.endsWith('/answerCallbackQuery') && String(call.body.text || '').length > 0));
+
+  telegramCalls.length = 0;
+  await request('/api/telegram-webhook', {
+    update_id: 111,
+    callback_query: {
+      id: 'meeting-rsvp-cancel-callback',
+      from: { id: 100, username: 'admin', first_name: 'Администратор' },
+      data: meetingRsvpAction,
+      message: {
+        message_id: 777,
+        chat: { id: 100, type: 'private' },
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '✕ Я не приду', callback_data: meetingRsvpAction }],
+            [{ text: 'Открыть встречи', web_app: { url: 'https://example.com' } }],
+          ],
+        },
+      },
+    },
+  });
+  const rsvpCancelMarkupUpdate = telegramCalls.find((call) => call.path.endsWith('/editMessageReplyMarkup'));
+  assert.ok(rsvpCancelMarkupUpdate, 'second meeting RSVP press must cancel attendance');
+  assert.equal(rsvpCancelMarkupUpdate.body.reply_markup.inline_keyboard[0][0].text, '✓ Я приду');
 
   telegramCalls.length = 0;
   const declineMeeting = await request('/api/meeting/rsvp', {

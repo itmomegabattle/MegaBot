@@ -435,6 +435,14 @@ function meetingDetailsText(meeting: Meeting, state: SimulationState) {
   return `*${meeting.title}*\n\n*Дата:* ${formatShortDate(meeting.date)}\n*Время:* ${meeting.time}\n*Длительность:* ${taskDurationLabel(durationMinutes)}\n*Организатор:* ${userMention(host)}${meeting.competency ? `\n*Блок:* ${meeting.competency}` : ''}${meeting.topic ? `\n*Тема:* ${meeting.topic}` : ''}${meeting.description ? `\n*Описание:* ${meeting.description}` : ''}`;
 }
 
+function meetingRsvpButtons(meeting: Meeting, userId: string) {
+  const attending = (meeting.attendeeIds || []).includes(userId);
+  return [
+    { text: attending ? '✕ Я не приду' : '✓ Я приду', action: `meeting_rsvp:${meeting.id}` },
+    { text: 'Открыть встречи', action: 'open_tma' },
+  ];
+}
+
 function roleLabel(role: User['role']) {
   if (role === 'admin') return 'администратор';
   if (role === 'organizer') return 'организатор';
@@ -1244,6 +1252,12 @@ async function startServer() {
     }
   }
 
+  function replyPickerRows(items: string[]) {
+    const rows: string[][] = [['Назад']];
+    for (let index = 0; index < items.length; index += 2) rows.push(items.slice(index, index + 2));
+    return rows;
+  }
+
   async function deleteOldChatPanels(chatId: string | number, currentMessageId: number) {
     const chatKey = String(chatId);
     const oldMessageIds = [...(chatPanelKnownIds.get(chatKey) || [])]
@@ -1613,12 +1627,13 @@ async function startServer() {
     recipientIds: Iterable<string>,
     text: string,
     notificationPrefix: string,
-    buttons: { text: string; action: string }[] = [{ text: 'Открыть встречи', action: 'open_tma' }],
+    buttons: { text: string; action: string }[] | ((userId: string) => { text: string; action: string }[]) = [{ text: 'Открыть встречи', action: 'open_tma' }],
   ) {
     const sendJobs: Promise<boolean>[] = [];
     for (const userId of recipientIds) {
       const target = state.users.find((user) => user.id === userId);
       if (!target) continue;
+      const targetButtons = typeof buttons === 'function' ? buttons(target.id) : buttons;
       if (!state.messages[target.id]) state.messages[target.id] = [];
       state.messages[target.id].push({
         id: `${notificationPrefix}_${Date.now()}_${target.id}`,
@@ -1626,10 +1641,10 @@ async function startServer() {
         sender: 'bot',
         text,
         timestamp: new Date().toISOString(),
-        buttons,
+        buttons: targetButtons,
       });
       if (target.telegramId) {
-        sendJobs.push(sendTelegramMessage(target.telegramId, text, buttons, false, target));
+        sendJobs.push(sendTelegramMessage(target.telegramId, text, targetButtons, false, target));
       }
     }
     return Promise.allSettled(sendJobs);
@@ -1796,10 +1811,7 @@ async function startServer() {
       meetingRecipientIds(state, data.participants, data.hostId),
       text,
       'meeting_created',
-      [
-        { text: 'Я приду', action: `meeting_rsvp:${meeting.id}` },
-        { text: 'Открыть встречи', action: 'open_tma' },
-      ],
+      (userId) => meetingRsvpButtons(meeting, userId),
     );
     await syncMeetingCalendar(state, meeting);
 
@@ -2728,13 +2740,15 @@ async function startServer() {
           await answerCallback(callback.id, 'Собрание больше неактуально');
           return res.json({ ok: true });
         }
-        const result = updateMeetingAttendance(meeting, user.id, true);
+        const wasAttending = (meeting.attendeeIds || []).includes(user.id);
+        const result = updateMeetingAttendance(meeting, user.id, !wasAttending);
+        if (result.changed) await syncMeetingCalendar(state, meeting);
         saveDatabase(state);
-        await answerCallback(callback.id, result.changed ? 'Отлично, записал: вы придёте' : 'Вы уже отметили, что придёте');
+        await answerCallback(callback.id, result.attending ? 'Отметил: вы придёте' : 'Отметку снял: вы не придёте');
         const currentKeyboard = callback.message?.reply_markup?.inline_keyboard;
         if (Array.isArray(currentKeyboard) && callbackMessageId) {
           const confirmedKeyboard = currentKeyboard.map((row: any[]) => row.map((button: any) => (
-            button.callback_data === action ? { ...button, text: '✓ Я приду' } : button
+            button.callback_data === action ? { ...button, text: result.attending ? '✕ Я не приду' : '✓ Я приду' } : button
           )));
           await editTelegramReplyMarkup(chatId, callbackMessageId, confirmedKeyboard);
         }
@@ -3225,6 +3239,18 @@ async function startServer() {
         return res.json({ ok: true });
       }
 
+      if (cmd.startsWith('/start')) {
+        chatSessions.delete(chatKey);
+        await showWelcomePanel(chatId, user);
+        saveDatabase(state);
+        return res.json({ ok: true });
+      }
+      if (normalizedText === 'меню' || normalizedText === 'профиль') {
+        chatSessions.delete(chatKey);
+        await showProfilePanel(chatId, user, state);
+        return res.json({ ok: true });
+      }
+
       if (session?.flow === 'task_complete_time' && normalizedText !== 'назад') {
         if (normalizedText === 'указать вручную') {
           chatSessions.set(chatKey, { ...session, flow: 'task_complete_custom' });
@@ -3347,7 +3373,7 @@ async function startServer() {
           const freshState = loadDatabase();
           const competencies = freshState.competencies || [];
           chatSessions.set(chatKey, { flow: 'meeting_pick_competency' });
-          await sendTelegramKeyboard(chatId, 'Выбери блок:', [...competencies.map((item) => [item]), ['Назад']]);
+          await sendTelegramKeyboard(chatId, 'Выбери блок. Кнопка «Назад» всегда находится сверху:', replyPickerRows(competencies));
           return res.json({ ok: true });
         }
         if (normalizedText === 'назад' && currentSession?.flow === 'meeting_pick_competency') {
@@ -3389,7 +3415,7 @@ async function startServer() {
           return res.json({ ok: true });
         }
         chatSessions.set(chatKey, { flow: 'meeting_pick_competency' });
-        await sendTelegramKeyboard(chatId, 'Выбери блок:', [...competencies.map((item) => [item]), ['Назад']]);
+        await sendTelegramKeyboard(chatId, 'Выбери блок. Кнопка «Назад» всегда находится сверху:', replyPickerRows(competencies));
         return res.json({ ok: true });
       }
 
@@ -4472,6 +4498,7 @@ async function startServer() {
       recipients,
       `Встреча изменена.\n\n${meetingDetailsText(meeting, state)}\n\nПроверьте обновлённые дату, время и состав участников.`,
       'meeting_updated',
+      (userId) => meetingRsvpButtons(meeting, userId),
     );
     await syncMeetingCalendar(state, meeting);
     saveDatabase(state);

@@ -2582,10 +2582,11 @@ export default function MiniApp({
                             type="button"
                             disabled={rsvpMeetingId === meeting.id}
                             onClick={() => setMeetingAttendance(meeting, !attending)}
-                            className={`${miniButtonClass} w-full disabled:opacity-60 ${attending ? 'border-emerald-200 bg-emerald-50 text-emerald-800 hover:bg-emerald-100' : 'border-blue-100 bg-blue-50 text-[#005BC4] hover:bg-blue-100'}`}
+                            aria-pressed={attending}
+                            className={`${miniButtonClass} w-full disabled:opacity-60 ${attending ? 'border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100' : 'border-blue-100 bg-blue-50 text-[#005BC4] hover:bg-blue-100'}`}
                           >
-                            <Check className="h-4 w-4" />
-                            {rsvpMeetingId === meeting.id ? 'Сохраняю...' : attending ? 'Я приду ✓' : invited ? 'Я приду' : 'Присоединиться и приду'}
+                            {attending ? <X className="h-4 w-4" /> : <Check className="h-4 w-4" />}
+                            {rsvpMeetingId === meeting.id ? 'Сохраняю...' : attending ? 'Я не приду' : 'Я приду'}
                           </button>
                           {canManage && (
                             <div className="flex gap-2 pt-2">
