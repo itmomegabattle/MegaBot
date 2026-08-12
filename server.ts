@@ -1246,6 +1246,8 @@ async function startServer() {
       return {
         keyboard: [[{ text: 'Профиль' }, { text: 'Мои задачи' }], [{ text: 'Помощь' }]],
         resize_keyboard: true,
+        is_persistent: false,
+        one_time_keyboard: false,
       };
     }
     const keyboard: any[] = [
@@ -1258,13 +1260,15 @@ async function startServer() {
     return {
       keyboard,
       resize_keyboard: true,
+      is_persistent: false,
+      one_time_keyboard: false,
     };
   }
 
   function buildKeyboard(rows: string[][], _includeWebApp = false, user?: User) {
     const keyboard: any[] = [];
     rows.forEach((row) => keyboard.push(row.map((text) => ({ text }))));
-    return { keyboard, resize_keyboard: true };
+    return { keyboard, resize_keyboard: true, is_persistent: false, one_time_keyboard: false };
   }
 
   async function deleteTelegramMessage(chatId: string | number, messageId?: number) {

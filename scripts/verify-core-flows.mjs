@@ -278,6 +278,8 @@ try {
   });
   const adminMenuCall = telegramCalls.find((call) => call.path.endsWith('/sendMessage') && call.body.reply_markup?.keyboard);
   assert.deepEqual(adminMenuCall.body.reply_markup.keyboard.map((row) => row.length), [3, 3]);
+  assert.equal(adminMenuCall.body.reply_markup.is_persistent, false);
+  assert.equal(adminMenuCall.body.reply_markup.one_time_keyboard, false);
   assert.deepEqual(
     adminMenuCall.body.reply_markup.keyboard.flat().map((button) => button.text),
     ['Профиль', 'Слоты', 'Встречи', 'Задачи', 'МФ', 'Помощь'],
