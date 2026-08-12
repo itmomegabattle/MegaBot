@@ -1246,10 +1246,16 @@ try {
     requesterId: 'u_admin',
     meetingId: meetingResult.data.meeting.id,
     time: '17:00',
+    description: 'Обновлённое описание',
     participants: ['u_alice'],
   });
   assert.equal(meetingUpdate.response.status, 200);
   assert.equal(telegramCalls.filter((call) => call.path.endsWith('/sendMessage')).length, 3);
+  const meetingUpdateNotification = telegramCalls.find((call) => call.path.endsWith('/sendMessage'));
+  assert.ok(String(meetingUpdateNotification?.body.text || '').includes('❗ 17:00'));
+  assert.ok(String(meetingUpdateNotification?.body.text || '').includes('Стало: ❗'));
+  assert.ok(String(meetingUpdateNotification?.body.text || '').includes('Что изменилось'));
+  assert.ok(!String(meetingUpdateNotification?.body.text || '').includes('Придут:'));
 
   telegramCalls.length = 0;
   const meetingDelete = await request('/api/meeting/delete', {
@@ -1383,6 +1389,35 @@ try {
   );
   assert.ok(!boundChatCommandsCall.body.commands.some((command) => command.command === 'start'));
 
+  telegramCalls.length = 0;
+  await request('/api/telegram-webhook', {
+    update_id: 20001,
+    message: {
+      message_id: 20001,
+      message_thread_id: 321,
+      chat: { id: -100500, type: 'supergroup' },
+      from: { id: 100, username: 'admin', first_name: 'Админ' },
+      text: '/bindimportant',
+    },
+  });
+  const importantBindingMessage = telegramCalls.find((call) => call.path.endsWith('/sendMessage'));
+  assert.equal(importantBindingMessage?.body.message_thread_id, 321);
+  assert.ok(!telegramCalls.some((call) => call.path.endsWith('/deleteMessage') && call.body.message_id === 20001));
+
+  telegramCalls.length = 0;
+  const importantMeeting = await request('/api/meeting', {
+    title: 'Встреча для важного топика', type: 'general', date: '03.01.30', time: '18:00', duration: 1,
+    hostId: 'u_admin', participants: 'all', description: 'Проверка дублирования',
+  });
+  assert.equal(importantMeeting.response.status, 200);
+  const importantTopicNotification = telegramCalls.find((call) => (
+    call.path.endsWith('/sendMessage')
+    && call.body.chat_id === '-100500'
+    && call.body.message_thread_id === 321
+  ));
+  assert.ok(importantTopicNotification, 'meeting notifications must be duplicated into the IMPORTANT topic');
+  assert.ok(!String(importantTopicNotification.body.text || '').includes('Придут:'));
+
   const oneDayAvailability = await request('/api/availability', {
     userId: 'u_alice',
     weekStart: currentWeekStart(),
@@ -1457,6 +1492,7 @@ try {
     update_id: 201,
     message: {
       message_id: 201,
+      message_thread_id: 77,
       chat: { id: -100500, type: 'supergroup' },
       from: { id: 100, username: 'admin', first_name: 'Админ' },
       text: '/slots',
@@ -1464,6 +1500,8 @@ try {
   });
   const missingSlotsMessage = telegramCalls.find((call) => call.path.endsWith('/sendMessage'));
   assert.ok(missingSlotsMessage);
+  assert.equal(missingSlotsMessage.body.message_thread_id, 77);
+  assert.ok(!telegramCalls.some((call) => call.path.endsWith('/deleteMessage') && call.body.message_id === 201));
   assert.ok(String(missingSlotsMessage.body.text || '').includes('@alice'));
   assert.ok(String(missingSlotsMessage.body.text || '').includes('@admin'));
 
@@ -1535,12 +1573,14 @@ try {
     update_id: 213,
     message: {
       message_id: 213,
+      message_thread_id: 88,
       chat: { id: -100500, type: 'supergroup' },
       from: { id: 100, username: 'admin', first_name: 'Админ' },
       text: '/all@megaorgi_bot',
     },
   });
   const allPrompt = telegramCalls.find((call) => call.path.endsWith('/sendMessage'));
+  assert.equal(allPrompt?.body.message_thread_id, 88);
   assert.ok(String(allPrompt?.body.text || '').includes('следующим сообщением'));
   assert.ok(!String(allPrompt?.body.text || '').includes('@chat_only'));
   const allPromptMessageId = allPrompt.resultMessageId;
@@ -1550,6 +1590,7 @@ try {
     update_id: 214,
     message: {
       message_id: 214,
+      message_thread_id: 88,
       chat: { id: -100500, type: 'supergroup' },
       from: { id: 100, username: 'admin', first_name: 'Админ' },
       text: 'Срочно собираемся',
@@ -1561,6 +1602,8 @@ try {
   assert.ok(String(allParticipantsMessage?.body.text || '').includes('@admin'));
   assert.ok(String(allParticipantsMessage?.body.text || '').includes('@chat_only'));
   assert.ok(String(allParticipantsMessage?.body.text || '').includes('tg://user?id=600'));
+  assert.equal(allParticipantsMessage?.body.message_thread_id, 88);
+  assert.ok(!telegramCalls.some((call) => call.path.endsWith('/deleteMessage') && call.body.message_id === 214));
   assert.ok(telegramCalls.some((call) => call.path.endsWith('/deleteMessage') && call.body.message_id === allPromptMessageId));
 
   telegramCalls.length = 0;
@@ -1684,6 +1727,7 @@ try {
     update_id: 22,
     message: {
       message_id: 22,
+      message_thread_id: 99,
       chat: { id: -100500, type: 'supergroup' },
       from: { id: 200, username: 'alice', first_name: 'Алиса' },
       text: '/checkin',
@@ -1697,6 +1741,7 @@ try {
     update_id: 2201,
     message: {
       message_id: 2201,
+      message_thread_id: 99,
       chat: { id: -100500, type: 'supergroup' },
       from: { id: 200, username: 'alice', first_name: 'Алиса' },
       text: 'Репетиция',
@@ -1707,9 +1752,10 @@ try {
     && call.body.reply_markup?.inline_keyboard?.[0]?.[0]?.callback_data === 'group_checkin'
   ));
   assert.ok(checkinMessage);
+  assert.equal(checkinMessage.body.message_thread_id, 99);
   assert.ok(String(checkinMessage.body.text || '').includes('Репетиция'));
   assert.ok(telegramCalls.some((call) => call.path.endsWith('/deleteMessage') && call.body.message_id === checkinPrompt.resultMessageId));
-  assert.ok(telegramCalls.some((call) => call.path.endsWith('/deleteMessage') && call.body.message_id === 2201));
+  assert.ok(!telegramCalls.some((call) => call.path.endsWith('/deleteMessage') && call.body.message_id === 2201));
   const checkinPanelId = checkinMessage.resultMessageId;
 
   telegramCalls.length = 0;

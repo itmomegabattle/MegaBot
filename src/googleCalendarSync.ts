@@ -123,7 +123,6 @@ export function buildGoogleCalendarEvent(meeting: Meeting, state: Pick<Simulatio
   const duration = Number.isFinite(Number(meeting.duration)) && Number(meeting.duration) > 0 ? Number(meeting.duration) : 1;
   const invitedIds = meeting.participants === 'all' ? state.users.map((user) => user.id) : meeting.participants;
   const invited = invitedIds.map((id) => state.users.find((user) => user.id === id)).filter(Boolean) as User[];
-  const attending = (meeting.attendeeIds || []).map((id) => state.users.find((user) => user.id === id)).filter(Boolean) as User[];
   const description = [
     meeting.description && `Описание: ${meeting.description}`,
     meeting.topic && `Повестка: ${meeting.topic}`,
@@ -131,7 +130,6 @@ export function buildGoogleCalendarEvent(meeting: Meeting, state: Pick<Simulatio
     `Формат: ${meeting.type === 'general' ? 'общее собрание' : 'выбранные участники'}`,
     `Организатор: ${userLabel(state.users.find((user) => user.id === meeting.hostId))}`,
     `Участники: ${meeting.participants === 'all' ? 'вся команда' : invited.map(userLabel).join(', ') || 'не указаны'}`,
-    `Подтвердили участие: ${attending.map(userLabel).join(', ') || 'пока никто'}`,
     `MegaBot ID: ${meeting.id}`,
   ].filter(Boolean).join('\n');
   return {

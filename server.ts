@@ -445,6 +445,29 @@ function meetingDetailsText(meeting: Meeting, state: SimulationState) {
   return `*${meeting.title}*\n\n*Дата:* ${formatMeetingDate(meeting.date)}\n*Время:* ${meeting.time}\n*Длительность:* ${taskDurationLabel(durationMinutes)}\n*Организатор:* ${userMention(host)}${meeting.competency ? `\n*Блок:* ${meeting.competency}` : ''}${meeting.topic ? `\n*Тема:* ${meeting.topic}` : ''}${meeting.description ? `\n*Описание:* ${meeting.description}` : ''}`;
 }
 
+function meetingUpdateText(before: Meeting, after: Meeting, state: SimulationState) {
+  const changes: string[] = [];
+  const value = (input?: string) => String(input || '').trim() || 'не указано';
+  const participantKey = (meeting: Meeting) => meeting.participants === 'all'
+    ? 'all'
+    : [...meeting.participants].sort().join('|');
+  if (before.title !== after.title) changes.push(`• Название: ${value(before.title)} → ${value(after.title)}`);
+  if (before.date !== after.date) changes.push(`• Дата: ${formatMeetingDate(before.date)} → ${formatMeetingDate(after.date)}`);
+  if (before.time !== after.time) changes.push(`• Время: ${value(before.time)} → ❗ ${value(after.time)}`);
+  if (Number(before.duration || 1) !== Number(after.duration || 1)) {
+    changes.push(`• Длительность: ${taskDurationLabel(Math.round(Number(before.duration || 1) * 60))} → ${taskDurationLabel(Math.round(Number(after.duration || 1) * 60))}`);
+  }
+  if (before.type !== after.type) changes.push('• Формат встречи изменён');
+  if (participantKey(before) !== participantKey(after)) changes.push('• Состав приглашённых изменён');
+  if (value(before.competency) !== value(after.competency)) changes.push(`• Блок: ${value(before.competency)} → ${value(after.competency)}`);
+  if (value(before.topic) !== value(after.topic)) changes.push(`• Тема: ${value(before.topic)} → ${value(after.topic)}`);
+  if (value(before.description) !== value(after.description)) {
+    changes.push(`• Описание:\n  Было: ${value(before.description)}\n  Стало: ❗ ${value(after.description)}`);
+  }
+  const host = state.users.find((user) => user.id === after.hostId);
+  return `Встреча изменена: *${after.title}*\nОрганизатор: ${userMention(host)}\n\n*Что изменилось:*\n${changes.join('\n')}`;
+}
+
 function meetingRsvpButtons(meeting: Meeting, userId: string) {
   const attending = (meeting.attendeeIds || []).includes(userId);
   return [
@@ -989,8 +1012,8 @@ async function startServer() {
     chatId,
     new Map(Object.entries(members)),
   ]));
-  const pendingGroupMentions = new Map<string, { competency?: string; expiresAt: number; promptMessageId?: number }>();
-  const pendingGroupCheckins = new Map<string, { expiresAt: number; promptMessageId?: number }>();
+  const pendingGroupMentions = new Map<string, { competency?: string; expiresAt: number; promptMessageId?: number; messageThreadId?: number }>();
+  const pendingGroupCheckins = new Map<string, { expiresAt: number; promptMessageId?: number; messageThreadId?: number }>();
   const processedCallbackIds = new Set<string>();
   const telegramChatUpdateQueues = new Map<string, Promise<void>>();
   const persistChatPanelMessageIds = () => {
@@ -1223,7 +1246,6 @@ async function startServer() {
       return {
         keyboard: [[{ text: 'Профиль' }, { text: 'Мои задачи' }], [{ text: 'Помощь' }]],
         resize_keyboard: true,
-        is_persistent: true,
       };
     }
     const keyboard: any[] = [
@@ -1236,14 +1258,13 @@ async function startServer() {
     return {
       keyboard,
       resize_keyboard: true,
-      is_persistent: true,
     };
   }
 
   function buildKeyboard(rows: string[][], _includeWebApp = false, user?: User) {
     const keyboard: any[] = [];
     rows.forEach((row) => keyboard.push(row.map((text) => ({ text }))));
-    return { keyboard, resize_keyboard: true, is_persistent: true };
+    return { keyboard, resize_keyboard: true };
   }
 
   async function deleteTelegramMessage(chatId: string | number, messageId?: number) {
@@ -1379,6 +1400,7 @@ async function startServer() {
     text: string,
     inlineKeyboard: { text: string; callback_data: string }[][],
     silent = false,
+    messageThreadId?: number,
   ) {
     const botToken = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
     if (!botToken) return;
@@ -1393,6 +1415,7 @@ async function startServer() {
           parse_mode: 'HTML',
           reply_markup: inlineKeyboard.length ? { inline_keyboard: inlineKeyboard } : undefined,
           disable_notification: silent || undefined,
+          message_thread_id: messageThreadId,
         }),
       });
       if (!response.ok) return;
@@ -1418,7 +1441,7 @@ async function startServer() {
     return false;
   }
 
-  async function sendGroupMessage(chatId: string | number, text: string, silent = false): Promise<number | undefined> {
+  async function sendGroupMessage(chatId: string | number, text: string, silent = false, messageThreadId?: number): Promise<number | undefined> {
     const botToken = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
     if (!botToken) return;
     const tgApiBase = process.env.TELEGRAM_API_BASE || 'https://api.telegram.org';
@@ -1432,6 +1455,7 @@ async function startServer() {
           parse_mode: 'HTML',
           disable_web_page_preview: true,
           disable_notification: silent || undefined,
+          message_thread_id: messageThreadId,
         }),
       });
       const data = await response.json().catch(() => null) as { ok?: boolean; description?: string; result?: { message_id?: number } } | null;
@@ -1493,10 +1517,10 @@ async function startServer() {
     return pending;
   }
 
-  async function startGroupCheckin(chatId: string | number, title: string) {
+  async function startGroupCheckin(chatId: string | number, title: string, messageThreadId?: number) {
     const panelId = await sendInlinePanel(chatId, `*${title}*\n\nОтметились: 0\nПока никто`, [[
       { text: 'Я здесь · 0', callback_data: 'group_checkin' },
-    ]]);
+    ]], false, messageThreadId);
     if (panelId) groupCheckins.set(`${chatId}:${panelId}`, { title, userIds: new Set() });
     return Boolean(panelId);
   }
@@ -1657,6 +1681,11 @@ async function startServer() {
         sendJobs.push(sendTelegramMessage(target.telegramId, text, targetButtons, false, target));
       }
     }
+    const teamChatId = state.settings?.teamChatId;
+    const importantThreadId = state.settings?.teamImportantThreadId;
+    if (teamChatId && importantThreadId) {
+      await sendGroupMessage(teamChatId, text, false, importantThreadId);
+    }
     return Promise.allSettled(sendJobs);
   }
 
@@ -1712,13 +1741,13 @@ async function startServer() {
     return [...targets.values()].sort((a, b) => a.displayName.localeCompare(b.displayName, 'ru'));
   }
 
-  async function sendGroupMentionNotification(chatId: string | number, note: string, competency?: string, author?: User) {
+  async function sendGroupMentionNotification(chatId: string | number, note: string, competency?: string, author?: User, messageThreadId?: number) {
     const state = loadDatabase();
     const targets = resolveGroupMentionTargets(state, chatId, competency);
     if (targets.length === 0) {
       const messageId = await sendGroupMessage(chatId, competency
         ? `В блоке «${competency}» пока нет участников с привязанным Telegram.`
-        : 'Бот пока не знает ни одного участника этой беседы.');
+        : 'Бот пока не знает ни одного участника этой беседы.', false, messageThreadId);
       return Boolean(messageId);
     }
     const heading = competency ? `*Уведомление для блока «${competency}»*` : '*Уведомление для всех*';
@@ -1741,7 +1770,7 @@ async function startServer() {
     }
     if (current.trim()) chunks.push(current.trim());
     for (const chunk of chunks) {
-      if (!await sendGroupMessage(chatId, chunk)) return false;
+      if (!await sendGroupMessage(chatId, chunk, false, messageThreadId)) return false;
     }
     return true;
   }
@@ -1950,8 +1979,8 @@ async function startServer() {
     return sendInlinePanel(chatId, text, inlineKeyboard, true);
   }
 
-  function sendTaskGroupMessage(chatId: string | number, text: string) {
-    return sendGroupMessage(chatId, text, true);
+  function sendTaskGroupMessage(chatId: string | number, text: string, messageThreadId?: number) {
+    return sendGroupMessage(chatId, text, true, messageThreadId);
   }
 
   async function showWelcomePanel(chatId: string | number, user: User) {
@@ -2882,11 +2911,13 @@ async function startServer() {
       const isGroupChat = chatType === 'group' || chatType === 'supergroup';
 
       if (isGroupChat) {
+        const rawMessageThreadId = Number(update.message.message_thread_id);
+        const messageThreadId = Number.isInteger(rawMessageThreadId) && rawMessageThreadId > 0 ? rawMessageThreadId : undefined;
         const commandMatch = text.match(/^\/([a-z0-9_]+)(?:@\w+)?(?:\s+([\s\S]*))?$/i);
         const commandName = commandMatch?.[1]?.toLowerCase() || '';
         const commandText = commandMatch?.[2]?.trim() || '';
         const blockCommands = groupCommandCompetencies(state);
-        const pendingKey = `${chatId}:${fromUser.id}`;
+        const pendingKey = `${chatId}:${messageThreadId || 0}:${fromUser.id}`;
         const pendingMention = pendingGroupMentions.get(pendingKey);
         const pendingCheckin = pendingGroupCheckins.get(pendingKey);
 
@@ -2894,51 +2925,46 @@ async function startServer() {
         if (pendingCheckin && pendingCheckin.expiresAt <= Date.now()) await clearPendingGroupCheckin(pendingKey, chatId);
         if (pendingMention && pendingMention.expiresAt > Date.now() && !commandMatch) {
           if (!user?.registered) {
-            await deleteTelegramMessage(chatId, update.message.message_id);
             await clearPendingGroupMention(pendingKey, chatId);
-            const warningId = await sendGroupMessage(chatId, 'Эта команда доступна участникам, привязанным к MegaBot.');
+            const warningId = await sendGroupMessage(chatId, 'Эта команда доступна участникам, привязанным к MegaBot.', false, messageThreadId);
             scheduleTemporaryGroupMessageDeletion(chatId, warningId);
             return res.json({ ok: true });
           }
           console.log(`[Group Mention] Received notification text in chat=${chatId} from=${fromUser.id}.`);
-          const sent = await sendGroupMentionNotification(chatId, text, pendingMention.competency, user);
+          const sent = await sendGroupMentionNotification(chatId, text, pendingMention.competency, user, messageThreadId);
           if (sent) {
-            await deleteTelegramMessage(chatId, update.message.message_id);
             await clearPendingGroupMention(pendingKey, chatId);
           } else {
-            const warningId = await sendGroupMessage(chatId, 'Не удалось отправить уведомление. Твой текст сохранён в чате — повтори отправку или используй /cancel.');
+            const warningId = await sendGroupMessage(chatId, 'Не удалось отправить уведомление. Твой текст сохранён в чате — повтори отправку или используй /cancel.', false, messageThreadId);
             scheduleTemporaryGroupMessageDeletion(chatId, warningId);
           }
           return res.json({ ok: true });
         }
         if (pendingCheckin && pendingCheckin.expiresAt > Date.now() && !commandMatch) {
           if (!user?.registered) {
-            await deleteTelegramMessage(chatId, update.message.message_id);
             await clearPendingGroupCheckin(pendingKey, chatId);
-            const warningId = await sendGroupMessage(chatId, 'Эта команда доступна участникам, привязанным к MegaBot.');
+            const warningId = await sendGroupMessage(chatId, 'Эта команда доступна участникам, привязанным к MegaBot.', false, messageThreadId);
             scheduleTemporaryGroupMessageDeletion(chatId, warningId);
             return res.json({ ok: true });
           }
           const title = text.slice(0, 200).trim();
-          const started = title ? await startGroupCheckin(chatId, title) : false;
+          const started = title ? await startGroupCheckin(chatId, title, messageThreadId) : false;
           if (started) {
-            await deleteTelegramMessage(chatId, update.message.message_id);
             await clearPendingGroupCheckin(pendingKey, chatId);
           } else {
-            const warningId = await sendGroupMessage(chatId, 'Не удалось начать перекличку. Название сохранено в чате — попробуй ещё раз или используй /cancel.');
+            const warningId = await sendGroupMessage(chatId, 'Не удалось начать перекличку. Название сохранено в чате — попробуй ещё раз или используй /cancel.', false, messageThreadId);
             scheduleTemporaryGroupMessageDeletion(chatId, warningId);
           }
           return res.json({ ok: true });
         }
 
         const supportedGroupCommand = new Set([
-          'all', 'meeting', 'deadlines', 'slots', 'birthdays', 'checkin', 'bindteamchat', 'help', 'cancel',
+          'all', 'meeting', 'deadlines', 'slots', 'birthdays', 'checkin', 'bindteamchat', 'bindimportant', 'help', 'cancel',
           ...blockCommands.keys(),
         ]).has(commandName);
         if (!supportedGroupCommand) return res.json({ ok: true });
-        await deleteTelegramMessage(chatId, update.message.message_id);
         if (!user?.registered) {
-          await sendGroupMessage(chatId, 'Эта команда доступна участникам, привязанным к MegaBot.');
+          await sendGroupMessage(chatId, 'Эта команда доступна участникам, привязанным к MegaBot.', false, messageThreadId);
           return res.json({ ok: true });
         }
         user.lastSeenAt = new Date().toISOString();
@@ -2946,7 +2972,7 @@ async function startServer() {
 
         if (commandName === 'bindteamchat') {
           if (user.role !== 'admin') {
-            await sendGroupMessage(chatId, 'Привязать командный чат может только администратор.');
+            await sendGroupMessage(chatId, 'Привязать командный чат может только администратор.', false, messageThreadId);
           } else {
             state.settings = { ...(state.settings || {}), teamChatId: String(chatId) };
             saveDatabase(state);
@@ -2954,14 +2980,29 @@ async function startServer() {
             const canReceiveMessages = await botCanReceiveOrdinaryGroupMessages(chatId);
             await sendGroupMessage(chatId, canReceiveMessages === false
               ? 'Чат привязан к MegaBot, но двухшаговые команды пока не заработают. Назначь бота администратором с правом удаления сообщений.'
-              : 'Чат привязан к MegaBot. Командные функции активны.');
+              : 'Чат привязан к MegaBot. Командные функции активны.', false, messageThreadId);
+          }
+          return res.json({ ok: true });
+        }
+
+        if (commandName === 'bindimportant') {
+          if (user.role !== 'admin') {
+            await sendGroupMessage(chatId, 'Привязать топик «ВАЖНОЕ» может только администратор.', false, messageThreadId);
+          } else if (state.settings?.teamChatId && state.settings.teamChatId !== String(chatId)) {
+            await sendGroupMessage(chatId, 'Сначала привяжи этот командный чат командой /bindteamchat.', false, messageThreadId);
+          } else if (!messageThreadId) {
+            await sendGroupMessage(chatId, 'Эту команду нужно отправить внутри топика «ВАЖНОЕ».');
+          } else {
+            state.settings = { ...(state.settings || {}), teamChatId: String(chatId), teamImportantThreadId: messageThreadId };
+            saveDatabase(state);
+            await sendGroupMessage(chatId, 'Топик «ВАЖНОЕ» привязан. Уведомления о встречах будут дублироваться сюда.', false, messageThreadId);
           }
           return res.json({ ok: true });
         }
 
         const configuredChatId = state.settings?.teamChatId;
         if (configuredChatId && configuredChatId !== String(chatId)) {
-          await sendGroupMessage(chatId, 'Командные команды доступны только в привязанном чате.');
+          await sendGroupMessage(chatId, 'Командные команды доступны только в привязанном чате.', false, messageThreadId);
           return res.json({ ok: true });
         }
 
@@ -2978,7 +3019,7 @@ async function startServer() {
             clearPendingGroupMention(pendingKey, chatId),
             clearPendingGroupCheckin(pendingKey, chatId),
           ]);
-          const confirmationId = await sendGroupMessage(chatId, hadMention || hadCheckin ? 'Действие отменено.' : 'Нет ожидающего действия.');
+          const confirmationId = await sendGroupMessage(chatId, hadMention || hadCheckin ? 'Действие отменено.' : 'Нет ожидающего действия.', false, messageThreadId);
           scheduleTemporaryGroupMessageDeletion(chatId, confirmationId);
           return res.json({ ok: true });
         }
@@ -2991,6 +3032,8 @@ async function startServer() {
               const warningId = await sendGroupMessage(
                 chatId,
                 'Бот видит команды, но Telegram не передаёт ему обычные сообщения. Назначь @megaorgi_bot администратором беседы с правом удаления сообщений и повтори /all.',
+                false,
+                messageThreadId,
               );
               scheduleTemporaryGroupMessageDeletion(chatId, warningId, 15_000);
               return res.json({ ok: true });
@@ -2999,11 +3042,14 @@ async function startServer() {
             const promptMessageId = await sendGroupMessage(
               chatId,
               `${selectedCompetency ? `Выбран блок «${selectedCompetency}». ` : ''}Напиши текст уведомления следующим сообщением. Бот добавит актуальные упоминания автоматически.\n\nДля отмены: /cancel`,
+              false,
+              messageThreadId,
             );
             pendingGroupMentions.set(pendingKey, {
               competency: selectedCompetency,
               expiresAt,
               promptMessageId,
+              messageThreadId,
             });
             console.log(`[Group Mention] Waiting for notification text in chat=${chatId} from=${fromUser.id}.`);
             setTimeout(() => {
@@ -3013,7 +3059,7 @@ async function startServer() {
             }, 10 * 60 * 1000);
             return res.json({ ok: true });
           }
-          await sendGroupMentionNotification(chatId, commandText, selectedCompetency, user);
+          await sendGroupMentionNotification(chatId, commandText, selectedCompetency, user, messageThreadId);
           return res.json({ ok: true });
         }
 
@@ -3024,7 +3070,7 @@ async function startServer() {
             .sort((a, b) => meetingDateTime(a) - meetingDateTime(b))[0];
           await sendGroupMessage(chatId, nextMeeting
             ? `*Ближайшая встреча*\n\n${meetingDetailsText(nextMeeting, state)}`
-            : 'Ближайших встреч нет.');
+            : 'Ближайших встреч нет.', false, messageThreadId);
           return res.json({ ok: true });
         }
 
@@ -3039,7 +3085,7 @@ async function startServer() {
             .slice(0, 10);
           await sendTaskGroupMessage(chatId, tasks.length
             ? `*Ближайшие дедлайны*\n\n${tasks.map((task) => `• ${formatShortDate(task.deadline) || 'без даты'} — ${task.title}`).join('\n')}`
-            : 'Активных задач нет.');
+            : 'Активных задач нет.', messageThreadId);
           return res.json({ ok: true });
         }
 
@@ -3048,7 +3094,7 @@ async function startServer() {
           const missing = team.filter((member) => !hasSubmittedAvailabilityForWeek(state.availabilities[member.id], state.settings));
           await sendGroupMessage(chatId, missing.length
             ? `*Ещё не отметили слоты (${missing.length}):*\n${missing.map((member) => member.username).join(' ')}`
-            : 'Все участники отметили слоты на неделю.');
+            : 'Все участники отметили слоты на неделю.', false, messageThreadId);
           return res.json({ ok: true });
         }
 
@@ -3062,25 +3108,25 @@ async function startServer() {
             ? `*Ближайшие дни рождения*\n\n${upcoming.map(({ member, days }) => (
                 `• ${formatBirthday(member.birthday)} — ${member.realName}${days === 0 ? ' · сегодня' : ` · через ${days} дн.`}`
               )).join('\n')}`
-            : 'Даты рождения пока не заполнены.');
+            : 'Даты рождения пока не заполнены.', false, messageThreadId);
           return res.json({ ok: true });
         }
 
         if (commandName === 'checkin') {
           if (commandText) {
-            await startGroupCheckin(chatId, commandText.slice(0, 200));
+            await startGroupCheckin(chatId, commandText.slice(0, 200), messageThreadId);
             return res.json({ ok: true });
           }
           if (pendingGroupCheckins.has(pendingKey)) await clearPendingGroupCheckin(pendingKey, chatId);
           const canReceiveMessages = await botCanReceiveOrdinaryGroupMessages(chatId);
           if (canReceiveMessages === false) {
-            const warningId = await sendGroupMessage(chatId, 'Бот видит команду, но Telegram не передаёт ему обычные сообщения. Назначь @megaorgi_bot администратором беседы и повтори /checkin.');
+            const warningId = await sendGroupMessage(chatId, 'Бот видит команду, но Telegram не передаёт ему обычные сообщения. Назначь @megaorgi_bot администратором беседы и повтори /checkin.', false, messageThreadId);
             scheduleTemporaryGroupMessageDeletion(chatId, warningId, 15_000);
             return res.json({ ok: true });
           }
           const expiresAt = Date.now() + 10 * 60 * 1000;
-          const promptMessageId = await sendGroupMessage(chatId, 'Напиши название переклички следующим сообщением.\n\nДля отмены: /cancel');
-          pendingGroupCheckins.set(pendingKey, { expiresAt, promptMessageId });
+          const promptMessageId = await sendGroupMessage(chatId, 'Напиши название переклички следующим сообщением.\n\nДля отмены: /cancel', false, messageThreadId);
+          pendingGroupCheckins.set(pendingKey, { expiresAt, promptMessageId, messageThreadId });
           setTimeout(() => {
             const current = pendingGroupCheckins.get(pendingKey);
             if (current?.expiresAt !== expiresAt) return;
@@ -3099,7 +3145,10 @@ async function startServer() {
             + '/slots — кто не отметил слоты\n'
             + '/birthdays — ближайшие дни рождения\n'
             + '/checkin название — живая перекличка\n'
-            + '/bindteamchat — привязать этот чат (админ)',
+            + '/bindteamchat — привязать этот чат (админ)\n'
+            + '/bindimportant — привязать текущий топик как «ВАЖНОЕ» (админ)',
+          false,
+          messageThreadId,
         );
         return res.json({ ok: true });
       }
@@ -4476,6 +4525,11 @@ async function startServer() {
     }
 
     const previousRecipientIds = meetingRecipientIds(state, meeting.participants, meeting.hostId);
+    const previousMeeting: Meeting = {
+      ...meeting,
+      participants: meeting.participants === 'all' ? 'all' : [...meeting.participants],
+      attendeeIds: [...(meeting.attendeeIds || [])],
+    };
     const nextDuration = duration === undefined ? meeting.duration : Number(duration);
     const nextDate = String(date || meeting.date);
     const nextTime = String(time || meeting.time);
@@ -4497,19 +4551,22 @@ async function startServer() {
         : [...new Set(Array.isArray(participants) ? participants : [])]
             .filter((id) => state.users.some((user) => user.id === id && !isFacultyUser(user)));
     }
-    meeting.topic = topic || '';
-    meeting.description = description || '';
-    meeting.competency = competency || '';
+    if (topic !== undefined) meeting.topic = topic || '';
+    if (description !== undefined) meeting.description = description || '';
+    if (competency !== undefined) meeting.competency = competency || '';
 
     const recipients = meetingRecipientIds(state, meeting.participants, meeting.hostId);
     previousRecipientIds.forEach((id) => recipients.add(id));
-    await notifyMeetingRecipients(
-      state,
-      recipients,
-      `Встреча изменена.\n\n${meetingDetailsText(meeting, state)}\n\nПроверьте обновлённые дату, время и состав участников.`,
-      'meeting_updated',
-      (userId) => meetingRsvpButtons(meeting, userId),
-    );
+    const updateText = meetingUpdateText(previousMeeting, meeting, state);
+    if (!updateText.endsWith('*Что изменилось:*\n')) {
+      await notifyMeetingRecipients(
+        state,
+        recipients,
+        updateText,
+        'meeting_updated',
+        (userId) => meetingRsvpButtons(meeting, userId),
+      );
+    }
     await syncMeetingCalendar(state, meeting);
     saveDatabase(state);
     res.json({ success: true, meeting });

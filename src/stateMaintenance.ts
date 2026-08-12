@@ -81,6 +81,10 @@ export function sanitizeSimulationState(input: SimulationState): SimulationState
   const requestedWeekCount = Number(input.settings?.availabilityWeekCount);
   const cleanSettings: SimulationState['settings'] = {
     teamChatId: optionalText(input.settings?.teamChatId),
+    teamImportantThreadId: Number.isInteger(Number(input.settings?.teamImportantThreadId))
+      && Number(input.settings?.teamImportantThreadId) > 0
+      ? Number(input.settings?.teamImportantThreadId)
+      : undefined,
     availabilityWeekCount: Number.isInteger(requestedWeekCount) && requestedWeekCount >= 2 && requestedWeekCount <= 5 ? requestedWeekCount : 2,
     availabilityActiveDays: availabilityConfig.activeDays,
     availabilityStartHour: availabilityConfig.startHour,

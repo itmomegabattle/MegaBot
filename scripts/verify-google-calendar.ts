@@ -94,6 +94,9 @@ try {
   assert.equal(calendar.summary, 'Команда');
   const created = await syncMeetingToGoogleCalendar(config, meeting, state);
   assert.equal('created' in created && created.created, true);
+  const createdRequest = requests.find((request) => request.method === 'POST' && request.url?.endsWith('/events'));
+  assert.ok(createdRequest);
+  assert.doesNotMatch(String(createdRequest.body.description || ''), /Подтвердили участие/);
   const updated = await syncMeetingToGoogleCalendar(config, { ...meeting, googleCalendarEventId: created.eventId }, state);
   assert.equal('created' in updated && updated.created, false);
   const deleted = await syncMeetingToGoogleCalendar(config, { ...meeting, status: 'cancelled', googleCalendarEventId: created.eventId }, state);

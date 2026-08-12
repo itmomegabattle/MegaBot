@@ -133,6 +133,7 @@ export interface SimulationState {
   messages: Record<string, BotMessage[]>;
   settings?: {
     teamChatId?: string;
+    teamImportantThreadId?: number;
     availabilityWeekCount?: number;
     availabilityActiveDays?: number[];
     availabilityStartHour?: number;
