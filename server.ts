@@ -1048,6 +1048,7 @@ async function startServer() {
     Object.entries(chatUiState.panels)
       .map(([chatId, panel]) => [chatId, new Set(panel.known.filter(Number.isInteger))]),
   );
+  const chatNavigationMessageIds = new Map<string, number>();
   const chatSlotDrafts = new Map<string, StoredSlotDraft>(Object.entries(chatUiState.slotDrafts || {}));
   const pendingSheetAvailabilityExports = new Set(chatUiState.pendingSheetExports || []);
   const groupMembers = new Map(Object.entries(chatUiState.groupMembers || {}).map(([chatId, members]) => [
@@ -1481,6 +1482,35 @@ async function startServer() {
       }
     } catch (err) {
       console.error('Telegram panel send failed:', err);
+    }
+  }
+
+  async function sendNavigationKeyboard(chatId: string | number, rows: string[][], user?: User) {
+    const botToken = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
+    if (!botToken) return;
+    const chatKey = String(chatId);
+    const previousMessageId = chatNavigationMessageIds.get(chatKey);
+    if (previousMessageId) await deleteTelegramMessage(chatId, previousMessageId);
+    const tgApiBase = process.env.TELEGRAM_API_BASE || 'https://api.telegram.org';
+    try {
+      const response = await telegramFetch(`${tgApiBase}/bot${botToken}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: chatId,
+          text: 'Навигация',
+          reply_markup: buildKeyboard(rows, false, user),
+          disable_notification: true,
+        }),
+      });
+      if (!response.ok) {
+        console.error('Telegram navigation keyboard send failed:', response.status, await response.text());
+        return;
+      }
+      const data = await response.json() as { result?: { message_id?: number } };
+      if (data.result?.message_id) chatNavigationMessageIds.set(chatKey, data.result.message_id);
+    } catch (error) {
+      console.error('Telegram navigation keyboard send failed:', error);
     }
   }
 
@@ -2014,6 +2044,11 @@ async function startServer() {
   }
 
   async function showProfilePanel(chatId: string | number, user: User, state: SimulationState) {
+    const navigationMessageId = chatNavigationMessageIds.get(String(chatId));
+    if (navigationMessageId) {
+      await deleteTelegramMessage(chatId, navigationMessageId);
+      chatNavigationMessageIds.delete(String(chatId));
+    }
     chatSessions.delete(String(chatId));
     const rows = isFacultyUser(user)
       ? [['Профиль', 'Мои задачи'], ['Помощь']]
@@ -2190,9 +2225,11 @@ async function startServer() {
     chatSessions.set(chatKey, { flow: 'slots_root' });
     const text = `✅ *Слоты сохранены*\n\n${slotsSummaryText(user, state, availability)}`;
     const keyboard = [[{ text: 'Изменить слоты', callback_data: 'slot_edit' }]];
-    if (!messageId) await sendTelegramKeyboard(chatId, 'Раздел слотов открыт.', [['Меню']], false, user, true);
     if (messageId) await updateInlinePanel(chatId, messageId, text, keyboard);
-    else await sendInlinePanel(chatId, text, keyboard);
+    else {
+      await sendInlinePanel(chatId, text, keyboard);
+      await sendNavigationKeyboard(chatId, [['Меню']], user);
+    }
   }
 
   async function showSlotWeekPicker(chatId: string | number, user: User, state: SimulationState, messageId?: number) {

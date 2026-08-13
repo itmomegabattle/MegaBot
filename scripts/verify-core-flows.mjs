@@ -512,6 +512,11 @@ try {
   const slotsSendCall = telegramCalls.find((call) => (
     call.path.endsWith('/sendMessage') && call.body.reply_markup?.inline_keyboard
   ));
+  const slotsNavigationCall = telegramCalls.find((call) => (
+    call.path.endsWith('/sendMessage') && call.body.reply_markup?.keyboard
+  ));
+  assert.deepEqual(slotsNavigationCall.body.reply_markup.keyboard.flat().map((button) => button.text), ['Меню']);
+  assert.ok(slotsNavigationCall.resultMessageId > slotsSendCall.resultMessageId, 'reply navigation must be sent after the inline slot panel');
   assert.deepEqual(slotsSendCall.body.reply_markup.inline_keyboard.flat().map((button) => button.callback_data), ['slot_edit']);
   const slotsPanelId = slotsSendCall.resultMessageId;
 
