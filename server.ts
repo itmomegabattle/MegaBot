@@ -1498,7 +1498,7 @@ async function startServer() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           chat_id: chatId,
-          text: 'Навигация',
+          text: '\u2063',
           reply_markup: buildKeyboard(rows, false, user),
           disable_notification: true,
         }),
@@ -1508,7 +1508,15 @@ async function startServer() {
         return;
       }
       const data = await response.json() as { result?: { message_id?: number } };
-      if (data.result?.message_id) chatNavigationMessageIds.set(chatKey, data.result.message_id);
+      if (data.result?.message_id) {
+        const messageId = data.result.message_id;
+        chatNavigationMessageIds.set(chatKey, messageId);
+        setTimeout(() => {
+          void deleteTelegramMessage(chatId, messageId).finally(() => {
+            if (chatNavigationMessageIds.get(chatKey) === messageId) chatNavigationMessageIds.delete(chatKey);
+          });
+        }, 750);
+      }
     } catch (error) {
       console.error('Telegram navigation keyboard send failed:', error);
     }
@@ -2194,14 +2202,16 @@ async function startServer() {
       });
       return rows;
     }, []);
-    keyboard.push([{
-      text: selected.length === hours.length ? 'Снять весь день' : 'Выбрать весь день',
-      callback_data: `slot_toggle_day:${dayIndex}`,
-    }]);
-    keyboard.push([{
-      text: unavailable ? '✅ Не смогу' : 'Не смогу',
-      callback_data: `slot_unavailable:${dayIndex}`,
-    }]);
+    keyboard.push([
+      {
+        text: selected.length === hours.length ? 'Снять весь день' : 'Выбрать весь день',
+        callback_data: `slot_toggle_day:${dayIndex}`,
+      },
+      {
+        text: unavailable ? '✅ Не смогу' : 'Не смогу',
+        callback_data: `slot_unavailable:${dayIndex}`,
+      },
+    ]);
     keyboard.push([
       { text: 'Сохранить день', callback_data: `slot_save_day:${dayIndex}` },
       { text: 'Отменить', callback_data: `slot_cancel_day:${dayIndex}` },

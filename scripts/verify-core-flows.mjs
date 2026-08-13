@@ -516,6 +516,7 @@ try {
     call.path.endsWith('/sendMessage') && call.body.reply_markup?.keyboard
   ));
   assert.deepEqual(slotsNavigationCall.body.reply_markup.keyboard.flat().map((button) => button.text), ['Меню']);
+  assert.equal(slotsNavigationCall.body.text, '\u2063');
   assert.ok(slotsNavigationCall.resultMessageId > slotsSendCall.resultMessageId, 'reply navigation must be sent after the inline slot panel');
   assert.deepEqual(slotsSendCall.body.reply_markup.inline_keyboard.flat().map((button) => button.callback_data), ['slot_edit']);
   const slotsPanelId = slotsSendCall.resultMessageId;
@@ -607,6 +608,10 @@ try {
   assert.equal(dayPanelEdit.body.message_id, slotsPanelId);
   assert.ok(dayPanelEdit.body.reply_markup.inline_keyboard.flat().some((button) => button.text === 'Выбрать весь день'));
   assert.ok(dayPanelEdit.body.reply_markup.inline_keyboard.flat().some((button) => button.text === 'Не смогу' && button.callback_data === 'slot_unavailable:2'));
+  assert.ok(dayPanelEdit.body.reply_markup.inline_keyboard.some((row) => (
+    row.some((button) => button.callback_data === 'slot_toggle_day:2')
+    && row.some((button) => button.callback_data === 'slot_unavailable:2')
+  )));
 
   telegramCalls.length = 0;
   await request('/api/telegram-webhook', {
