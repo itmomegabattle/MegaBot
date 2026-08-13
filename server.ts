@@ -1500,7 +1500,7 @@ async function startServer() {
         body: JSON.stringify({
           chat_id: chatId,
           text: '\u2063',
-          reply_markup: buildKeyboard(rows, false, user),
+          reply_markup: { ...buildKeyboard(rows, false, user), is_persistent: true },
           disable_notification: true,
         }),
       });
@@ -1512,11 +1512,6 @@ async function startServer() {
       if (data.result?.message_id) {
         const messageId = data.result.message_id;
         chatNavigationMessageIds.set(chatKey, messageId);
-        setTimeout(() => {
-          void deleteTelegramMessage(chatId, messageId).finally(() => {
-            if (chatNavigationMessageIds.get(chatKey) === messageId) chatNavigationMessageIds.delete(chatKey);
-          });
-        }, 750);
       }
     } catch (error) {
       console.error('Telegram navigation keyboard send failed:', error);
