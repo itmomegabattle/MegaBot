@@ -8,7 +8,12 @@ type ToastType = 'info' | 'success' | 'warning';
 export default function App() {
   const [state, setState] = useState<SimulationState | null>(null);
   const [loading, setLoading] = useState(true);
-  const [activeMiniAppTab, setActiveMiniAppTab] = useState('slots');
+  const [activeMiniAppTab, setActiveMiniAppTab] = useState(() => {
+    const requestedTab = new URLSearchParams(window.location.search).get('tab');
+    return ['slots', 'meetings', 'tasks', 'team', 'faculties', 'profile'].includes(requestedTab || '')
+      ? requestedTab as string
+      : 'slots';
+  });
   const [notifications, setNotifications] = useState<{ id: string; text: string; type: ToastType }[]>([]);
   const [currentUserId, setCurrentUserId] = useState('');
   const [externalOnlyMessage, setExternalOnlyMessage] = useState('');
@@ -199,6 +204,22 @@ export default function App() {
     return false;
   };
 
+  const handleRenameAvailabilityWeek = async (weekIndex: number, name: string): Promise<boolean> => {
+    if (!currentUserId) return false;
+    try {
+      const res = await fetch('/api/availability/week-name', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ requesterId: currentUserId, weekIndex, name }),
+      });
+      if (!res.ok) return false;
+      await fetchState();
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
   const handleCompleteTask = async (taskId: string, timeSpentMinutes?: number, completionComment?: string): Promise<boolean> => {
     try {
       const res = await fetch('/api/task/status', {
@@ -317,6 +338,7 @@ export default function App() {
           onCompleteTask={handleCompleteTask}
           onReleaseTask={handleReleaseTask}
           onRefreshState={fetchState}
+          onRenameAvailabilityWeek={handleRenameAvailabilityWeek}
         />
       </div>
     </div>

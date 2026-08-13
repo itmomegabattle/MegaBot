@@ -51,9 +51,12 @@ interface MiniAppProps {
   onCompleteTask: (taskId: string, timeSpentMinutes?: number, completionComment?: string) => Promise<boolean>;
   onReleaseTask: (taskId: string) => void;
   onRefreshState: () => boolean | Promise<boolean>;
+  onRenameAvailabilityWeek: (weekIndex: number, name: string) => Promise<boolean>;
 }
 
 type MeetingSuggestion = {
+  weekIndex: number;
+  date: string;
   dayIndex: number;
   hour: number;
   endHour?: number;
@@ -285,6 +288,7 @@ export default function MiniApp({
   onCompleteTask,
   onReleaseTask,
   onRefreshState,
+  onRenameAvailabilityWeek,
 }: MiniAppProps) {
   const [slots, setSlots] = useState<Record<number, number[]>>({});
   const [hardUnavailableDays, setHardUnavailableDays] = useState<number[]>([]);
@@ -299,6 +303,9 @@ export default function MiniApp({
   const [suggesting, setSuggesting] = useState(false);
   const [suggestionDays, setSuggestionDays] = useState<number[]>(() => normalizeAvailabilityConfig(state.settings).activeDays);
   const [suggestionDuration, setSuggestionDuration] = useState('1');
+  const [suggestionWeekIndex, setSuggestionWeekIndex] = useState(0);
+  const [editingWeekNameIndex, setEditingWeekNameIndex] = useState<number | null>(null);
+  const [weekNameDraft, setWeekNameDraft] = useState('');
   const [suggestionError, setSuggestionError] = useState('');
   const [savingWeekIndex, setSavingWeekIndex] = useState<number | null>(null);
   const [savedWeekIndexes, setSavedWeekIndexes] = useState<number[]>([]);
@@ -510,7 +517,18 @@ export default function MiniApp({
   )));
   const latestCompletedTasks = completedTasks.slice(0, 10);
   const editingCompletedTask = Boolean(completingTaskId && state.tasks.find((task) => task.id === completingTaskId)?.status === 'completed');
-  const scheduledMeetings = state.meetings.filter((meeting) => meeting.status === 'scheduled');
+  const todayKey = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Moscow', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+  const meetingIsoDate = (meeting: Meeting) => {
+    const normalized = formatDateShort(meeting.date);
+    const match = normalized.match(/^(\d{2})\.(\d{2})(?:\.(\d{2}|\d{4}))?$/);
+    if (!match) return '9999-12-31';
+    const year = match[3] ? (match[3].length === 2 ? `20${match[3]}` : match[3]) : String(new Date().getFullYear());
+    return `${year}-${match[2]}-${match[1]}`;
+  };
+  const scheduledMeetings = state.meetings
+    .filter((meeting) => meeting.status === 'scheduled' && meetingIsoDate(meeting) >= todayKey)
+    .slice()
+    .sort((a, b) => meetingDateTime(a) - meetingDateTime(b));
   const visibleScheduledMeetings = showAllMeetings ? scheduledMeetings : scheduledMeetings.slice(0, 3);
   const profileAssignedTasks = state.tasks.filter((task) => taskAssigneeIds(task).includes(currentUser.id));
   const profileCompletedTasks = allCompletedTasks.filter((task) => taskAssigneeIds(task).includes(currentUser.id));
@@ -781,7 +799,7 @@ export default function MiniApp({
       const res = await fetch('/api/meeting/suggest', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ days: suggestionDays, duration: Number(suggestionDuration) }),
+        body: JSON.stringify({ days: suggestionDays, duration: Number(suggestionDuration), weekIndex: suggestionWeekIndex }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Не удалось найти слоты');
@@ -808,7 +826,7 @@ export default function MiniApp({
   const applySuggestion = (suggestion: MeetingSuggestion) => {
     setMeetingType('general');
     setMeetingTitle('Общее собрание');
-    setMeetingDate(nextDateForDay(suggestion.dayIndex));
+    setMeetingDate(suggestion.date || nextDateForDay(suggestion.weekIndex * 7 + suggestion.dayIndex));
     setMeetingTime(`${String(suggestion.hour).padStart(2, '0')}:00`);
     setMeetingDuration(String(suggestion.duration || 1));
   };
@@ -2121,32 +2139,41 @@ export default function MiniApp({
             <div className="space-y-4">
               {Array.from({ length: visibleWeeks }, (_, weekIndex) => (
                 <div key={weekIndex} className="space-y-3">
-                  <div className="flex items-center justify-between px-1">
-                    <div>
-                      <h2 className="font-black">{weekIndex === 0 ? 'Эта неделя' : `Неделя ${weekIndex + 1}`}</h2>
+                  <div className="flex min-w-0 items-start gap-2 px-1">
+                    <div className="min-w-0 flex-1">
+                      {editingWeekNameIndex === weekIndex ? (
+                        <form className="flex min-w-0 gap-2" onSubmit={async (event) => {
+                          event.preventDefault();
+                          if (await onRenameAvailabilityWeek(weekIndex, weekNameDraft)) setEditingWeekNameIndex(null);
+                        }}>
+                          <input autoFocus maxLength={80} value={weekNameDraft} onChange={(event) => setWeekNameDraft(event.target.value)} className={`${inputClass} min-w-0 py-2`} />
+                          <button type="submit" className={`${miniButtonClass} shrink-0 whitespace-nowrap`}>Сохранить</button>
+                        </form>
+                      ) : (
+                        <button type="button" onClick={() => {
+                          setWeekNameDraft(availabilityConfig.weekNames[weekIndex]);
+                          setEditingWeekNameIndex(weekIndex);
+                        }} className="max-w-full break-words text-left font-black text-slate-950">
+                          {availabilityConfig.weekNames[weekIndex]}
+                        </button>
+                      )}
                       <p className="text-xs font-semibold text-slate-500">
                         {formatDayMonth(dateForSlotDay(weekIndex * 7 + activeDays[0]))} – {formatDayMonth(dateForSlotDay(weekIndex * 7 + activeDays[activeDays.length - 1]))}
                       </p>
                     </div>
-                  </div>
-
-                  <button
+                    <button
                     type="button"
                     aria-pressed={outWeekIndexes.includes(weekIndex)}
                     onClick={() => toggleOutWeek(weekIndex)}
-                    className={`w-full rounded-2xl border px-4 py-3 text-left ${pressClass} ${
+                    className={`shrink-0 whitespace-nowrap rounded-full border px-3 py-2 text-xs font-black ${pressClass} ${
                       outWeekIndexes.includes(weekIndex)
                         ? 'border-rose-300 bg-rose-50 text-rose-800'
                         : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50 active:bg-slate-100'
                     }`}
                   >
-                    <span className="block text-sm font-black">{outWeekIndexes.includes(weekIndex) ? '✓ Я в ауте' : 'Я в ауте'}</span>
-                    <span className="mt-0.5 block text-xs font-semibold opacity-75">
-                      {outWeekIndexes.includes(weekIndex)
-                        ? 'Команда не ориентируется на тебя всю эту неделю. Нажми ещё раз, чтобы вернуться.'
-                        : 'Полностью исключить себя из планирования на эту неделю'}
-                    </span>
+                    {outWeekIndexes.includes(weekIndex) ? '✅ Я в ауте' : 'Я в ауте'}
                   </button>
+                  </div>
 
                   {!outWeekIndexes.includes(weekIndex) && activeDayLabels.map((day) => {
                     const absoluteDayIndex = weekIndex * 7 + day.dayIndex;
@@ -2218,7 +2245,7 @@ export default function MiniApp({
         )}
 
         {activeTab === 'meetings' && (
-          <section className="space-y-4">
+          <section className="flex flex-col gap-4">
             {meetingError && !showMeetingForm && <div role="alert" className="rounded-2xl border border-rose-200 bg-rose-50 p-3 text-sm font-bold text-rose-800">{meetingError}</div>}
             <div className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
               <div className="flex items-center justify-between gap-3">
@@ -2370,6 +2397,33 @@ export default function MiniApp({
               </div>
               <div className="mt-4 space-y-3 rounded-2xl bg-slate-50 p-3">
                 <div>
+                  <div className="mb-2 text-xs font-black text-slate-600">Неделя поиска</div>
+                  <div className="grid grid-cols-2 gap-2">
+                    {Array.from({ length: configuredWeekCount }, (_, weekIndex) => (
+                      <button
+                        key={weekIndex}
+                        type="button"
+                        aria-pressed={suggestionWeekIndex === weekIndex}
+                        onClick={() => {
+                          setSuggestionWeekIndex(weekIndex);
+                          setSuggestions([]);
+                          setSuggestionError('');
+                        }}
+                        className={`min-h-11 min-w-0 rounded-xl border px-2 text-xs font-black ${pressClass} ${
+                          suggestionWeekIndex === weekIndex
+                            ? 'border-[#0069E0] bg-[#0069E0] text-white'
+                            : 'border-slate-200 bg-white text-slate-600 hover:bg-blue-50'
+                        }`}
+                      >
+                        <span className="block break-words">{availabilityConfig.weekNames[weekIndex]}</span>
+                        <span className="mt-0.5 block text-[10px] opacity-75">
+                          {formatDayMonth(dateForSlotDay(weekIndex * 7))}–{formatDayMonth(dateForSlotDay(weekIndex * 7 + 6))}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div>
                   <div className="mb-2 text-xs font-black text-slate-600">Дни поиска</div>
                   <div className="grid gap-2" style={{ gridTemplateColumns: `repeat(${activeDays.length}, minmax(0, 1fr))` }}>
                     {activeDays.map((dayIndex) => {
@@ -2424,7 +2478,7 @@ export default function MiniApp({
                       <button onClick={() => applySuggestion(suggestion)} className={`w-full p-3 text-left hover:bg-blue-100 active:bg-blue-200 ${pressClass}`}>
                       <div className="flex items-center justify-between gap-2">
                         <div className="font-black">
-                          {index + 1}. {dayLabels[suggestion.dayIndex]?.full}, {formatDecimalHour(suggestion.hour)}–{formatDecimalHour(suggestion.endHour || suggestion.hour + (suggestion.duration || 1))}
+                          {index + 1}. {dayLabels[suggestion.dayIndex]?.full}, {suggestion.date}, {formatDecimalHour(suggestion.hour)}–{formatDecimalHour(suggestion.endHour || suggestion.hour + (suggestion.duration || 1))}
                         </div>
                         <div className="rounded-full bg-white px-2.5 py-1 text-xs font-black text-[#0069E0]">
                           {suggestion.count}/{suggestion.total}
@@ -2456,11 +2510,11 @@ export default function MiniApp({
 
             {showMeetingForm && (
             <form onSubmit={submitMeeting} className="space-y-3 rounded-3xl border border-blue-100 bg-white p-4 shadow-sm animate-in fade-in slide-in-from-top-2 duration-200">
-              <div className="flex items-center justify-between gap-2">
-                <h2 className="font-black">{editingMeetingId ? 'Редактировать собрание' : 'Назначить собрание'}</h2>
+              <div className="flex min-w-0 items-start justify-between gap-2">
+                <h2 className="min-w-0 flex-1 break-words font-black">{editingMeetingId ? 'Редактировать собрание' : 'Назначить собрание'}</h2>
                 {editingMeetingId && (
-                  <button type="button" onClick={resetMeetingForm} className={miniButtonClass}>
-                    <X className="h-4 w-4" />
+                  <button type="button" onClick={resetMeetingForm} className={`${miniButtonClass} shrink-0 whitespace-nowrap`}>
+                    <span aria-hidden="true">❌</span>
                     Отмена
                   </button>
                 )}
@@ -2470,7 +2524,7 @@ export default function MiniApp({
               <Field label="Название">
                 <input value={meetingTitle} onChange={(e) => setMeetingTitle(e.target.value)} className={inputClass} />
               </Field>
-                  <div className="grid min-w-0 grid-cols-1 gap-3 min-[720px]:grid-cols-3">
+              <div className="grid min-w-0 grid-cols-1 gap-3 min-[520px]:grid-cols-2 min-[820px]:grid-cols-3 [&>*]:min-w-0">
                 <Field label="Дата">
                   <DatePickerField value={meetingDate} onChange={setMeetingDate} placeholder="Выбери дату" />
                 </Field>
@@ -2522,7 +2576,7 @@ export default function MiniApp({
             </form>
             )}
 
-            <div className="space-y-3">
+            <div className="order-first space-y-3">
               <div className="flex items-center justify-between gap-3 px-1">
                 <h2 className="font-black">Ближайшие встречи</h2>
                 {scheduledMeetings.length > 3 && (
@@ -2542,9 +2596,6 @@ export default function MiniApp({
                   const expanded = expandedMeetingId === meeting.id;
                   const invited = meeting.participants === 'all' || meeting.participants.includes(currentUser.id) || meeting.hostId === currentUser.id;
                   const attending = (meeting.attendeeIds || []).includes(currentUser.id);
-                  const attendeeNames = (meeting.attendeeIds || [])
-                    .map((id) => state.users.find((user) => user.id === id)?.realName)
-                    .filter(Boolean);
                   return (
                     <div
                       key={meeting.id}
@@ -2565,6 +2616,20 @@ export default function MiniApp({
                         </div>
                       </div>
 
+                      <button
+                        type="button"
+                        disabled={rsvpMeetingId === meeting.id}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          void setMeetingAttendance(meeting, !attending);
+                        }}
+                        aria-pressed={attending}
+                        className={`${miniButtonClass} mt-3 w-full disabled:opacity-60 ${attending ? 'border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100' : 'border-blue-100 bg-blue-50 text-[#005BC4] hover:bg-blue-100'}`}
+                      >
+                        <span aria-hidden="true">{attending ? '❌' : '✅'}</span>
+                        {rsvpMeetingId === meeting.id ? 'Сохраняю...' : attending ? 'Я не приду' : 'Я приду'}
+                      </button>
+
                       {expanded && (
                         <div className="mt-4 space-y-2 border-t border-slate-100 pt-4 text-sm text-slate-600" onClick={(event) => event.stopPropagation()}>
                           <InfoRow label="Автор" value={host?.realName || 'Организатор'} />
@@ -2576,18 +2641,7 @@ export default function MiniApp({
                           {meeting.competency && <InfoRow label="Блок" value={meeting.competency} />}
                           <InfoRow label="Тема" value={meeting.topic || 'Без темы'} />
                           {meeting.description && <InfoRow label="Описание" value={meeting.description} />}
-                          <InfoRow label="Придут" value={attendeeNames.length ? `${attendeeNames.length}: ${attendeeNames.join(', ')}` : 'пока никто не подтвердил'} />
                           {!invited && !attending && <p className="rounded-2xl bg-blue-50 px-3 py-2 text-xs font-bold text-[#005BC4]">Тебя не добавили в исходный состав, но к этому собранию можно присоединиться.</p>}
-                          <button
-                            type="button"
-                            disabled={rsvpMeetingId === meeting.id}
-                            onClick={() => setMeetingAttendance(meeting, !attending)}
-                            aria-pressed={attending}
-                            className={`${miniButtonClass} w-full disabled:opacity-60 ${attending ? 'border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100' : 'border-blue-100 bg-blue-50 text-[#005BC4] hover:bg-blue-100'}`}
-                          >
-                            {attending ? <X className="h-4 w-4" /> : <Check className="h-4 w-4" />}
-                            {rsvpMeetingId === meeting.id ? 'Сохраняю...' : attending ? 'Я не приду' : 'Я приду'}
-                          </button>
                           {canManage && (
                             <div className="flex gap-2 pt-2">
                               <button onClick={() => startMeetingEdit(meeting)} className={miniButtonClass}>
@@ -3605,7 +3659,7 @@ const selectClass = 'min-w-0 max-w-full w-full appearance-none rounded-2xl borde
 const primaryButtonClass = `mega-primary-button flex w-full items-center justify-center gap-2 rounded-3xl bg-[#0069E0] px-5 py-3 text-sm font-black text-white shadow-[0_12px_28px_rgba(0,105,224,0.24)] hover:bg-[#1677E8] active:bg-[#0058BD] ${pressClass}`;
 const primaryCompactButtonClass = `mega-primary-button flex items-center justify-center gap-2 rounded-full bg-[#0069E0] px-4 py-2 text-xs font-black text-white shadow-[0_10px_24px_rgba(0,105,224,0.22)] hover:bg-[#1677E8] active:bg-[#0058BD] ${pressClass}`;
 const secondaryButtonClass = `mega-secondary-button flex items-center justify-center gap-2 rounded-full border border-blue-100 bg-blue-50 px-3 py-2 text-xs font-black text-[#0069E0] hover:bg-blue-100 active:bg-blue-200 ${pressClass}`;
-const miniButtonClass = `mega-secondary-button flex items-center justify-center gap-1 rounded-full border border-blue-100 bg-blue-50 px-3 py-2 text-xs font-black text-[#0069E0] hover:bg-blue-100 active:bg-blue-200 ${pressClass}`;
+const miniButtonClass = `mega-secondary-button flex min-w-0 items-center justify-center gap-1 rounded-full border border-blue-100 bg-blue-50 px-3 py-2 text-xs font-black text-[#0069E0] hover:bg-blue-100 active:bg-blue-200 ${pressClass}`;
 const iconButtonClass = `flex items-center justify-center rounded-full border border-white/25 bg-white/15 text-white backdrop-blur hover:bg-white/25 active:bg-white/30 ${pressClass}`;
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {

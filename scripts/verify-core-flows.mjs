@@ -402,7 +402,7 @@ try {
   const meetingsMenu = telegramCalls.find((call) => call.path.endsWith('/sendMessage') && call.body.reply_markup?.keyboard);
   assert.notEqual(meetingsMenu.body.disable_notification, true);
   const meetingsButtons = meetingsMenu.body.reply_markup.keyboard.flat().map((button) => button.text);
-  assert.deepEqual(meetingsButtons, ['Назначить собрание', 'Назад']);
+  assert.deepEqual(meetingsButtons, ['Назначить собрание', 'Меню', 'Назад']);
 
   telegramCalls.length = 0;
   await request('/api/telegram-webhook', {
@@ -425,8 +425,8 @@ try {
     });
   }
   const competencyPicker = telegramCalls.filter((call) => call.path.endsWith('/sendMessage') && call.body.reply_markup?.keyboard).at(-1);
-  assert.equal(competencyPicker.body.reply_markup.keyboard[0][0].text, 'Назад');
-  assert.ok(competencyPicker.body.reply_markup.keyboard.every((row) => row.length <= 2));
+  assert.deepEqual(competencyPicker.body.reply_markup.keyboard[0].map((button) => button.text), ['Меню', 'Назад']);
+  assert.ok(competencyPicker.body.reply_markup.keyboard.slice(1).every((row) => row.length <= 3));
 
   telegramCalls.length = 0;
   await request('/api/telegram-webhook', {
@@ -512,13 +512,31 @@ try {
   const slotsSendCall = telegramCalls.find((call) => (
     call.path.endsWith('/sendMessage') && call.body.reply_markup?.inline_keyboard
   ));
-  assert.ok(slotsSendCall.body.reply_markup.inline_keyboard.flat().some((button) => (
-    button.callback_data === 'slot_out_week:0' && button.text.includes('Я в ауте')
-  )));
-  assert.ok(slotsSendCall.body.reply_markup.inline_keyboard.flat().some((button) => (
-    button.callback_data === 'slot_out_week:1' && button.text.includes('Я в ауте')
-  )));
+  assert.deepEqual(slotsSendCall.body.reply_markup.inline_keyboard.flat().map((button) => button.callback_data), ['slot_edit']);
   const slotsPanelId = slotsSendCall.resultMessageId;
+
+  telegramCalls.length = 0;
+  await request('/api/telegram-webhook', {
+    update_id: 1100,
+    callback_query: {
+      id: 'slots-edit-weeks',
+      from: aliceTelegram,
+      data: 'slot_edit',
+      message: { message_id: slotsPanelId, chat: { id: 200, type: 'private' } },
+    },
+  });
+  assert.ok(telegramCalls.some((call) => call.path.endsWith('/editMessageText') && call.body.reply_markup.inline_keyboard.flat().some((button) => button.callback_data === 'slot_week:1')));
+
+  telegramCalls.length = 0;
+  await request('/api/telegram-webhook', {
+    update_id: 11001,
+    callback_query: {
+      id: 'slots-open-next-week',
+      from: aliceTelegram,
+      data: 'slot_week:1',
+      message: { message_id: slotsPanelId, chat: { id: 200, type: 'private' } },
+    },
+  });
 
   telegramCalls.length = 0;
   await request('/api/telegram-webhook', {
@@ -545,6 +563,17 @@ try {
   });
   outDraftState = JSON.parse(await readFile(`${testDatabasePath}.chat-panels.json`, 'utf8'));
   assert.deepEqual(outDraftState.slotDrafts['200'].outWeekIndexes, []);
+
+  telegramCalls.length = 0;
+  await request('/api/telegram-webhook', {
+    update_id: 1103,
+    callback_query: {
+      id: 'slots-open-first-week',
+      from: aliceTelegram,
+      data: 'slot_week:0',
+      message: { message_id: slotsPanelId, chat: { id: 200, type: 'private' } },
+    },
+  });
 
   telegramCalls.length = 0;
   await request('/api/telegram-webhook', {
@@ -585,7 +614,7 @@ try {
     },
   });
   const unavailableDayEdit = telegramCalls.find((call) => call.path.endsWith('/editMessageText'));
-  assert.ok(unavailableDayEdit.body.reply_markup.inline_keyboard.flat().some((button) => button.text === '✓ Не смогу'));
+  assert.ok(unavailableDayEdit.body.reply_markup.inline_keyboard.flat().some((button) => button.text === '✅ Не смогу'));
   const unavailableDraftState = JSON.parse(await readFile(`${testDatabasePath}.chat-panels.json`, 'utf8'));
   assert.deepEqual(unavailableDraftState.slotDrafts['200'].hardUnavailableDays, [2]);
 
@@ -684,7 +713,7 @@ try {
     callback_query: {
       id: 'slots-back-to-days',
       from: aliceTelegram,
-      data: 'nav_slots',
+      data: 'slot_week:0',
       message: { message_id: slotsPanelId, chat: { id: 200, type: 'private' } },
     },
   });
@@ -700,15 +729,14 @@ try {
     callback_query: {
       id: 'slots-save',
       from: aliceTelegram,
-      data: 'slot_save',
+      data: 'slot_save_week:0',
       message: { message_id: slotsPanelId, chat: { id: 200, type: 'private' } },
     },
   });
   const slotsSavedMenu = telegramCalls.find((call) => call.path.endsWith('/editMessageText'));
   assert.ok(slotsSavedMenu);
-  const slotsSavedButtons = slotsSavedMenu.body.reply_markup.inline_keyboard.flat().map((button) => button.text);
-  assert.ok(slotsSavedButtons.includes('Профиль'));
-  assert.ok(slotsSavedButtons.includes('Изменить слоты'));
+  const slotsSavedButtons = slotsSavedMenu.body.reply_markup.inline_keyboard.flat().map((button) => button.callback_data);
+  assert.deepEqual(slotsSavedButtons, ['slot_edit']);
   const slotsSavedDatabase = JSON.parse(await readFile(testDatabasePath, 'utf8'));
   assert.deepEqual(slotsSavedDatabase.availabilities.u_alice.slots['2'], [17, 18, 19, 20, 21, 22]);
   const slotsSavedUiState = JSON.parse(await readFile(`${testDatabasePath}.chat-panels.json`, 'utf8'));
@@ -726,47 +754,17 @@ try {
   });
   const reopenedSlots = telegramCalls.find((call) => call.path.endsWith('/sendMessage') && call.body.reply_markup?.inline_keyboard);
   assert.ok(reopenedSlots);
-  assert.ok(reopenedSlots.body.reply_markup.inline_keyboard.flat().some((button) => button.text === 'Ср · 6/7'));
   assert.ok(String(reopenedSlots.body.text).includes('Ср: 17:00, 18:00, 19:00, 20:00, 21:00, 22:00'));
-  assert.ok(reopenedSlots.body.reply_markup.inline_keyboard.flat().some((button) => (
-    button.text === 'Выбрать все слоты' && button.callback_data === 'slot_toggle_week'
-  )));
+  assert.deepEqual(reopenedSlots.body.reply_markup.inline_keyboard.flat().map((button) => button.callback_data), ['slot_edit']);
   const reopenedSlotsPanelId = reopenedSlots.resultMessageId;
 
-  telegramCalls.length = 0;
-  await request('/api/telegram-webhook', {
-    update_id: 142,
-    callback_query: {
-      id: 'slots-whole-week',
-      from: aliceTelegram,
-      data: 'slot_toggle_week',
-      message: { message_id: reopenedSlotsPanelId, chat: { id: 200, type: 'private' } },
-    },
-  });
-  const wholeWeekDraft = JSON.parse(await readFile(`${testDatabasePath}.chat-panels.json`, 'utf8'));
-  for (let dayIndex = 0; dayIndex < 5; dayIndex += 1) {
-    assert.deepEqual(wholeWeekDraft.slotDrafts['200'].slots[String(dayIndex)], [17, 18, 19, 20, 21, 22, 23]);
+  for (const [updateId, id, data] of [[1411, 'slots-edit-again', 'slot_edit'], [1412, 'slots-week-again', 'slot_week:0']]) {
+    telegramCalls.length = 0;
+    await request('/api/telegram-webhook', {
+      update_id: updateId,
+      callback_query: { id, from: aliceTelegram, data, message: { message_id: reopenedSlotsPanelId, chat: { id: 200, type: 'private' } } },
+    });
   }
-  assert.equal(wholeWeekDraft.slotDrafts['200'].slots['5'], undefined);
-  assert.equal(wholeWeekDraft.slotDrafts['200'].slots['6'], undefined);
-  assert.ok(telegramCalls.some((call) => (
-    call.path.endsWith('/editMessageText')
-    && call.body.reply_markup.inline_keyboard.flat().some((button) => button.text === 'Снять все слоты')
-  )));
-
-  telegramCalls.length = 0;
-  await request('/api/telegram-webhook', {
-    update_id: 143,
-    callback_query: {
-      id: 'slots-whole-week',
-      from: aliceTelegram,
-      data: 'slot_toggle_week',
-      message: { message_id: reopenedSlotsPanelId, chat: { id: 200, type: 'private' } },
-    },
-  });
-  const duplicateProtectedDraft = JSON.parse(await readFile(`${testDatabasePath}.chat-panels.json`, 'utf8'));
-  assert.deepEqual(duplicateProtectedDraft.slotDrafts['200'].slots['0'], [17, 18, 19, 20, 21, 22, 23]);
-  assert.ok(!telegramCalls.some((call) => call.path.endsWith('/editMessageText')));
 
   telegramCalls.length = 0;
   await Promise.all([
@@ -790,7 +788,7 @@ try {
     }),
   ]);
   const rapidToggleDraft = JSON.parse(await readFile(`${testDatabasePath}.chat-panels.json`, 'utf8'));
-  assert.deepEqual(rapidToggleDraft.slotDrafts['200'].slots['0'], [18, 19, 20, 21, 22, 23]);
+  assert.deepEqual(rapidToggleDraft.slotDrafts['200'].slots['0'], [17]);
 
   telegramCalls.length = 0;
   failNextTelegramEdit = true;
@@ -809,7 +807,7 @@ try {
   assert.ok(telegramCalls.some((call) => call.path.endsWith('/deleteMessage') && call.body.message_id === reopenedSlotsPanelId));
   const recoveredPanelId = recoveredPanel.resultMessageId;
   const recoveredDraft = JSON.parse(await readFile(`${testDatabasePath}.chat-panels.json`, 'utf8'));
-  assert.deepEqual(recoveredDraft.slotDrafts['200'].slots['0'], [19, 20, 21, 22, 23]);
+  assert.deepEqual(recoveredDraft.slotDrafts['200'].slots['0'], [17, 18]);
 
   telegramCalls.length = 0;
   await request('/api/telegram-webhook', {
@@ -823,7 +821,7 @@ try {
   });
   assert.ok(!telegramCalls.some((call) => call.path.endsWith('/editMessageText')));
   const afterStaleRecoveryDraft = JSON.parse(await readFile(`${testDatabasePath}.chat-panels.json`, 'utf8'));
-  assert.deepEqual(afterStaleRecoveryDraft.slotDrafts['200'].slots['0'], [19, 20, 21, 22, 23]);
+  assert.deepEqual(afterStaleRecoveryDraft.slotDrafts['200'].slots['0'], [17, 18]);
   assert.ok(Number.isInteger(recoveredPanelId));
 
   telegramCalls.length = 0;
@@ -832,13 +830,13 @@ try {
     callback_query: {
       id: 'slots-save-after-recovery',
       from: aliceTelegram,
-      data: 'slot_save',
+      data: 'slot_save_week:0',
       message: { message_id: recoveredPanelId, chat: { id: 200, type: 'private' } },
     },
   });
   const savedAfterRecovery = JSON.parse(await readFile(testDatabasePath, 'utf8'));
-  assert.deepEqual(savedAfterRecovery.availabilities.u_alice.slots['0'], [19, 20, 21, 22, 23]);
-  assert.deepEqual(savedAfterRecovery.availabilities.u_alice.slots['2'], [17, 18, 19, 20, 21, 22, 23]);
+  assert.deepEqual(savedAfterRecovery.availabilities.u_alice.slots['0'], [17, 18]);
+  assert.deepEqual(savedAfterRecovery.availabilities.u_alice.slots['2'], [17, 18, 19, 20, 21, 22]);
   assert.equal((JSON.parse(await readFile(`${testDatabasePath}.chat-panels.json`, 'utf8'))).slotDrafts['200'], undefined);
 
   telegramCalls.length = 0;
@@ -853,8 +851,7 @@ try {
   });
   const reopenedAfterRecovery = telegramCalls.find((call) => call.path.endsWith('/sendMessage') && call.body.reply_markup?.inline_keyboard);
   assert.ok(reopenedAfterRecovery);
-  assert.ok(reopenedAfterRecovery.body.reply_markup.inline_keyboard.flat().some((button) => button.text === 'Пн · 5/7'));
-  assert.ok(reopenedAfterRecovery.body.reply_markup.inline_keyboard.flat().some((button) => button.text === 'Ср · 7/7'));
+  assert.deepEqual(reopenedAfterRecovery.body.reply_markup.inline_keyboard.flat().map((button) => button.callback_data), ['slot_edit']);
 
   telegramCalls.length = 0;
   await request('/api/telegram-webhook', {
@@ -1174,8 +1171,8 @@ try {
     && call.body.reply_markup?.inline_keyboard?.flat().some((button) => button.callback_data === meetingRsvpAction);
   const hostMeetingNotification = telegramCalls.find((call) => isMeetingRsvpNotification(call) && String(call.body.chat_id) === '100');
   const aliceMeetingNotification = telegramCalls.find((call) => isMeetingRsvpNotification(call) && String(call.body.chat_id) === '200');
-  assert.equal(hostMeetingNotification.body.reply_markup.inline_keyboard[0][0].text, '✓ Я приду');
-  assert.equal(aliceMeetingNotification.body.reply_markup.inline_keyboard[0][0].text, '✕ Я не приду');
+  assert.equal(hostMeetingNotification.body.reply_markup.inline_keyboard[0][0].text, '✅ Я приду');
+  assert.equal(aliceMeetingNotification.body.reply_markup.inline_keyboard[0][0].text, '❌ Я не приду');
 
   telegramCalls.length = 0;
   await request('/api/telegram-webhook', {
@@ -1189,7 +1186,7 @@ try {
         chat: { id: 100, type: 'private' },
         reply_markup: {
           inline_keyboard: [
-            [{ text: '✓ Я приду', callback_data: meetingRsvpAction }],
+            [{ text: '✅ Я приду', callback_data: meetingRsvpAction }],
             [{ text: 'Открыть встречи', web_app: { url: 'https://example.com' } }],
           ],
         },
@@ -1198,7 +1195,7 @@ try {
   });
   const rsvpMarkupUpdate = telegramCalls.find((call) => call.path.endsWith('/editMessageReplyMarkup'));
   assert.ok(rsvpMarkupUpdate, 'meeting RSVP must update the pressed button');
-  assert.equal(rsvpMarkupUpdate.body.reply_markup.inline_keyboard[0][0].text, '✕ Я не приду');
+  assert.equal(rsvpMarkupUpdate.body.reply_markup.inline_keyboard[0][0].text, '❌ Я не приду');
   assert.equal(rsvpMarkupUpdate.body.reply_markup.inline_keyboard[1][0].web_app.url, 'https://example.com');
   assert.ok(telegramCalls.some((call) => call.path.endsWith('/answerCallbackQuery') && String(call.body.text || '').length > 0));
 
@@ -1214,7 +1211,7 @@ try {
         chat: { id: 100, type: 'private' },
         reply_markup: {
           inline_keyboard: [
-            [{ text: '✕ Я не приду', callback_data: meetingRsvpAction }],
+            [{ text: '❌ Я не приду', callback_data: meetingRsvpAction }],
             [{ text: 'Открыть встречи', web_app: { url: 'https://example.com' } }],
           ],
         },
@@ -1223,7 +1220,7 @@ try {
   });
   const rsvpCancelMarkupUpdate = telegramCalls.find((call) => call.path.endsWith('/editMessageReplyMarkup'));
   assert.ok(rsvpCancelMarkupUpdate, 'second meeting RSVP press must cancel attendance');
-  assert.equal(rsvpCancelMarkupUpdate.body.reply_markup.inline_keyboard[0][0].text, '✓ Я приду');
+  assert.equal(rsvpCancelMarkupUpdate.body.reply_markup.inline_keyboard[0][0].text, '✅ Я приду');
 
   telegramCalls.length = 0;
   const declineMeeting = await request('/api/meeting/rsvp', {
@@ -1254,8 +1251,9 @@ try {
   assert.equal(meetingUpdate.response.status, 200);
   assert.equal(telegramCalls.filter((call) => call.path.endsWith('/sendMessage')).length, 3);
   const meetingUpdateNotification = telegramCalls.find((call) => call.path.endsWith('/sendMessage'));
-  assert.ok(String(meetingUpdateNotification?.body.text || '').includes('❗ 17:00'));
-  assert.ok(String(meetingUpdateNotification?.body.text || '').includes('Стало: ❗'));
+  assert.ok(String(meetingUpdateNotification?.body.text || '').includes('❗Время: 18:00 → 17:00'));
+  assert.ok(String(meetingUpdateNotification?.body.text || '').includes('❗Описание:'));
+  assert.ok(String(meetingUpdateNotification?.body.text || '').includes('Длительность:'));
   assert.ok(String(meetingUpdateNotification?.body.text || '').includes('Что изменилось'));
   assert.ok(!String(meetingUpdateNotification?.body.text || '').includes('Придут:'));
 

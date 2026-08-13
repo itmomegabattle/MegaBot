@@ -372,6 +372,35 @@ function assignedIds(task: Task) {
   return task.assignedTo || [];
 }
 
+function parseMeetingChatDate(value?: string) {
+  const input = String(value || '').trim().toLowerCase();
+  const todayIso = moscowClock(new Date()).dateKey;
+  const relativeDays = input === 'сегодня' ? 0 : input === 'завтра' ? 1 : input === 'послезавтра' ? 2 : null;
+  if (relativeDays !== null) {
+    const date = new Date(`${todayIso}T12:00:00Z`);
+    date.setUTCDate(date.getUTCDate() + relativeDays);
+    return `${String(date.getUTCDate()).padStart(2, '0')}.${String(date.getUTCMonth() + 1).padStart(2, '0')}.${String(date.getUTCFullYear()).slice(2)}`;
+  }
+  const match = input.match(/^(\d{1,2})[.\/-](\d{1,2})(?:[.\/-](\d{2}|\d{4}))?$/);
+  if (!match) return null;
+  const nowYear = Number(todayIso.slice(0, 4));
+  const year = match[3] ? Number(match[3].length === 2 ? `20${match[3]}` : match[3]) : nowYear;
+  const day = Number(match[1]);
+  const month = Number(match[2]);
+  const candidate = new Date(Date.UTC(year, month - 1, day));
+  if (candidate.getUTCFullYear() !== year || candidate.getUTCMonth() !== month - 1 || candidate.getUTCDate() !== day) return null;
+  return `${String(day).padStart(2, '0')}.${String(month).padStart(2, '0')}.${String(year).slice(2)}`;
+}
+
+function parseMeetingChatTime(value?: string) {
+  const match = String(value || '').trim().match(/^(\d{1,2})(?:[:.\s](\d{1,2}))?$/);
+  if (!match) return null;
+  const hour = Number(match[1]);
+  const minute = Number(match[2] || 0);
+  if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return null;
+  return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+}
+
 function taskCompetencyNames(task: Task) {
   return task.competencies?.length ? task.competencies : task.competency ? [task.competency] : [];
 }
@@ -451,28 +480,28 @@ function meetingUpdateText(before: Meeting, after: Meeting, state: SimulationSta
   const participantKey = (meeting: Meeting) => meeting.participants === 'all'
     ? 'all'
     : [...meeting.participants].sort().join('|');
-  if (before.title !== after.title) changes.push(`• Название: ${value(before.title)} → ${value(after.title)}`);
-  if (before.date !== after.date) changes.push(`• Дата: ${formatMeetingDate(before.date)} → ${formatMeetingDate(after.date)}`);
-  if (before.time !== after.time) changes.push(`• Время: ${value(before.time)} → ❗ ${value(after.time)}`);
+  if (before.title !== after.title) changes.push(`❗Название: ${value(before.title)} → ${value(after.title)}`);
+  if (before.date !== after.date) changes.push(`❗Дата: ${formatMeetingDate(before.date)} → ${formatMeetingDate(after.date)}`);
+  if (before.time !== after.time) changes.push(`❗Время: ${value(before.time)} → ${value(after.time)}`);
   if (Number(before.duration || 1) !== Number(after.duration || 1)) {
-    changes.push(`• Длительность: ${taskDurationLabel(Math.round(Number(before.duration || 1) * 60))} → ${taskDurationLabel(Math.round(Number(after.duration || 1) * 60))}`);
+    changes.push(`❗Длительность: ${taskDurationLabel(Math.round(Number(before.duration || 1) * 60))} → ${taskDurationLabel(Math.round(Number(after.duration || 1) * 60))}`);
   }
-  if (before.type !== after.type) changes.push('• Формат встречи изменён');
-  if (participantKey(before) !== participantKey(after)) changes.push('• Состав приглашённых изменён');
-  if (value(before.competency) !== value(after.competency)) changes.push(`• Блок: ${value(before.competency)} → ${value(after.competency)}`);
-  if (value(before.topic) !== value(after.topic)) changes.push(`• Тема: ${value(before.topic)} → ${value(after.topic)}`);
+  if (before.type !== after.type) changes.push('❗Формат встречи изменён');
+  if (participantKey(before) !== participantKey(after)) changes.push('❗Состав приглашённых изменён');
+  if (value(before.competency) !== value(after.competency)) changes.push(`❗Блок: ${value(before.competency)} → ${value(after.competency)}`);
+  if (value(before.topic) !== value(after.topic)) changes.push(`❗Тема: ${value(before.topic)} → ${value(after.topic)}`);
   if (value(before.description) !== value(after.description)) {
-    changes.push(`• Описание:\n  Было: ${value(before.description)}\n  Стало: ❗ ${value(after.description)}`);
+    changes.push(`❗Описание:\nБыло: ${value(before.description)}\nСтало: ${value(after.description)}`);
   }
-  const host = state.users.find((user) => user.id === after.hostId);
-  return `Встреча изменена: *${after.title}*\nОрганизатор: ${userMention(host)}\n\n*Что изменилось:*\n${changes.join('\n')}`;
+  const details = meetingDetailsText(after, state).replace(/^\*[^\n]+\*\n\n/, '');
+  return `Встреча изменена: *${after.title}*\n${details}\n\n*Что изменилось:*\n${changes.join('\n')}`;
 }
 
 function meetingRsvpButtons(meeting: Meeting, userId: string) {
   const attending = (meeting.attendeeIds || []).includes(userId);
   return [
-    { text: attending ? '✕ Я не приду' : '✓ Я приду', action: `meeting_rsvp:${meeting.id}` },
-    { text: 'Открыть встречи', action: 'open_tma' },
+    { text: attending ? '❌ Я не приду' : '✅ Я приду', action: `meeting_rsvp:${meeting.id}` },
+    { text: 'Открыть встречи', action: 'open_meetings' },
   ];
 }
 
@@ -513,13 +542,13 @@ function profileSummaryText(user: User, state: SimulationState) {
     + `${nextMeeting ? `\n\n*Следующая встреча:* ${formatShortDate(nextMeeting.date)}, ${nextMeeting.time} — ${nextMeeting.title}` : ''}`;
 }
 
-function slotsSummaryText(user: User, state: SimulationState, overrideSlots?: Record<number, number[]>) {
+function slotsSummaryText(user: User, state: SimulationState, overrideSlots?: Record<number, number[]>, weekIndex = 0) {
   const availability = overrideSlots || alignedAvailabilitySlots(state.availabilities[user.id]);
   const dayNames = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
   const { activeDays } = normalizeAvailabilityConfig(state.settings);
-  const rows = activeDays.map((index) => {
-    const hours = availability[index] || [];
-    return `${dayNames[index]}: ${hours.length ? hours.map((hour) => `${hour}:00`).join(', ') : '—'}`;
+  const rows = activeDays.map((dayOffset) => {
+    const hours = availability[weekIndex * 7 + dayOffset] || [];
+    return `${dayNames[dayOffset]}: ${hours.length ? hours.map((hour) => `${hour}:00`).join(', ') : '—'}`;
   });
   return `*Мои слоты на эту неделю*\n\n${rows.join('\n')}`;
 }
@@ -597,6 +626,15 @@ function alignedHardUnavailableDays(availability?: Availability) {
   return availability.hardUnavailableDays
     .map((day) => Number(day) - weekOffset * 7)
     .filter((day) => Number.isFinite(day) && day >= 0 && day < 35);
+}
+
+function slotWeekRange(weekIndex: number) {
+  const start = new Date(`${currentWeekStartIso()}T12:00:00Z`);
+  start.setUTCDate(start.getUTCDate() + weekIndex * 7);
+  const end = new Date(start);
+  end.setUTCDate(end.getUTCDate() + 6);
+  const short = (date: Date) => `${String(date.getUTCDate()).padStart(2, '0')}.${String(date.getUTCMonth() + 1).padStart(2, '0')}`;
+  return `${short(start)}–${short(end)}`;
 }
 
 function alignedOutWeekIndexes(availability?: Availability) {
@@ -939,6 +977,8 @@ async function startServer() {
     participantIds?: string[];
     topic?: string;
     description?: string;
+    meetingDate?: string;
+    meetingTime?: string;
     taskIds?: string[];
     selectedTaskId?: string;
     selectedStatus?: Task['status'];
@@ -954,6 +994,8 @@ async function startServer() {
     taskCompetency?: string;
     taskPriority?: Task['priority'];
     taskEventId?: string;
+    taskAssignmentMode?: 'block' | 'person' | 'open' | 'team';
+    taskAssigneeIds?: string[];
     completionTaskId?: string;
     completionTimeMinutes?: number;
   }>();
@@ -1287,10 +1329,18 @@ async function startServer() {
     }
   }
 
-  function replyPickerRows(items: string[]) {
-    const rows: string[][] = [['Назад']];
-    for (let index = 0; index < items.length; index += 2) rows.push(items.slice(index, index + 2));
+  function chunkReplyButtons(items: string[], columns = 3) {
+    const rows: string[][] = [];
+    for (let index = 0; index < items.length; index += columns) rows.push(items.slice(index, index + columns));
     return rows;
+  }
+
+  function flowKeyboardRows(items: string[] = [], columns = 3) {
+    return [['Меню', 'Назад'], ...chunkReplyButtons(items, columns)];
+  }
+
+  function replyPickerRows(items: string[]) {
+    return flowKeyboardRows(items, 3);
   }
 
   async function deleteOldChatPanels(chatId: string | number, currentMessageId: number) {
@@ -1913,16 +1963,19 @@ async function startServer() {
     } else if (buttons && buttons.length > 0) {
       replyMarkup = {};
       replyMarkup.inline_keyboard = buttons.map(b => {
-        if (b.action === 'open_tma' || b.action === 'open_tasks') {
+        if (b.action === 'open_tma' || b.action === 'open_tasks' || b.action === 'open_meetings') {
           if (!webAppUrl) {
             return [{
               text: b.text,
               callback_data: b.action,
             }];
           }
+          const targetUrl = new URL(webAppUrl);
+          if (b.action === 'open_tasks') targetUrl.searchParams.set('tab', 'tasks');
+          if (b.action === 'open_meetings') targetUrl.searchParams.set('tab', 'meetings');
           return [{
             text: b.text,
-            web_app: { url: webAppUrl }
+            web_app: { url: targetUrl.toString() }
           }];
         }
         return [{
@@ -2094,12 +2147,14 @@ async function startServer() {
   ) {
     const dayNames = ['Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота', 'Воскресенье'];
     const { hours } = normalizeAvailabilityConfig(state.settings);
+    const dayOffset = dayIndex % 7;
+    const weekIndex = Math.floor(dayIndex / 7);
     const selected = pendingSlots[dayIndex] || [];
     const unavailable = hardUnavailableDays.includes(dayIndex);
     const keyboard = hours.reduce<{ text: string; callback_data: string }[][]>((rows, hour, index) => {
       if (index % 2 === 0) rows.push([]);
       rows[rows.length - 1].push({
-        text: `${selected.includes(hour) ? '✓ ' : ''}${hour}:00`,
+        text: `${selected.includes(hour) ? '✅ ' : ''}${hour}:00`,
         callback_data: `slot_toggle:${dayIndex}:${hour}`,
       });
       return rows;
@@ -2109,16 +2164,16 @@ async function startServer() {
       callback_data: `slot_toggle_day:${dayIndex}`,
     }]);
     keyboard.push([{
-      text: unavailable ? '✓ Не смогу' : 'Не смогу',
+      text: unavailable ? '✅ Не смогу' : 'Не смогу',
       callback_data: `slot_unavailable:${dayIndex}`,
     }]);
     keyboard.push([
-      { text: 'Сохранить', callback_data: 'slot_save' },
+      { text: 'Сохранить день', callback_data: `slot_save_day:${dayIndex}` },
       { text: 'Отменить', callback_data: `slot_cancel_day:${dayIndex}` },
     ]);
-    keyboard.push([{ text: 'К дням', callback_data: 'nav_slots' }]);
+    keyboard.push([{ text: 'К дням', callback_data: `slot_week:${weekIndex}` }]);
     return {
-      text: `${slotsSummaryText(user, state, pendingSlots)}\n\n*${dayNames[dayIndex]}:* ${unavailable ? 'отмечено «Не смогу».' : 'выбери свободные часы или нажми «Не смогу».'}`,
+      text: `*Неделя ${slotWeekRange(weekIndex)}*\n\n*${dayNames[dayOffset]}:* ${unavailable ? 'отмечено «Не смогу».' : 'выбери свободные часы или нажми «Не смогу».'}`,
       keyboard,
     };
   }
@@ -2130,53 +2185,75 @@ async function startServer() {
     overrideSlots?: Record<number, number[]>,
     messageId?: number,
   ) {
-    const dayNames = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
-    const { activeDays, hours } = normalizeAvailabilityConfig(state.settings);
+    const chatKey = String(chatId);
+    const availability = cloneValidSlotSelection(state, overrideSlots || alignedAvailabilitySlots(state.availabilities[user.id]));
+    chatSessions.set(chatKey, { flow: 'slots_root' });
+    const text = `✅ *Слоты сохранены*\n\n${slotsSummaryText(user, state, availability)}`;
+    const keyboard = [[{ text: 'Изменить слоты', callback_data: 'slot_edit' }]];
+    if (!messageId) await sendTelegramKeyboard(chatId, 'Раздел слотов открыт.', [['Меню']], false, user, true);
+    if (messageId) await updateInlinePanel(chatId, messageId, text, keyboard);
+    else await sendInlinePanel(chatId, text, keyboard);
+  }
+
+  async function showSlotWeekPicker(chatId: string | number, user: User, state: SimulationState, messageId?: number) {
     const chatKey = String(chatId);
     const savedDraft = chatSlotDrafts.get(chatKey);
-    const availability = cloneValidSlotSelection(state, overrideSlots
-      || (savedDraft?.userId === user.id && savedDraft.weekStart === currentWeekStartIso() ? savedDraft.slots : undefined)
-      || alignedAvailabilitySlots(state.availabilities[user.id]));
-    const hardUnavailableDays = currentSlotUnavailableDays(chatKey, user, state, availability);
+    const availability = cloneValidSlotSelection(state,
+      savedDraft?.userId === user.id && savedDraft.weekStart === currentWeekStartIso()
+        ? savedDraft.slots
+        : alignedAvailabilitySlots(state.availabilities[user.id]));
+    storeSlotDraft(chatKey, user, state, availability, undefined,
+      currentSlotUnavailableDays(chatKey, user, state, availability), currentSlotOutWeekIndexes(chatKey, user, state));
+    const { weekCount } = normalizeAvailabilityConfig(state.settings);
+    const keyboard = Array.from({ length: weekCount }, (_, weekIndex) => ([{
+      text: `Неделя ${slotWeekRange(weekIndex)}`,
+      callback_data: `slot_week:${weekIndex}`,
+    }]));
+    keyboard.push([{ text: 'К сохранённым слотам', callback_data: 'nav_slots' }]);
+    await updateInlinePanel(chatId, messageId, '*Изменение слотов*\n\nВыбери неделю.', keyboard);
+  }
+
+  async function showSlotWeekPanel(chatId: string | number, user: User, state: SimulationState, weekIndex: number, messageId?: number) {
+    const chatKey = String(chatId);
+    const availability = currentSlotDraft(chatKey, user, state);
+    const unavailableDays = currentSlotUnavailableDays(chatKey, user, state, availability);
     const outWeekIndexes = currentSlotOutWeekIndexes(chatKey, user, state);
-    storeSlotDraft(chatKey, user, state, availability, undefined, hardUnavailableDays, outWeekIndexes);
-    const wholeWeekSelected = activeDays.every((dayIndex) => (
-      (availability[dayIndex] || []).length === hours.length
-    ));
-    const dayButtons = outWeekIndexes.includes(0) ? [] : activeDays.map((dayIndex) => ({
-      text: hardUnavailableDays.includes(dayIndex)
-        ? `${dayNames[dayIndex]} · не смогу`
-        : `${dayNames[dayIndex]} · ${(availability[dayIndex] || []).length}/${hours.length}`,
-      callback_data: `slots_day:${dayIndex}`,
-    }));
+    const { activeDays, hours } = normalizeAvailabilityConfig(state.settings);
+    const dayNames = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
+    const dayButtons = outWeekIndexes.includes(weekIndex) ? [] : activeDays.map((dayOffset) => {
+      const dayIndex = weekIndex * 7 + dayOffset;
+      return {
+        text: unavailableDays.includes(dayIndex)
+          ? `${dayNames[dayOffset]} · не смогу`
+          : `${dayNames[dayOffset]} · ${(availability[dayIndex] || []).length}/${hours.length}`,
+        callback_data: `slots_day:${dayIndex}`,
+      };
+    });
     const keyboard = [
-      ...Array.from({ length: normalizeAvailabilityConfig(state.settings).weekCount }, (_, weekIndex) => ([{
-        text: `${outWeekIndexes.includes(weekIndex) ? '✓ ' : ''}Я в ауте · ${weekIndex === 0 ? 'эта неделя' : `неделя ${weekIndex + 1}`}`,
+      [{
+        text: `${outWeekIndexes.includes(weekIndex) ? '✅ ' : ''}Я в ауте`,
         callback_data: `slot_out_week:${weekIndex}`,
-      }])),
+      }],
       ...dayButtons.reduce<{ text: string; callback_data: string }[][]>((rows, button, index) => {
         if (index % 3 === 0) rows.push([]);
         rows[rows.length - 1].push(button);
         return rows;
       }, []),
-      [{
-        text: wholeWeekSelected ? 'Снять все слоты' : 'Выбрать все слоты',
-        callback_data: 'slot_toggle_week',
-      }],
-      [{ text: 'Сохранить', callback_data: 'slot_save' }],
+      [{ text: 'Сохранить неделю', callback_data: `slot_save_week:${weekIndex}` }],
+      [{ text: 'К выбору недели', callback_data: 'slot_edit' }],
     ];
-    const text = outWeekIndexes.includes(0)
-      ? '*Мои слоты на эту неделю*\n\nТы отметил «Я в ауте». Команда не будет учитывать тебя при планировании этой недели.'
-      : `${slotsSummaryText(user, state, availability)}\n\nВыбери день. Внутри можно отметить отдельные часы или нажать «Выбрать весь день».`;
-    if (messageId) await updateInlinePanel(chatId, messageId, text, keyboard);
-    else await sendInlinePanel(chatId, text, keyboard);
+    const text = outWeekIndexes.includes(weekIndex)
+      ? `*Неделя ${slotWeekRange(weekIndex)}*\n\nТы отметил «Я в ауте».`
+      : `${slotsSummaryText(user, state, availability, weekIndex)}\n\n*Неделя ${slotWeekRange(weekIndex)}* · выбери день.`;
+    chatSessions.set(chatKey, { flow: 'slots_edit', pendingSlots: availability });
+    await updateInlinePanel(chatId, messageId, text, keyboard);
   }
 
   async function showMeetingsPanel(chatId: string | number, user: User, state: SimulationState) {
     chatSessions.set(String(chatId), { flow: 'meetings_root' });
     await sendTelegramKeyboard(chatId, meetingsSummaryText(user, state), [
       ['Назначить собрание'],
-      ['Назад'],
+      ['Меню', 'Назад'],
     ], false, user);
   }
 
@@ -2211,6 +2288,67 @@ async function startServer() {
       ['Задачи факультетов'],
       ['Назад'],
     ], false, user);
+  }
+
+  async function beginChatTaskDetails(chatId: string | number, user: User, state: SimulationState, session: any) {
+    const activeEvents = (state.events || []).filter((item) => item.status === 'active');
+    if (activeEvents.length) {
+      chatSessions.set(String(chatId), { ...session, flow: 'task_create_event' });
+      await sendTaskTelegramKeyboard(
+        chatId,
+        'Для какого мероприятия создаём задачу?',
+        flowKeyboardRows([...activeEvents.map((item) => item.name), 'Без мероприятия'], 2),
+        false,
+        user,
+      );
+    } else {
+      chatSessions.set(String(chatId), { ...session, flow: 'task_create_title', taskEventId: '' });
+      await sendTaskTelegramKeyboard(chatId, 'Напиши название задачи.', flowKeyboardRows(), false, user);
+    }
+  }
+
+  async function finishChatTask(chatId: string | number, user: User, state: SimulationState, session: any, priority: Task['priority']) {
+    const team = state.users.filter((member) => !isFacultyUser(member));
+    const assigneeIds: string[] = session.taskAssignmentMode === 'open'
+      ? []
+      : [...new Set<string>((session.taskAssigneeIds || []).map(String))];
+    const task: Task = {
+      id: `t_${Date.now()}`,
+      title: session.taskTitle || 'Без названия',
+      description: session.taskDescription || '',
+      deadline: session.taskDeadline || '',
+      assignedTo: assigneeIds.length ? assigneeIds : null,
+      creatorId: user.id,
+      competency: session.taskCompetency || '',
+      eventId: session.taskEventId || '',
+      sow: '',
+      tips: [],
+      status: assigneeIds.length ? 'assigned' : 'open',
+      priority,
+      createdAt: new Date().toISOString(),
+      completedAt: '',
+    };
+    state.tasks.push(task);
+    chatSessions.delete(String(chatId));
+    const targets = assigneeIds.length
+      ? team.filter((member) => assigneeIds.includes(member.id))
+      : team;
+    for (const target of targets) {
+      if (!target.telegramId || target.id === user.id) continue;
+      const notificationText = assigneeIds.length
+        ? `Тебе назначена задача:\n\n${taskDetailsText(task, state)}`
+        : `На доске появилась свободная задача.\n\n${taskDetailsText(task, state)}`;
+      await sendTaskTelegramMessage(
+        target.telegramId,
+        notificationText,
+        [{ text: 'Открыть задачи', action: 'open_tasks' }],
+        false,
+        target,
+      );
+    }
+    saveDatabase(state);
+    await sendTaskGroupMessage(chatId, `Задача создана:\n\n${taskDetailsText(task, state)}`);
+    await showTasksPanel(chatId, user, state);
   }
 
   async function completeTaskFromChat(state: SimulationState, task: Task, user: User, timeSpentMinutes?: number, completionComment = '') {
@@ -2528,14 +2666,16 @@ async function startServer() {
       const callbackMessageId = Number(callback.message?.message_id);
       const currentPanelId = chatPanelMessageIds.get(String(chatId));
       const isSlotPanelAction = action === 'nav_slots'
-        || action === 'slot_save'
+        || action === 'slot_edit'
+        || action.startsWith('slot_week:')
+        || action.startsWith('slot_save_day:')
+        || action.startsWith('slot_save_week:')
         || action.startsWith('slots_day:')
         || action.startsWith('slot_toggle:')
         || action.startsWith('slot_toggle_day:')
         || action.startsWith('slot_unavailable:')
         || action.startsWith('slot_out_week:')
-        || action.startsWith('slot_cancel_day:')
-        || action === 'slot_toggle_week';
+        || action.startsWith('slot_cancel_day:');
       if (isSlotPanelAction && currentPanelId && callbackMessageId !== currentPanelId) {
         await deleteTelegramMessage(chatId, callbackMessageId);
         await answerCallback(callback.id, 'Эта панель устарела. Открой «Слоты» ещё раз.');
@@ -2555,6 +2695,24 @@ async function startServer() {
         return res.json({ ok: true });
       }
 
+      if (action === 'slot_edit') {
+        await answerCallback(callback.id);
+        await showSlotWeekPicker(chatId, user, state, callbackMessageId);
+        return res.json({ ok: true });
+      }
+
+      if (action.startsWith('slot_week:')) {
+        const weekIndex = Number(action.split(':')[1]);
+        const { weekCount } = normalizeAvailabilityConfig(state.settings);
+        if (!Number.isInteger(weekIndex) || weekIndex < 0 || weekIndex >= weekCount) {
+          await answerCallback(callback.id, 'Неизвестная неделя');
+          return res.json({ ok: true });
+        }
+        await answerCallback(callback.id);
+        await showSlotWeekPanel(chatId, user, state, weekIndex, callbackMessageId);
+        return res.json({ ok: true });
+      }
+
       if (action === 'nav_tasks') {
         await answerCallback(callback.id);
         await showTasksPanel(chatId, user, state);
@@ -2564,7 +2722,7 @@ async function startServer() {
       if (action.startsWith('slots_day:')) {
         const dayIndex = Number(action.split(':')[1]);
         const { activeDays } = normalizeAvailabilityConfig(state.settings);
-        if (!Number.isInteger(dayIndex) || !activeDays.includes(dayIndex)) {
+        if (!Number.isInteger(dayIndex) || !activeDays.includes(dayIndex % 7)) {
           await answerCallback(callback.id, 'Неизвестный день');
           return res.json({ ok: true });
         }
@@ -2581,7 +2739,7 @@ async function startServer() {
         const dayIndex = Number(dayValue);
         const hour = Number(hourValue);
         const { activeDays, hours } = normalizeAvailabilityConfig(state.settings);
-        if (!Number.isInteger(dayIndex) || !activeDays.includes(dayIndex) || !hours.includes(hour)) {
+        if (!Number.isInteger(dayIndex) || !activeDays.includes(dayIndex % 7) || !hours.includes(hour)) {
           await answerCallback(callback.id, 'Неизвестный слот');
           return res.json({ ok: true });
         }
@@ -2602,7 +2760,7 @@ async function startServer() {
       if (action.startsWith('slot_toggle_day:')) {
         const dayIndex = Number(action.split(':')[1]);
         const { activeDays, hours } = normalizeAvailabilityConfig(state.settings);
-        if (!Number.isInteger(dayIndex) || !activeDays.includes(dayIndex)) {
+        if (!Number.isInteger(dayIndex) || !activeDays.includes(dayIndex % 7)) {
           await answerCallback(callback.id, 'Неизвестный день');
           return res.json({ ok: true });
         }
@@ -2622,7 +2780,7 @@ async function startServer() {
       if (action.startsWith('slot_unavailable:')) {
         const dayIndex = Number(action.split(':')[1]);
         const { activeDays } = normalizeAvailabilityConfig(state.settings);
-        if (!Number.isInteger(dayIndex) || !activeDays.includes(dayIndex)) {
+        if (!Number.isInteger(dayIndex) || !activeDays.includes(dayIndex % 7)) {
           await answerCallback(callback.id, 'Неизвестный день');
           return res.json({ ok: true });
         }
@@ -2657,7 +2815,7 @@ async function startServer() {
         if (draft.dayBaseline.unavailable) hardUnavailableDays.push(dayIndex);
         storeSlotDraft(chatKey, user, state, pendingSlots, undefined, hardUnavailableDays);
         await answerCallback(callback.id, 'Изменения за день отменены');
-        await showSlotsPanel(chatId, user, state, pendingSlots, callbackMessageId);
+        await showSlotWeekPanel(chatId, user, state, Math.floor(dayIndex / 7), callbackMessageId);
         return res.json({ ok: true });
       }
 
@@ -2689,37 +2847,42 @@ async function startServer() {
           nextOutWeekIndexes,
         );
         await answerCallback(callback.id, wasOut ? 'Ты снова в строю' : 'Отмечено: я в ауте');
-        await showSlotsPanel(chatId, user, state, pendingSlots, callbackMessageId);
+        await showSlotWeekPanel(chatId, user, state, weekIndex, callbackMessageId);
         return res.json({ ok: true });
       }
 
-      if (action === 'slot_toggle_week') {
+      if (action.startsWith('slot_save_day:') || action.startsWith('slot_save_week:')) {
         const chatKey = String(chatId);
-        const pendingSlots = currentSlotDraft(chatKey, user, state);
-        const hardUnavailableDays = currentSlotUnavailableDays(chatKey, user, state, pendingSlots)
-          .filter((day) => day >= 7);
-        const { activeDays, hours } = normalizeAvailabilityConfig(state.settings);
-        const wasFull = activeDays.every((dayIndex) => (pendingSlots[dayIndex] || []).length === hours.length);
-        for (let dayIndex = 0; dayIndex < 7; dayIndex += 1) delete pendingSlots[dayIndex];
-        for (const dayIndex of activeDays) {
-          if (!wasFull) pendingSlots[dayIndex] = [...hours];
+        const savingDay = action.startsWith('slot_save_day:');
+        const targetIndex = Number(action.split(':')[1]);
+        const weekIndex = savingDay ? Math.floor(targetIndex / 7) : targetIndex;
+        const { weekCount } = normalizeAvailabilityConfig(state.settings);
+        if (!Number.isInteger(targetIndex) || weekIndex < 0 || weekIndex >= weekCount) {
+          await answerCallback(callback.id, 'Неизвестный период');
+          return res.json({ ok: true });
         }
-        storeSlotDraft(chatKey, user, state, pendingSlots, undefined, hardUnavailableDays, currentSlotOutWeekIndexes(chatKey, user, state).filter((weekIndex) => weekIndex !== 0));
-        await answerCallback(callback.id, wasFull ? 'Все слоты сняты' : 'Выбраны все слоты недели');
-        await showSlotsPanel(chatId, user, state, pendingSlots, callbackMessageId);
-        return res.json({ ok: true });
-      }
-
-      if (action === 'slot_save') {
-        const chatKey = String(chatId);
         const pendingSlots = currentSlotDraft(chatKey, user, state);
         const hardUnavailableDays = currentSlotUnavailableDays(chatKey, user, state, pendingSlots);
         const outWeekIndexes = currentSlotOutWeekIndexes(chatKey, user, state);
+        const savedSlots = cloneValidSlotSelection(state, alignedAvailabilitySlots(state.availabilities[user.id]));
+        const savedUnavailable = new Set(alignedHardUnavailableDays(state.availabilities[user.id]));
+        const savedOutWeeks = new Set(alignedOutWeekIndexes(state.availabilities[user.id]));
+        const dayIndexes = savingDay ? [targetIndex] : Array.from({ length: 7 }, (_, offset) => weekIndex * 7 + offset);
+        for (const dayIndex of dayIndexes) {
+          if (pendingSlots[dayIndex]?.length) savedSlots[dayIndex] = [...pendingSlots[dayIndex]];
+          else delete savedSlots[dayIndex];
+          if (hardUnavailableDays.includes(dayIndex)) savedUnavailable.add(dayIndex);
+          else savedUnavailable.delete(dayIndex);
+        }
+        if (!savingDay) {
+          if (outWeekIndexes.includes(weekIndex)) savedOutWeeks.add(weekIndex);
+          else savedOutWeeks.delete(weekIndex);
+        }
         state.availabilities[user.id] = {
           userId: user.id,
-          slots: pendingSlots,
-          hardUnavailableDays,
-          outWeekIndexes,
+          slots: savedSlots,
+          hardUnavailableDays: [...savedUnavailable].sort((a, b) => a - b),
+          outWeekIndexes: [...savedOutWeeks].sort((a, b) => a - b),
           weekStart: currentWeekStartIso(),
           updatedAt: new Date().toISOString(),
         };
@@ -2728,28 +2891,23 @@ async function startServer() {
           await updateInlinePanel(
             chatId,
             callbackMessageId,
-            `⚠️ *Слоты пока не сохранены*\n\n${slotsSummaryText(user, state, pendingSlots)}\n\nЧерновик сохранён. Нажми «Повторить сохранение».`,
-            [
-              [{ text: 'Повторить сохранение', callback_data: 'slot_save' }],
-              [{ text: 'К дням', callback_data: 'nav_slots' }],
-            ],
+            '⚠️ *Слоты пока не сохранены*\n\nЧерновик не потерян. Повтори сохранение.',
+            [[{ text: 'Повторить', callback_data: action }]],
           );
           return res.json({ ok: true });
         }
-        chatSessions.delete(chatKey);
-        chatSlotDrafts.delete(chatKey);
         if (sheetsConfig) pendingSheetAvailabilityExports.add(user.id);
         persistChatPanelMessageIds();
-        await answerCallback(callback.id, 'Слоты сохранены');
-        await updateInlinePanel(
-          chatId,
-          callbackMessageId,
-          `✅ *Слоты сохранены*\n\n${slotsSummaryText(user, state, pendingSlots)}`,
-          [
-            [{ text: 'Изменить слоты', callback_data: 'nav_slots' }],
-            [{ text: 'Профиль', callback_data: 'nav_profile' }],
-          ],
-        );
+        await answerCallback(callback.id, savingDay ? 'День сохранён' : 'Неделя сохранена');
+        if (savingDay) {
+          const draft = chatSlotDrafts.get(chatKey);
+          if (draft) draft.dayBaseline = undefined;
+          await showSlotWeekPanel(chatId, user, state, weekIndex, callbackMessageId);
+        } else {
+          chatSessions.delete(chatKey);
+          chatSlotDrafts.delete(chatKey);
+          await showSlotsPanel(chatId, user, state, undefined, callbackMessageId);
+        }
         void flushPendingSheetAvailabilityExports();
         return res.json({ ok: true });
       }
@@ -2791,7 +2949,7 @@ async function startServer() {
         const currentKeyboard = callback.message?.reply_markup?.inline_keyboard;
         if (Array.isArray(currentKeyboard) && callbackMessageId) {
           const confirmedKeyboard = currentKeyboard.map((row: any[]) => row.map((button: any) => (
-            button.callback_data === action ? { ...button, text: result.attending ? '✕ Я не приду' : '✓ Я приду' } : button
+            button.callback_data === action ? { ...button, text: result.attending ? '❌ Я не приду' : '✅ Я приду' } : button
           )));
           await editTelegramReplyMarkup(chatId, callbackMessageId, confirmedKeyboard);
         }
@@ -3417,35 +3575,45 @@ async function startServer() {
           await showTeamPanel(chatId, user, state);
           return res.json({ ok: true });
         }
+        if (normalizedText === 'назад' && currentSession?.flow === 'meeting_enter_time') {
+          chatSessions.set(chatKey, { ...currentSession, flow: 'meeting_enter_date', meetingTime: undefined });
+          await sendTelegramKeyboard(chatId, 'Введи дату собрания: например, 14.08.2026, 14.08 или «завтра».', flowKeyboardRows());
+          return res.json({ ok: true });
+        }
+        if (normalizedText === 'назад' && currentSession?.flow === 'meeting_enter_date') {
+          chatSessions.set(chatKey, { ...currentSession, flow: 'meeting_enter_description', meetingDate: undefined });
+          await sendTelegramKeyboard(chatId, 'Напиши описание собрания или нажми «Пропустить».', flowKeyboardRows(['Пропустить'], 1));
+          return res.json({ ok: true });
+        }
         if (normalizedText === 'назад' && currentSession?.flow === 'meeting_enter_description') {
           chatSessions.set(chatKey, { ...currentSession, flow: 'meeting_enter_topic', topic: '' });
-          await sendTelegramKeyboard(chatId, 'Напиши тему собрания одним сообщением.', [['Назад']]);
+          await sendTelegramKeyboard(chatId, 'Напиши тему собрания одним сообщением.', flowKeyboardRows());
           return res.json({ ok: true });
         }
         if (normalizedText === 'назад' && currentSession?.flow === 'meeting_enter_topic') {
           if (currentSession.meetingKind === 'competency') {
             chatSessions.set(chatKey, { flow: 'meeting_confirm_competency', meetingKind: 'competency', competency: currentSession.competency, participantIds: currentSession.participantIds });
-            await sendTelegramKeyboard(chatId, 'Вернулся к подтверждению блока.', [['Подтвердить'], ['Назад']]);
+            await sendTelegramKeyboard(chatId, 'Проверь выбранный блок.', flowKeyboardRows(['Подтвердить'], 1));
             return res.json({ ok: true });
           }
           chatSessions.set(chatKey, { flow: 'meeting_choose_type' });
-          await sendTelegramKeyboard(chatId, 'Какое собрание назначаем?', [['Собрать всю команду'], ['Выбрать блок'], ['Назад']]);
+          await sendTelegramKeyboard(chatId, 'Кого приглашаем?', flowKeyboardRows(['Собрать всю команду', 'Выбрать блок'], 2));
           return res.json({ ok: true });
         }
         if (normalizedText === 'назад' && currentSession?.flow === 'meeting_confirm_competency') {
           const freshState = loadDatabase();
           const competencies = freshState.competencies || [];
           chatSessions.set(chatKey, { flow: 'meeting_pick_competency' });
-          await sendTelegramKeyboard(chatId, 'Выбери блок. Кнопка «Назад» всегда находится сверху:', replyPickerRows(competencies));
+          await sendTelegramKeyboard(chatId, 'Выбери блок.', replyPickerRows(competencies));
           return res.json({ ok: true });
         }
         if (normalizedText === 'назад' && currentSession?.flow === 'meeting_pick_competency') {
           chatSessions.set(chatKey, { flow: 'meeting_choose_type' });
-          await sendTelegramKeyboard(chatId, 'Какое собрание назначаем?', [['Собрать всю команду'], ['Выбрать блок'], ['Назад']]);
+          await sendTelegramKeyboard(chatId, 'Кого приглашаем?', flowKeyboardRows(['Собрать всю команду', 'Выбрать блок'], 2));
           return res.json({ ok: true });
         }
         if (normalizedText === 'назад' && currentSession?.flow === 'meeting_choose_type') {
-          await sendTelegramKeyboard(chatId, 'Раздел встреч.', [['Назначить собрание'], ['Назад']]);
+          await showMeetingsPanel(chatId, user, state);
           chatSessions.delete(chatKey);
           return res.json({ ok: true });
         }
@@ -3456,7 +3624,7 @@ async function startServer() {
 
       if (normalizedText === 'назначить собрание') {
         chatSessions.set(chatKey, { flow: 'meeting_choose_type' });
-        await sendTelegramKeyboard(chatId, 'Какое собрание назначаем?', [['Собрать всю команду'], ['Выбрать блок'], ['Назад']]);
+        await sendTelegramKeyboard(chatId, 'Кого приглашаем?', flowKeyboardRows(['Собрать всю команду', 'Выбрать блок'], 2));
         return res.json({ ok: true });
       }
 
@@ -3466,7 +3634,7 @@ async function startServer() {
           return res.json({ ok: true });
         }
         chatSessions.set(chatKey, { flow: 'meeting_enter_topic', meetingKind: 'general', participantIds: [] });
-        await sendTelegramKeyboard(chatId, 'Напиши тему собрания одним сообщением.', [['Назад']]);
+        await sendTelegramKeyboard(chatId, 'Напиши тему собрания одним сообщением.', flowKeyboardRows());
         return res.json({ ok: true });
       }
 
@@ -3474,11 +3642,11 @@ async function startServer() {
         const freshState = loadDatabase();
         const competencies = freshState.competencies || [];
         if (competencies.length === 0) {
-          await sendTelegramKeyboard(chatId, 'Пока нет ни одного блока. Админ может добавить блоки в разделе «Команда».', [['Назад']]);
+          await sendTelegramKeyboard(chatId, 'Пока нет ни одного блока. Админ может добавить блоки в разделе «Команда».', flowKeyboardRows());
           return res.json({ ok: true });
         }
         chatSessions.set(chatKey, { flow: 'meeting_pick_competency' });
-        await sendTelegramKeyboard(chatId, 'Выбери блок. Кнопка «Назад» всегда находится сверху:', replyPickerRows(competencies));
+        await sendTelegramKeyboard(chatId, 'Выбери блок.', replyPickerRows(competencies));
         return res.json({ ok: true });
       }
 
@@ -3492,7 +3660,7 @@ async function startServer() {
             ? members.map((member) => `• ${userMention(member)}`).join('\n')
             : 'В этом блоке пока никого нет.';
           chatSessions.set(chatKey, { flow: 'meeting_confirm_competency', meetingKind: 'competency', competency, participantIds: members.map((member) => member.id) });
-          await sendTelegramKeyboard(chatId, `Выбран блок *${competency}*.\n\nУчастники:\n${memberText}`, [['Подтвердить'], ['Назад']]);
+          await sendTelegramKeyboard(chatId, `Выбран блок *${competency}*.\n\nУчастники:\n${memberText}`, flowKeyboardRows(['Подтвердить'], 1));
           return res.json({ ok: true });
         }
       }
@@ -3500,48 +3668,70 @@ async function startServer() {
       if (session?.flow === 'meeting_confirm_competency' && normalizedText === 'подтвердить') {
         const participantIds = session.participantIds || [];
         if (participantIds.length === 0) {
-          await sendTelegramKeyboard(chatId, 'В этом блоке нет участников. Выбери другой блок.', [['Выбрать блок'], ['Назад']]);
+          await sendTelegramKeyboard(chatId, 'В этом блоке нет участников. Выбери другой блок.', flowKeyboardRows(['Выбрать блок'], 1));
           return res.json({ ok: true });
         }
         chatSessions.set(chatKey, { ...session, flow: 'meeting_enter_topic' });
-        await sendTelegramKeyboard(chatId, 'Напиши тему собрания блока одним сообщением.', [['Назад']]);
+        await sendTelegramKeyboard(chatId, 'Напиши тему собрания блока одним сообщением.', flowKeyboardRows());
         return res.json({ ok: true });
       }
 
       if (session?.flow === 'meeting_enter_topic') {
         if (!text.trim()) {
-          await sendTelegramKeyboard(chatId, 'Тема не должна быть пустой. Напиши тему собрания.', [['Назад']]);
+          await sendTelegramKeyboard(chatId, 'Тема не должна быть пустой. Напиши тему собрания.', flowKeyboardRows());
           return res.json({ ok: true });
         }
         chatSessions.set(chatKey, { ...session, flow: 'meeting_enter_description', topic: text.trim() });
-        await sendTelegramKeyboard(chatId, 'Теперь напиши описание собрания или нажми «Пропустить».', [['Пропустить'], ['Назад']]);
+        await sendTelegramKeyboard(chatId, 'Теперь напиши описание собрания или нажми «Пропустить».', flowKeyboardRows(['Пропустить'], 1));
         return res.json({ ok: true });
       }
 
       if (session?.flow === 'meeting_enter_description') {
-        const freshState = loadDatabase();
         const description = normalizedText === 'пропустить' ? '' : text.trim();
+        chatSessions.set(chatKey, { ...session, flow: 'meeting_enter_date', description });
+        await sendTelegramKeyboard(chatId, 'Введи дату собрания: например, 14.08.2026, 14.08 или «завтра».', flowKeyboardRows());
+        return res.json({ ok: true });
+      }
+
+      if (session?.flow === 'meeting_enter_date') {
+        const meetingDate = parseMeetingChatDate(text);
+        if (!meetingDate) {
+          await sendTelegramKeyboard(chatId, 'Не понял дату. Напиши, например, 14.08.2026, 14.08 или «завтра».', flowKeyboardRows());
+          return res.json({ ok: true });
+        }
+        chatSessions.set(chatKey, { ...session, flow: 'meeting_enter_time', meetingDate });
+        await sendTelegramKeyboard(chatId, 'Введи время: например, 18:00, 18.30 или просто 18.', flowKeyboardRows());
+        return res.json({ ok: true });
+      }
+
+      if (session?.flow === 'meeting_enter_time') {
+        const meetingTime = parseMeetingChatTime(text);
+        if (!meetingTime) {
+          await sendTelegramKeyboard(chatId, 'Не понял время. Напиши, например, 18:00, 18.30 или просто 18.', flowKeyboardRows());
+          return res.json({ ok: true });
+        }
+        const freshState = loadDatabase();
         const topic = session.topic || 'Собрание';
         const isBlockMeeting = session.meetingKind === 'competency';
         const participantIds = session.participantIds || [];
         if (isBlockMeeting && participantIds.length === 0) {
-          await sendTelegramKeyboard(chatId, 'В этом блоке нет участников. Выбери другой блок.', [['Выбрать блок'], ['Назад']]);
+          await sendTelegramKeyboard(chatId, 'В этом блоке нет участников. Выбери другой блок.', flowKeyboardRows(['Выбрать блок'], 1));
           return res.json({ ok: true });
         }
         const meeting = await createMeetingAndNotify(freshState, {
           title: isBlockMeeting ? `Собрание блока ${session.competency}` : 'Общее собрание',
           type: isBlockMeeting ? 'custom' : 'general',
-          date: nextShortDate(1),
-          time: '18:00',
+          date: session.meetingDate || nextShortDate(1),
+          time: meetingTime,
           hostId: user.id,
           participants: isBlockMeeting ? participantIds : 'all',
           topic,
-          description,
+          description: session.description || '',
           competency: isBlockMeeting ? session.competency : '',
         });
         saveDatabase(freshState);
         chatSessions.delete(chatKey);
-        await sendTelegramKeyboard(chatId, `Готово, назначил собрание:\n\n${meetingDetailsText(meeting, freshState)}`, [['Назначить собрание'], ['Назад']], true);
+        await sendTelegramKeyboard(chatId, `Готово, назначил собрание:\n\n${meetingDetailsText(meeting, freshState)}`, [['Меню', 'Назад'], ['Назначить собрание']], true);
         return res.json({ ok: true });
       }
 
@@ -3624,58 +3814,88 @@ async function startServer() {
         return res.json({ ok: true });
       }
 
+      if (session?.flow === 'task_create_scope') {
+        const team = state.users.filter((member) => !isFacultyUser(member));
+        if (normalizedText === 'блоку') {
+          chatSessions.set(chatKey, { ...session, flow: 'task_create_block', taskAssignmentMode: 'block' });
+          await sendTaskTelegramKeyboard(chatId, 'Выбери блок.', flowKeyboardRows(state.competencies || [], 3), false, user);
+          return res.json({ ok: true });
+        }
+        if (normalizedText === 'конкретному человеку') {
+          chatSessions.set(chatKey, { ...session, flow: 'task_create_person', taskAssignmentMode: 'person' });
+          await sendTaskTelegramKeyboard(chatId, 'Выбери исполнителя.', flowKeyboardRows(team.map((member) => member.realName), 3), false, user);
+          return res.json({ ok: true });
+        }
+        if (normalizedText === 'открытая задача') {
+          await beginChatTaskDetails(chatId, user, state, { ...session, taskAssignmentMode: 'open', taskAssigneeIds: [] });
+          return res.json({ ok: true });
+        }
+        if (normalizedText === 'вся команда') {
+          await beginChatTaskDetails(chatId, user, state, { ...session, taskAssignmentMode: 'team', taskAssigneeIds: team.map((member) => member.id) });
+          return res.json({ ok: true });
+        }
+        await sendTaskTelegramKeyboard(chatId, 'Выбери способ назначения кнопкой.', flowKeyboardRows(['Блоку', 'Конкретному человеку', 'Открытая задача', 'Вся команда'], 2), false, user);
+        return res.json({ ok: true });
+      }
+
+      if (session?.flow === 'task_create_block') {
+        const competency = (state.competencies || []).find((item) => item.toLowerCase() === normalizedText);
+        if (!competency) {
+          await sendTaskTelegramKeyboard(chatId, 'Выбери блок кнопкой.', flowKeyboardRows(state.competencies || [], 3), false, user);
+          return res.json({ ok: true });
+        }
+        const assigneeIds = state.users
+          .filter((member) => !isFacultyUser(member) && member.competencies?.includes(competency))
+          .map((member) => member.id);
+        if (!assigneeIds.length) {
+          await sendTaskTelegramKeyboard(chatId, 'В этом блоке нет участников. Выбери другой блок.', flowKeyboardRows(state.competencies || [], 3), false, user);
+          return res.json({ ok: true });
+        }
+        await beginChatTaskDetails(chatId, user, state, { ...session, taskCompetency: competency, taskAssigneeIds: assigneeIds });
+        return res.json({ ok: true });
+      }
+
+      if (session?.flow === 'task_create_person') {
+        const member = state.users.find((candidate) => !isFacultyUser(candidate) && candidate.realName.toLowerCase() === normalizedText);
+        if (!member) {
+          await sendTaskTelegramKeyboard(chatId, 'Выбери человека кнопкой.', flowKeyboardRows(state.users.filter((candidate) => !isFacultyUser(candidate)).map((candidate) => candidate.realName), 3), false, user);
+          return res.json({ ok: true });
+        }
+        await beginChatTaskDetails(chatId, user, state, { ...session, taskAssigneeIds: [member.id] });
+        return res.json({ ok: true });
+      }
+
       if (session?.flow === 'task_create_event') {
         const activeEvents = (state.events || []).filter((item) => item.status === 'active');
         const workEvent = activeEvents.find((item) => item.name.toLowerCase() === normalizedText);
         if (!workEvent && normalizedText !== 'без мероприятия') {
-          await sendTelegramKeyboard(chatId, 'Выбери мероприятие кнопкой.', [
-            ...activeEvents.map((item) => [item.name]),
-            ['Без мероприятия'],
-            ['Назад'],
-          ], false, user);
+          await sendTaskTelegramKeyboard(chatId, 'Выбери мероприятие кнопкой.', flowKeyboardRows([...activeEvents.map((item) => item.name), 'Без мероприятия'], 2), false, user);
           return res.json({ ok: true });
         }
         chatSessions.set(chatKey, { ...session, flow: 'task_create_title', taskEventId: workEvent?.id || '' });
-        await sendTelegramKeyboard(chatId, 'Напиши название задачи.', [['Назад']], false, user);
+        await sendTaskTelegramKeyboard(chatId, 'Напиши название задачи.', flowKeyboardRows(), false, user);
         return res.json({ ok: true });
       }
 
       if (session?.flow === 'task_create_title') {
         chatSessions.set(chatKey, { ...session, flow: 'task_create_description', taskTitle: text.trim() });
-        await sendTelegramKeyboard(chatId, 'Напиши короткое описание задачи.', [['Назад']], false, user);
+        await sendTaskTelegramKeyboard(chatId, 'Напиши короткое описание задачи.', flowKeyboardRows(), false, user);
         return res.json({ ok: true });
       }
 
       if (session?.flow === 'task_create_description') {
         chatSessions.set(chatKey, { ...session, flow: 'task_create_deadline', taskDescription: text.trim() });
-        await sendTelegramKeyboard(chatId, 'Введи дедлайн в формате ДД.ММ.ГГ.', [['Назад']], false, user);
+        await sendTaskTelegramKeyboard(chatId, 'Введи дедлайн в формате ДД.ММ.ГГ.', flowKeyboardRows(), false, user);
         return res.json({ ok: true });
       }
 
       if (session?.flow === 'task_create_deadline') {
         if (!parseShortDate(text.trim())) {
-          await sendTelegramKeyboard(chatId, 'Не понял дату. Используй формат ДД.ММ.ГГ.', [['Назад']], false, user);
+          await sendTaskTelegramKeyboard(chatId, 'Не понял дату. Используй формат ДД.ММ.ГГ.', flowKeyboardRows(), false, user);
           return res.json({ ok: true });
         }
-        chatSessions.set(chatKey, { ...session, flow: 'task_create_competency', taskDeadline: formatShortDate(text.trim()) });
-        await sendTelegramKeyboard(chatId, 'Выбери блок задачи.', [
-          ...(state.competencies || []).map((competency) => [competency]),
-          ['Без блока'],
-          ['Назад'],
-        ], false, user);
-        return res.json({ ok: true });
-      }
-
-      if (session?.flow === 'task_create_competency') {
-        const competency = normalizedText === 'без блока'
-          ? ''
-          : (state.competencies || []).find((item) => item.toLowerCase() === normalizedText);
-        if (competency === undefined) {
-          await sendTelegramKeyboard(chatId, 'Выбери блок кнопкой.', [[...(state.competencies || [])], ['Без блока'], ['Назад']], false, user);
-          return res.json({ ok: true });
-        }
-        chatSessions.set(chatKey, { ...session, flow: 'task_create_priority', taskCompetency: competency });
-        await sendTelegramKeyboard(chatId, 'Выбери приоритет задачи.', [['Обычная', 'Важная'], ['Очень важная'], ['Назад']], false, user);
+        chatSessions.set(chatKey, { ...session, flow: 'task_create_priority', taskDeadline: formatShortDate(text.trim()) });
+        await sendTaskTelegramKeyboard(chatId, 'Выбери приоритет задачи.', flowKeyboardRows(['Обычная', 'Важная', 'Очень важная'], 3), false, user);
         return res.json({ ok: true });
       }
 
@@ -3688,58 +3908,10 @@ async function startServer() {
               ? 'critical'
               : null;
         if (!priority) {
-          await sendTelegramKeyboard(chatId, 'Выбери приоритет кнопкой.', [['Обычная', 'Важная'], ['Очень важная'], ['Назад']], false, user);
+          await sendTaskTelegramKeyboard(chatId, 'Выбери приоритет кнопкой.', flowKeyboardRows(['Обычная', 'Важная', 'Очень важная'], 3), false, user);
           return res.json({ ok: true });
         }
-        chatSessions.set(chatKey, { ...session, flow: 'task_create_scope', taskPriority: priority });
-        await sendTelegramKeyboard(chatId, 'Кому назначить задачу?', [['Вся команда', 'Участники блока'], ['Открытая задача'], ['Назад']], false, user);
-        return res.json({ ok: true });
-      }
-
-      if (session?.flow === 'task_create_scope') {
-        const team = state.users.filter((member) => !isFacultyUser(member));
-        let assigneeIds: string[] = [];
-        if (normalizedText === 'вся команда') assigneeIds = team.map((member) => member.id);
-        else if (normalizedText === 'участники блока') {
-          assigneeIds = team
-            .filter((member) => session.taskCompetency && member.competencies?.includes(session.taskCompetency))
-            .map((member) => member.id);
-        } else if (normalizedText !== 'открытая задача') {
-          await sendTelegramKeyboard(chatId, 'Выбери вариант кнопкой.', [['Вся команда', 'Участники блока'], ['Открытая задача'], ['Назад']], false, user);
-          return res.json({ ok: true });
-        }
-        const task: Task = {
-          id: `t_${Date.now()}`,
-          title: session.taskTitle || 'Без названия',
-          description: session.taskDescription || '',
-          deadline: session.taskDeadline || '',
-          assignedTo: assigneeIds.length ? assigneeIds : null,
-          creatorId: user.id,
-          competency: session.taskCompetency || '',
-          eventId: session.taskEventId || '',
-          sow: '',
-          tips: [],
-          status: assigneeIds.length ? 'assigned' : 'open',
-          priority: session.taskPriority || 'normal',
-          createdAt: new Date().toISOString(),
-          completedAt: '',
-        };
-        state.tasks.push(task);
-        chatSessions.delete(chatKey);
-        for (const target of (assigneeIds.length ? team.filter((member) => assigneeIds.includes(member.id)) : team)) {
-          if (target.telegramId && target.id !== user.id) {
-            await sendTaskTelegramMessage(
-              target.telegramId,
-              assigneeIds.length ? `Тебе назначена задача:\n\n${taskDetailsText(task, state)}` : `Новая свободная задача:\n\n${taskDetailsText(task, state)}`,
-              [{ text: 'Посмотреть задачу', action: `task_view:${task.id}` }],
-              false,
-              target,
-            );
-          }
-        }
-        saveDatabase(state);
-        await sendTaskGroupMessage(chatId, `Задача создана:\n\n${taskDetailsText(task, state)}`);
-        await showTasksPanel(chatId, user, state);
+        await finishChatTask(chatId, user, state, session, priority);
         return res.json({ ok: true });
       }
 
@@ -3774,13 +3946,15 @@ async function startServer() {
         }
       } else if (normalizedText === 'свободные задачи') {
         const openTasks = state.tasks.filter((task) => task.status === 'open').slice(0, 10);
+        chatSessions.set(chatKey, { flow: 'tasks_submenu' });
+        await sendTaskTelegramKeyboard(chatId, 'Открываю свободные задачи.', [['Меню']], false, user);
         await sendTaskInlinePanel(
           chatId,
           openTasks.length
             ? `*Свободные задачи*\n\n${openTasks.map((task, index) => `${index + 1}. ${task.title} · ${formatShortDate(task.deadline) || 'без даты'}`).join('\n')}`
             : 'Свободных задач сейчас нет.',
           [
-            ...openTasks.map((task) => [{ text: task.title.slice(0, 48), callback_data: `task_view:${task.id}` }]),
+            ...openTasks.map((task) => [{ text: 'Взять', callback_data: `task_claim:${task.id}` }]),
           ],
         );
         return res.json({ ok: true });
@@ -3802,6 +3976,8 @@ async function startServer() {
         return res.json({ ok: true });
       } else if (normalizedText === 'управлять задачами') {
         const myTasks = state.tasks.filter((task) => assignedIds(task).includes(user.id) && !['completed', 'cancelled'].includes(task.status)).slice(0, 10);
+        chatSessions.set(chatKey, { flow: 'tasks_submenu' });
+        await sendTaskTelegramKeyboard(chatId, 'Открываю управление задачами.', [['Меню']], false, user);
         await sendTaskInlinePanel(
           chatId,
           myTasks.length
@@ -3809,25 +3985,21 @@ async function startServer() {
             : 'Активных задач нет.',
           [
             ...myTasks.map((task) => [
-              { text: `✓ ${task.title.slice(0, 30)}`, callback_data: `task_complete:${task.id}` },
+              { text: 'Выполнено', callback_data: `task_complete:${task.id}` },
               { text: 'Отказаться', callback_data: `task_release:${task.id}` },
             ]),
           ],
         );
         return res.json({ ok: true });
       } else if (normalizedText === 'создать задачу') {
-        const activeEvents = (state.events || []).filter((item) => item.status === 'active');
-        if (activeEvents.length) {
-          chatSessions.set(chatKey, { flow: 'task_create_event' });
-          await sendTelegramKeyboard(chatId, 'Для какого мероприятия создаём задачу?', [
-            ...activeEvents.map((item) => [item.name]),
-            ['Без мероприятия'],
-            ['Назад'],
-          ], false, user);
-        } else {
-          chatSessions.set(chatKey, { flow: 'task_create_title', taskEventId: '' });
-          await sendTelegramKeyboard(chatId, 'Напиши название задачи.', [['Назад']], false, user);
-        }
+        chatSessions.set(chatKey, { flow: 'task_create_scope' });
+        await sendTaskTelegramKeyboard(
+          chatId,
+          'Как назначить задачу?',
+          flowKeyboardRows(['Блоку', 'Конкретному человеку', 'Открытая задача', 'Вся команда'], 2),
+          false,
+          user,
+        );
         return res.json({ ok: true });
       } else if (cmd === 'команда') {
         await showTeamPanel(chatId, user, state);
@@ -4369,6 +4541,23 @@ async function startServer() {
     return res.json({ success: true, weeks: weekCount, activeDays: requestedActiveDays, startHour: requestedStartHour, endHour: requestedEndHour, notified, googleSheets: googleSheetsWeeks });
   });
 
+  app.post('/api/availability/week-name', (req, res) => {
+    const { requesterId, weekIndex, name } = req.body || {};
+    const state = loadDatabase();
+    const requester = state.users.find((user) => user.id === requesterId && user.registered);
+    if (!requester) return res.status(403).json({ error: 'Registered team member required' });
+    const { weekCount, weekNames } = normalizeAvailabilityConfig(state.settings);
+    const index = Number(weekIndex);
+    const cleanName = String(name || '').trim().replace(/\s+/g, ' ').slice(0, 80);
+    if (!Number.isInteger(index) || index < 0 || index >= weekCount) return res.status(400).json({ error: 'Неизвестная неделя' });
+    if (!cleanName) return res.status(400).json({ error: 'Название недели не может быть пустым' });
+    const nextNames = [...weekNames];
+    nextNames[index] = cleanName;
+    state.settings = { ...(state.settings || {}), availabilityWeekNames: nextNames };
+    saveDatabase(state);
+    return res.json({ success: true, weekIndex: index, name: cleanName });
+  });
+
   app.post('/api/event/create', (req, res) => {
     const { requesterId, name, description, startsAt, endsAt } = req.body || {};
     const state = loadDatabase();
@@ -4688,15 +4877,15 @@ async function startServer() {
           id: 'task_open_notify_' + Date.now() + '_' + u.id,
           userId: u.id,
           sender: 'bot',
-          text: `Клич о помощи: на доске появилась свободная задача.\n\n${taskDetailsText(newTask, state)}`,
+          text: `На доске появилась свободная задача.\n\n${taskDetailsText(newTask, state)}`,
           timestamp: new Date().toISOString(),
-          buttons: [{ text: 'Посмотреть задачу', action: `task_view:${newTask.id}` }]
+          buttons: [{ text: 'Открыть задачи', action: 'open_tasks' }]
         });
         if (u.telegramId) {
           sendJobs.push(sendTaskTelegramMessage(
             u.telegramId,
-            `Клич о помощи: на доске появилась свободная задача.\n\n${taskDetailsText(newTask, state)}`,
-            [{ text: 'Посмотреть задачу', action: `task_view:${newTask.id}` }],
+            `На доске появилась свободная задача.\n\n${taskDetailsText(newTask, state)}`,
+            [{ text: 'Открыть задачи', action: 'open_tasks' }],
           ));
         }
       }
@@ -5221,6 +5410,10 @@ async function startServer() {
     const state = loadDatabase();
     const teamUsers = state.users.filter((user) => !isFacultyUser(user));
     const availabilityConfig = normalizeAvailabilityConfig(state.settings);
+    const requestedWeekIndex = Number(req.body?.weekIndex ?? 0);
+    if (!Number.isInteger(requestedWeekIndex) || requestedWeekIndex < 0 || requestedWeekIndex >= availabilityConfig.weekCount) {
+      return res.status(400).json({ error: 'Выбери корректную неделю' });
+    }
     const requestedDays: number[] = Array.isArray(req.body?.days) ? req.body.days.map(Number) : availabilityConfig.activeDays;
     const selectedDays: number[] = [...new Set<number>(requestedDays.filter((day) => (
       Number.isInteger(day) && availabilityConfig.activeDays.includes(day)
@@ -5242,11 +5435,12 @@ async function startServer() {
     }[] = [];
 
     for (const day of selectedDays) {
+      const absoluteDay = requestedWeekIndex * 7 + day;
       for (let hour = availabilityConfig.startHour; hour + requestedDuration <= availabilityConfig.endHour + 1; hour += 1) {
         const hoursWindow = Array.from({ length: Math.ceil(requestedDuration) }, (_, index) => hour + index);
         const canUsers = teamUsers.filter((user) => {
-          if (isOutForWeek(state.availabilities[user.id], 0)) return false;
-          const daySlots = alignedAvailabilitySlots(state.availabilities[user.id])?.[day] || [];
+          if (isOutForWeek(state.availabilities[user.id], requestedWeekIndex)) return false;
+          const daySlots = alignedAvailabilitySlots(state.availabilities[user.id])?.[absoluteDay] || [];
           return hoursWindow.every((slotHour) => daySlots.includes(slotHour));
         }).map(({ id, realName, username }) => ({ id, realName, username }));
         if (canUsers.length > 0) {
@@ -5255,9 +5449,9 @@ async function startServer() {
             .filter((user) => !canUserIds.has(user.id))
             .map(({ id, realName, username }) => {
               const availability = state.availabilities[id];
-              const daySlots = alignedAvailabilitySlots(availability)?.[day] || [];
-              const markedDay = daySlots.length > 0 || alignedHardUnavailableDays(availability).includes(day);
-              const reason = isOutForWeek(availability, 0)
+              const daySlots = alignedAvailabilitySlots(availability)?.[absoluteDay] || [];
+              const markedDay = daySlots.length > 0 || alignedHardUnavailableDays(availability).includes(absoluteDay);
+              const reason = isOutForWeek(availability, requestedWeekIndex)
                 ? 'out' as const
                 : !markedDay
                   ? 'not_marked' as const
@@ -5290,7 +5484,11 @@ async function startServer() {
     const russianDays = ['Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота', 'Воскресенье'];
 
     const suggestions = picked.map((slot) => {
+      const date = new Date(`${currentWeekStartIso()}T12:00:00Z`);
+      date.setUTCDate(date.getUTCDate() + requestedWeekIndex * 7 + slot.day);
       return {
+        weekIndex: requestedWeekIndex,
+        date: `${String(date.getUTCDate()).padStart(2, '0')}.${String(date.getUTCMonth() + 1).padStart(2, '0')}.${String(date.getUTCFullYear()).slice(2)}`,
         dayName: russianDays[slot.day],
         dayIndex: slot.day,
         hour: slot.hour,

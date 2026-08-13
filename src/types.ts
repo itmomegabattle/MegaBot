@@ -138,6 +138,7 @@ export interface SimulationState {
     availabilityActiveDays?: number[];
     availabilityStartHour?: number;
     availabilityEndHour?: number;
+    availabilityWeekNames?: string[];
     databaseRevision?: number;
   };
 }
