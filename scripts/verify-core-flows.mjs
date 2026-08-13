@@ -465,6 +465,9 @@ try {
   const openTasksPanel = telegramCalls.find((call) => call.path.endsWith('/sendMessage') && String(call.body.text || '').includes('Свободных задач'));
   assert.equal(openTasksPanel.body.disable_notification, true);
   assert.ok(!openTasksPanel.body.reply_markup?.inline_keyboard?.flat().some((button) => button.text === 'Назад'));
+  const openTasksNavigation = telegramCalls.find((call) => call.path.endsWith('/sendMessage') && call.body.reply_markup?.keyboard);
+  assert.deepEqual(openTasksNavigation.body.reply_markup.keyboard.flat().map((button) => button.text), ['Меню']);
+  assert.equal(openTasksNavigation.body.text, '\u2063');
 
   telegramCalls.length = 0;
   await request('/api/telegram-webhook', {
@@ -942,6 +945,45 @@ try {
   assert.deepEqual(editedTask.data.task.assignedTo, ['u_alice', 'u_bob']);
   assert.equal(editedTask.data.task.reminders.length, 1);
   assert.deepEqual(editedTask.data.task.competencies, ['Продакшн', 'Дизайн']);
+
+  telegramCalls.length = 0;
+  await request('/api/telegram-webhook', {
+    update_id: 1071,
+    message: {
+      message_id: 1071,
+      chat: { id: 200, type: 'private' },
+      from: aliceTelegram,
+      text: 'Управлять задачами',
+    },
+  });
+  const taskManagementCards = telegramCalls.filter((call) => (
+    call.path.endsWith('/sendMessage')
+    && call.body.reply_markup?.inline_keyboard?.flat().some((button) => button.callback_data?.startsWith('task_complete:'))
+  ));
+  assert.equal(taskManagementCards.length, 2, 'each active task must have its own Telegram card');
+  assert.ok(taskManagementCards.every((call) => (
+    call.body.reply_markup.inline_keyboard.length === 1
+    && call.body.reply_markup.inline_keyboard[0].length === 2
+  )));
+  assert.ok(taskManagementCards.every((call) => call.body.disable_notification === true));
+  const taskManagementNavigation = telegramCalls.find((call) => call.path.endsWith('/sendMessage') && call.body.reply_markup?.keyboard);
+  assert.deepEqual(taskManagementNavigation.body.reply_markup.keyboard.flat().map((button) => button.text), ['Меню']);
+  const taskManagementCardIds = taskManagementCards.map((call) => call.resultMessageId);
+
+  telegramCalls.length = 0;
+  await request('/api/telegram-webhook', {
+    update_id: 1072,
+    message: {
+      message_id: 1072,
+      chat: { id: 200, type: 'private' },
+      from: aliceTelegram,
+      text: 'Меню',
+    },
+  });
+  const deletedTaskManagementIds = telegramCalls
+    .filter((call) => call.path.endsWith('/deleteMessage'))
+    .map((call) => call.body.message_id);
+  assert.ok(taskManagementCardIds.every((messageId) => deletedTaskManagementIds.includes(messageId)), 'all task cards must be deleted when leaving task management');
 
   const executorComment = await request('/api/task/comment', {
     requesterId: 'u_alice',

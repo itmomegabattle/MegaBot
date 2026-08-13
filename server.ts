@@ -1456,6 +1456,7 @@ async function startServer() {
     inlineKeyboard: { text: string; callback_data: string }[][],
     silent = false,
     messageThreadId?: number,
+    replaceExisting = true,
   ) {
     const botToken = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
     if (!botToken) return;
@@ -1477,7 +1478,7 @@ async function startServer() {
       const data = await response.json() as { result?: { message_id?: number } };
       if (data.result?.message_id) {
         rememberChatPanelMessage(chatId, data.result.message_id);
-        await deleteOldChatPanels(chatId, data.result.message_id);
+        if (replaceExisting) await deleteOldChatPanels(chatId, data.result.message_id);
         return data.result.message_id;
       }
     } catch (err) {
@@ -2075,8 +2076,13 @@ async function startServer() {
     return sendTelegramKeyboard(chatId, text, rows, includeWebApp, user, true);
   }
 
-  function sendTaskInlinePanel(chatId: string | number, text: string, inlineKeyboard: { text: string; callback_data: string }[][]) {
-    return sendInlinePanel(chatId, text, inlineKeyboard, true);
+  function sendTaskInlinePanel(
+    chatId: string | number,
+    text: string,
+    inlineKeyboard: { text: string; callback_data: string }[][],
+    replaceExisting = true,
+  ) {
+    return sendInlinePanel(chatId, text, inlineKeyboard, true, undefined, replaceExisting);
   }
 
   function sendTaskGroupMessage(chatId: string | number, text: string, messageThreadId?: number) {
@@ -3994,7 +4000,6 @@ async function startServer() {
       } else if (normalizedText === 'свободные задачи') {
         const openTasks = state.tasks.filter((task) => task.status === 'open').slice(0, 10);
         chatSessions.set(chatKey, { flow: 'tasks_submenu' });
-        await sendTaskTelegramKeyboard(chatId, 'Открываю свободные задачи.', [['Меню']], false, user);
         await sendTaskInlinePanel(
           chatId,
           openTasks.length
@@ -4004,6 +4009,7 @@ async function startServer() {
             ...openTasks.map((task) => [{ text: 'Взять', callback_data: `task_claim:${task.id}` }]),
           ],
         );
+        await sendNavigationKeyboard(chatId, [['Меню']], user);
         return res.json({ ok: true });
       } else if (normalizedText === 'выполненные задачи') {
         const completed = state.tasks
@@ -4024,19 +4030,22 @@ async function startServer() {
       } else if (normalizedText === 'управлять задачами') {
         const myTasks = state.tasks.filter((task) => assignedIds(task).includes(user.id) && !['completed', 'cancelled'].includes(task.status)).slice(0, 10);
         chatSessions.set(chatKey, { flow: 'tasks_submenu' });
-        await sendTaskTelegramKeyboard(chatId, 'Открываю управление задачами.', [['Меню']], false, user);
-        await sendTaskInlinePanel(
-          chatId,
-          myTasks.length
-            ? `*Управление задачами*\n\n${myTasks.map((task, index) => `${index + 1}. ${task.title} · ${taskStatusLabel(task.status)}`).join('\n')}`
-            : 'Активных задач нет.',
-          [
-            ...myTasks.map((task) => [
-              { text: 'Выполнено', callback_data: `task_complete:${task.id}` },
-              { text: 'Отказаться', callback_data: `task_release:${task.id}` },
-            ]),
-          ],
-        );
+        if (myTasks.length) {
+          for (const [index, task] of myTasks.entries()) {
+            await sendTaskInlinePanel(
+              chatId,
+              `*${task.title}*\nСтатус: ${taskStatusLabel(task.status)}`,
+              [[
+                { text: 'Выполнено', callback_data: `task_complete:${task.id}` },
+                { text: 'Отказаться', callback_data: `task_release:${task.id}` },
+              ]],
+              index === 0,
+            );
+          }
+        } else {
+          await sendTaskInlinePanel(chatId, 'Активных задач нет.', []);
+        }
+        await sendNavigationKeyboard(chatId, [['Меню']], user);
         return res.json({ ok: true });
       } else if (normalizedText === 'создать задачу') {
         chatSessions.set(chatKey, { flow: 'task_create_scope' });
