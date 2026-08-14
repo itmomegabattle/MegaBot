@@ -332,6 +332,7 @@ export default function MiniApp({
   const [editingMeetingId, setEditingMeetingId] = useState<string | null>(null);
   const [meetingError, setMeetingError] = useState('');
   const [rsvpMeetingId, setRsvpMeetingId] = useState<string | null>(null);
+  const meetingFormRef = useRef<HTMLFormElement | null>(null);
 
   const [showTaskForm, setShowTaskForm] = useState(false);
   const [savingTask, setSavingTask] = useState(false);
@@ -877,6 +878,7 @@ export default function MiniApp({
   };
 
   const startMeetingEdit = (meeting: Meeting) => {
+    setMeetingError('');
     setEditingMeetingId(meeting.id);
     setShowMeetingForm(true);
     setMeetingTitle(meeting.title);
@@ -888,7 +890,18 @@ export default function MiniApp({
     setMeetingType(meeting.competency ? 'competency' : meeting.type);
     setMeetingCompetency(meeting.competency || '');
     setParticipants(Array.isArray(meeting.participants) ? meeting.participants : []);
+    setShowAllMeetingParticipants(false);
   };
+
+  useEffect(() => {
+    if (!showMeetingForm || !editingMeetingId) return;
+
+    const animationFrame = window.requestAnimationFrame(() => {
+      meetingFormRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+
+    return () => window.cancelAnimationFrame(animationFrame);
+  }, [editingMeetingId, showMeetingForm]);
 
   const submitMeeting = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -2039,7 +2052,7 @@ export default function MiniApp({
             {adminSection === 'meetings' && (
               <div className="space-y-4">
                 {showMeetingForm && editingMeetingId && (
-                  <form onSubmit={submitMeeting} className="space-y-3 rounded-3xl border border-blue-100 bg-white p-4 shadow-sm animate-in fade-in slide-in-from-top-2 duration-200">
+                  <form ref={meetingFormRef} onSubmit={submitMeeting} className="scroll-mt-24 space-y-3 rounded-3xl border border-blue-100 bg-white p-4 shadow-sm animate-in fade-in slide-in-from-top-2 duration-200">
                     <div className="flex items-center justify-between gap-2">
                       <h2 className="font-black">Редактировать собрание</h2>
                       <button type="button" onClick={resetMeetingForm} className={miniButtonClass}><X className="h-4 w-4" /> Отмена</button>
@@ -2509,7 +2522,7 @@ export default function MiniApp({
             )}
 
             {showMeetingForm && (
-            <form onSubmit={submitMeeting} className="space-y-3 rounded-3xl border border-blue-100 bg-white p-4 shadow-sm animate-in fade-in slide-in-from-top-2 duration-200">
+            <form ref={meetingFormRef} onSubmit={submitMeeting} className={`${editingMeetingId ? 'order-first' : ''} scroll-mt-24 space-y-3 rounded-3xl border border-blue-100 bg-white p-4 shadow-sm animate-in fade-in slide-in-from-top-2 duration-200`}>
               <div className="flex min-w-0 items-start justify-between gap-2">
                 <h2 className="min-w-0 flex-1 break-words font-black">{editingMeetingId ? 'Редактировать собрание' : 'Назначить собрание'}</h2>
                 {editingMeetingId && (
