@@ -1855,7 +1855,25 @@ try {
   assert.ok(telegramCalls.some((call) => call.path.endsWith('/editMessageText')));
 
   const activeSessionCookie = sessionCookie;
+  const forbiddenWeekMetadata = await request('/api/availability/week-name', {
+    requesterId: 'u_alice',
+    weekIndex: 0,
+    name: 'Чужое название',
+    description: 'Участник не должен менять общие данные недели',
+  });
+  assert.equal(forbiddenWeekMetadata.response.status, 403);
+
   sessionCookie = adminSessionCookie;
+  const weekMetadata = await request('/api/availability/week-name', {
+    requesterId: 'u_admin',
+    weekIndex: 0,
+    name: 'Финальная подготовка',
+    description: 'Закрываем последние задачи перед мероприятием.',
+  });
+  assert.equal(weekMetadata.response.status, 200);
+  assert.equal(weekMetadata.data.name, 'Финальная подготовка');
+  assert.equal(weekMetadata.data.description, 'Закрываем последние задачи перед мероприятием.');
+
   const availabilitySettings = await request('/api/availability/weeks', {
     requesterId: 'u_admin',
     weeks: 3,
@@ -1869,6 +1887,10 @@ try {
   assert.equal(availabilitySettings.data.startHour, 18);
   assert.equal(availabilitySettings.data.endHour, 21);
   sessionCookie = activeSessionCookie;
+  const sharedWeekMetadata = await request('/api/state');
+  assert.equal(sharedWeekMetadata.response.status, 200);
+  assert.equal(sharedWeekMetadata.data.settings.availabilityWeekNames[0], 'Финальная подготовка');
+  assert.equal(sharedWeekMetadata.data.settings.availabilityWeekDescriptions[0], 'Закрываем последние задачи перед мероприятием.');
 
   const database = JSON.parse(await readFile(testDatabasePath, 'utf8'));
   assert.equal(database.users.length, fixture.users.length);
@@ -1879,6 +1901,8 @@ try {
   assert.deepEqual(database.settings.availabilityActiveDays, [0, 2, 4]);
   assert.equal(database.settings.availabilityStartHour, 18);
   assert.equal(database.settings.availabilityEndHour, 21);
+  assert.equal(database.settings.availabilityWeekNames[0], 'Финальная подготовка');
+  assert.equal(database.settings.availabilityWeekDescriptions[0], 'Закрываем последние задачи перед мероприятием.');
   assert.ok(database.messages.u_alice.length > 0);
   assert.ok(!database.messages.u_admin.some((message) => message.id.startsWith('task_comp_admin_')));
   const persistedCommentTask = database.tasks.find((task) => task.id === openTaskResult.data.task.id);

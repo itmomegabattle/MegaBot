@@ -89,6 +89,8 @@ export function sanitizeSimulationState(input: SimulationState): SimulationState
     availabilityActiveDays: availabilityConfig.activeDays,
     availabilityStartHour: availabilityConfig.startHour,
     availabilityEndHour: availabilityConfig.endHour,
+    availabilityWeekNames: availabilityConfig.weekNames,
+    availabilityWeekDescriptions: availabilityConfig.weekDescriptions,
     databaseRevision: Math.max(0, Number(input.settings?.databaseRevision || 0)),
   };
   return {

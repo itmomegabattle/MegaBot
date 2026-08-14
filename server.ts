@@ -4629,20 +4629,26 @@ async function startServer() {
   });
 
   app.post('/api/availability/week-name', (req, res) => {
-    const { requesterId, weekIndex, name } = req.body || {};
+    const { requesterId, weekIndex, name, description } = req.body || {};
     const state = loadDatabase();
-    const requester = state.users.find((user) => user.id === requesterId && user.registered);
-    if (!requester) return res.status(403).json({ error: 'Registered team member required' });
-    const { weekCount, weekNames } = normalizeAvailabilityConfig(state.settings);
+    if (!isAdminUser(state, requesterId)) return res.status(403).json({ error: 'Редактировать неделю может только администратор' });
+    const { weekCount, weekNames, weekDescriptions } = normalizeAvailabilityConfig(state.settings);
     const index = Number(weekIndex);
     const cleanName = String(name || '').trim().replace(/\s+/g, ' ').slice(0, 80);
+    const cleanDescription = String(description || '').replace(/\r\n?/g, '\n').trim().slice(0, 600);
     if (!Number.isInteger(index) || index < 0 || index >= weekCount) return res.status(400).json({ error: 'Неизвестная неделя' });
     if (!cleanName) return res.status(400).json({ error: 'Название недели не может быть пустым' });
     const nextNames = [...weekNames];
+    const nextDescriptions = [...weekDescriptions];
     nextNames[index] = cleanName;
-    state.settings = { ...(state.settings || {}), availabilityWeekNames: nextNames };
+    nextDescriptions[index] = cleanDescription;
+    state.settings = {
+      ...(state.settings || {}),
+      availabilityWeekNames: nextNames,
+      availabilityWeekDescriptions: nextDescriptions,
+    };
     saveDatabase(state);
-    return res.json({ success: true, weekIndex: index, name: cleanName });
+    return res.json({ success: true, weekIndex: index, name: cleanName, description: cleanDescription });
   });
 
   app.post('/api/event/create', (req, res) => {

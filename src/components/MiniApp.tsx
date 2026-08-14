@@ -51,7 +51,7 @@ interface MiniAppProps {
   onCompleteTask: (taskId: string, timeSpentMinutes?: number, completionComment?: string) => Promise<boolean>;
   onReleaseTask: (taskId: string) => void;
   onRefreshState: () => boolean | Promise<boolean>;
-  onRenameAvailabilityWeek: (weekIndex: number, name: string) => Promise<boolean>;
+  onRenameAvailabilityWeek: (weekIndex: number, name: string, description: string) => Promise<boolean>;
 }
 
 type MeetingSuggestion = {
@@ -304,8 +304,10 @@ export default function MiniApp({
   const [suggestionDays, setSuggestionDays] = useState<number[]>(() => normalizeAvailabilityConfig(state.settings).activeDays);
   const [suggestionDuration, setSuggestionDuration] = useState('1');
   const [suggestionWeekIndex, setSuggestionWeekIndex] = useState(0);
-  const [editingWeekNameIndex, setEditingWeekNameIndex] = useState<number | null>(null);
+  const [expandedWeekInfoIndex, setExpandedWeekInfoIndex] = useState<number | null>(null);
   const [weekNameDraft, setWeekNameDraft] = useState('');
+  const [weekDescriptionDraft, setWeekDescriptionDraft] = useState('');
+  const [savingWeekInfoIndex, setSavingWeekInfoIndex] = useState<number | null>(null);
   const [suggestionError, setSuggestionError] = useState('');
   const [savingWeekIndex, setSavingWeekIndex] = useState<number | null>(null);
   const [savedWeekIndexes, setSavedWeekIndexes] = useState<number[]>([]);
@@ -2154,23 +2156,24 @@ export default function MiniApp({
                 <div key={weekIndex} className="space-y-3">
                   <div className="flex min-w-0 items-start gap-2 px-1">
                     <div className="min-w-0 flex-1">
-                      {editingWeekNameIndex === weekIndex ? (
-                        <form className="flex min-w-0 gap-2" onSubmit={async (event) => {
-                          event.preventDefault();
-                          if (await onRenameAvailabilityWeek(weekIndex, weekNameDraft)) setEditingWeekNameIndex(null);
-                        }}>
-                          <input autoFocus maxLength={80} value={weekNameDraft} onChange={(event) => setWeekNameDraft(event.target.value)} className={`${inputClass} min-w-0 py-2`} />
-                          <button type="submit" className={`${miniButtonClass} shrink-0 whitespace-nowrap`}>Сохранить</button>
-                        </form>
-                      ) : (
-                        <button type="button" onClick={() => {
-                          setWeekNameDraft(availabilityConfig.weekNames[weekIndex]);
-                          setEditingWeekNameIndex(weekIndex);
-                        }} className="max-w-full break-words text-left font-black text-slate-950">
-                          {availabilityConfig.weekNames[weekIndex]}
-                        </button>
-                      )}
-                      <p className="text-xs font-semibold text-slate-500">
+                      <button
+                        type="button"
+                        aria-expanded={expandedWeekInfoIndex === weekIndex}
+                        aria-controls={`week-info-${weekIndex}`}
+                        onClick={() => {
+                          const opening = expandedWeekInfoIndex !== weekIndex;
+                          setExpandedWeekInfoIndex(opening ? weekIndex : null);
+                          if (opening) {
+                            setWeekNameDraft(availabilityConfig.weekNames[weekIndex]);
+                            setWeekDescriptionDraft(availabilityConfig.weekDescriptions[weekIndex]);
+                          }
+                        }}
+                        className="mega-week-title flex max-w-full items-center gap-2 rounded-xl border border-slate-300 bg-white/70 px-3 py-2 text-left text-slate-950 shadow-sm"
+                      >
+                        <span className="min-w-0 flex-1 break-words">{availabilityConfig.weekNames[weekIndex]}</span>
+                        <CaretDown className={`h-4 w-4 shrink-0 transition-transform ${expandedWeekInfoIndex === weekIndex ? 'rotate-180' : ''}`} aria-hidden="true" />
+                      </button>
+                      <p className="mt-1 text-xs font-semibold text-slate-500">
                         {formatDayMonth(dateForSlotDay(weekIndex * 7 + activeDays[0]))} – {formatDayMonth(dateForSlotDay(weekIndex * 7 + activeDays[activeDays.length - 1]))}
                       </p>
                     </div>
@@ -2187,6 +2190,38 @@ export default function MiniApp({
                     {outWeekIndexes.includes(weekIndex) ? '✅ Я в ауте' : 'Я в ауте'}
                   </button>
                   </div>
+
+                  {expandedWeekInfoIndex === weekIndex && (
+                    <div id={`week-info-${weekIndex}`} className="mx-1 rounded-2xl border border-blue-100 bg-white p-3 shadow-sm">
+                      {isAdmin ? (
+                        <form className="space-y-3" onSubmit={async (event) => {
+                          event.preventDefault();
+                          if (!weekNameDraft.trim()) {
+                            setSlotError('Название недели не может быть пустым.');
+                            return;
+                          }
+                          setSlotError('');
+                          setSavingWeekInfoIndex(weekIndex);
+                          await onRenameAvailabilityWeek(weekIndex, weekNameDraft, weekDescriptionDraft);
+                          setSavingWeekInfoIndex(null);
+                        }}>
+                          <Field label="Название недели">
+                            <input maxLength={80} value={weekNameDraft} onChange={(event) => setWeekNameDraft(event.target.value)} className={inputClass} />
+                          </Field>
+                          <Field label="Описание недели">
+                            <textarea maxLength={600} rows={3} value={weekDescriptionDraft} onChange={(event) => setWeekDescriptionDraft(event.target.value)} className={inputClass} placeholder="Например, подготовка площадки и финальные согласования" />
+                          </Field>
+                          <button type="submit" disabled={savingWeekInfoIndex === weekIndex} className={`${primaryCompactButtonClass} w-full disabled:opacity-60`}>
+                            {savingWeekInfoIndex === weekIndex ? 'Сохраняю…' : 'Сохранить неделю'}
+                          </button>
+                        </form>
+                      ) : (
+                        <p className="whitespace-pre-wrap break-words text-sm leading-relaxed text-slate-600">
+                          {availabilityConfig.weekDescriptions[weekIndex] || 'Описание недели пока не добавлено.'}
+                        </p>
+                      )}
+                    </div>
+                  )}
 
                   {!outWeekIndexes.includes(weekIndex) && activeDayLabels.map((day) => {
                     const absoluteDayIndex = weekIndex * 7 + day.dayIndex;

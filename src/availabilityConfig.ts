@@ -4,6 +4,7 @@ export type AvailabilitySettings = {
   availabilityStartHour?: number;
   availabilityEndHour?: number;
   availabilityWeekNames?: string[];
+  availabilityWeekDescriptions?: string[];
 };
 
 export const DEFAULT_AVAILABILITY_ACTIVE_DAYS = [0, 1, 2, 3, 4];
@@ -35,9 +36,12 @@ export function normalizeAvailabilityConfig(settings?: AvailabilitySettings) {
     endHour,
     hours: Array.from({ length: endHour - startHour + 1 }, (_, index) => startHour + index),
     weekNames: Array.from({ length: weekCount }, (_, index) => {
-      const name = String(settings?.availabilityWeekNames?.[index] || '').trim();
+      const name = String(settings?.availabilityWeekNames?.[index] || '').trim().replace(/\s+/g, ' ').slice(0, 80);
       return name || (index === 0 ? 'Эта неделя' : `Неделя ${index + 1}`);
     }),
+    weekDescriptions: Array.from({ length: weekCount }, (_, index) => (
+      String(settings?.availabilityWeekDescriptions?.[index] || '').replace(/\r\n?/g, '\n').trim().slice(0, 600)
+    )),
   };
 }
 

@@ -33,7 +33,12 @@ const state: SimulationState = {
   events: [{ id: 'e1', name: 'Мегабатл', status: 'active', createdAt: '2026-08-05T00:00:00.000Z' }],
   tasks: [{ id: 't1', eventId: 'e1', title: 'Сцена', description: 'Очень длинное описание '.repeat(5_000), deadline: '2026-08-07', assignedTo: ['u1'], competency: 'Продакшн', competencies: ['Продакшн', 'Дизайн'], sow: '', tips: [], status: 'assigned', priority: 'critical', reminders: [{ id: 'r1', type: 'before_deadline', value: 2, unit: 'hours' }], assigneeNotes: { u1: { executor: 'В процессе' } }, completionComments: {} }],
   messages: { u1: [{ id: 'msg1', userId: 'u1', sender: 'bot', text: 'Готово ✅', timestamp: '2026-08-05T00:00:00.000Z' }] },
-  settings: { availabilityWeekCount: 2, databaseRevision: 7 },
+  settings: {
+    availabilityWeekCount: 2,
+    availabilityWeekNames: ['Подготовка', 'Финал'],
+    availabilityWeekDescriptions: ['Собираем материалы', 'Проводим мероприятие'],
+    databaseRevision: 7,
+  },
 };
 
 (state.tasks[0] as typeof state.tasks[0] & { legacyField: string }).legacyField = 'must survive';
@@ -55,6 +60,8 @@ assert.deepEqual(sanitized.availabilities.u1.slots, {}, 'hours outside the confi
 assert.deepEqual(sanitized.settings?.availabilityActiveDays, [0, 1, 2, 3, 4]);
 assert.equal(sanitized.settings?.availabilityStartHour, 17);
 assert.equal(sanitized.settings?.availabilityEndHour, 23);
+assert.deepEqual(sanitized.settings?.availabilityWeekNames, ['Подготовка', 'Финал']);
+assert.deepEqual(sanitized.settings?.availabilityWeekDescriptions, ['Собираем материалы', 'Проводим мероприятие']);
 const reset = resetOperationalData(decoded!);
 assert.equal(reset.users.length, 1, 'production reset must preserve team members');
 assert.equal(reset.users[0].joinedAt, '', 'production reset must clear test-era join timestamps');

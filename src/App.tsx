@@ -204,18 +204,25 @@ export default function App() {
     return false;
   };
 
-  const handleRenameAvailabilityWeek = async (weekIndex: number, name: string): Promise<boolean> => {
+  const handleRenameAvailabilityWeek = async (weekIndex: number, name: string, description: string): Promise<boolean> => {
     if (!currentUserId) return false;
     try {
       const res = await fetch('/api/availability/week-name', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ requesterId: currentUserId, weekIndex, name }),
+        body: JSON.stringify({ requesterId: currentUserId, weekIndex, name, description }),
       });
-      if (!res.ok) return false;
+      const data = await res.json();
+      if (!res.ok) {
+        triggerToast(data.error || 'Не удалось сохранить неделю', 'warning');
+        return false;
+      }
       await fetchState();
+      triggerToast('Название и описание недели сохранены', 'success');
       return true;
-    } catch {
+    } catch (error) {
+      console.error(error);
+      triggerToast('Не удалось сохранить неделю — проверьте соединение', 'warning');
       return false;
     }
   };

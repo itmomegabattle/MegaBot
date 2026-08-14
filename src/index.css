@@ -296,6 +296,13 @@ textarea:focus-visible {
   font-family: "Raleway", "Segoe UI", sans-serif;
 }
 
+.mega-shell .mega-week-title {
+  font-family: "Druk Text Wide Cyr", "Arial Black", sans-serif;
+  font-weight: 500;
+  line-height: 1.12;
+  letter-spacing: -0.02em;
+}
+
 .mega-shell input,
 .mega-shell textarea,
 .mega-shell select {
