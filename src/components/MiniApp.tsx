@@ -322,6 +322,7 @@ export default function MiniApp({
   const [showMeetingForm, setShowMeetingForm] = useState(false);
   const [savingMeeting, setSavingMeeting] = useState(false);
   const [expandedMeetingId, setExpandedMeetingId] = useState<string | null>(null);
+  const [expandedMeetingAttendeeIds, setExpandedMeetingAttendeeIds] = useState<string[]>([]);
   const [meetingKind, setMeetingKind] = useState<'meeting' | 'setup'>('meeting');
   const [meetingEventId, setMeetingEventId] = useState('');
   const [meetingTitle, setMeetingTitle] = useState('Общее собрание');
@@ -2692,8 +2693,12 @@ export default function MiniApp({
                 visibleScheduledMeetings.map((meeting) => {
                   const host = state.users.find((user) => user.id === meeting.hostId);
                   const workEvent = allEvents.find((item) => item.id === meeting.eventId);
+                  const attendingUsers = (meeting.attendeeIds || [])
+                    .map((userId) => state.users.find((user) => user.id === userId))
+                    .filter(Boolean) as User[];
                   const canManage = meeting.hostId === currentUser.id;
                   const expanded = expandedMeetingId === meeting.id;
+                  const attendeesExpanded = expandedMeetingAttendeeIds.includes(meeting.id);
                   const invited = meeting.participants === 'all' || meeting.participants.includes(currentUser.id) || meeting.hostId === currentUser.id;
                   const attending = (meeting.attendeeIds || []).includes(currentUser.id);
                   return (
@@ -2745,6 +2750,14 @@ export default function MiniApp({
                           {meeting.kind !== 'setup' && meeting.competency && <InfoRow label="Блок" value={meeting.competency} />}
                           {meeting.kind !== 'setup' && <InfoRow label="Тема" value={meeting.topic || 'Без темы'} />}
                           {meeting.kind !== 'setup' && meeting.description && <InfoRow label="Описание" value={meeting.description} />}
+                          <MeetingAttendanceList
+                            meetingId={meeting.id}
+                            users={attendingUsers}
+                            expanded={attendeesExpanded}
+                            onToggle={() => setExpandedMeetingAttendeeIds((current) => current.includes(meeting.id)
+                              ? current.filter((id) => id !== meeting.id)
+                              : [...current, meeting.id])}
+                          />
                           {!invited && !attending && <p className="rounded-2xl bg-blue-50 px-3 py-2 text-xs font-bold text-[#005BC4]">Тебя не добавили в исходный состав, но к этому собранию можно присоединиться.</p>}
                           {canManage && (
                             <div className="flex gap-2 pt-2">
@@ -4412,6 +4425,49 @@ function ListDisclosure({
       {expanded ? <Minus className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
       {expanded ? 'Свернуть' : `Ещё ${Math.max(0, total - 3)}`}
     </button>
+  );
+}
+
+function MeetingAttendanceList({
+  meetingId,
+  users,
+  expanded,
+  onToggle,
+}: {
+  meetingId: string;
+  users: User[];
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  const visibleUsers = expanded ? users : users.slice(0, 3);
+  const listId = `meeting-attendees-${meetingId}`;
+  return (
+    <section className="mt-3 rounded-2xl border border-blue-100 bg-blue-50 p-3" aria-labelledby={`${listId}-title`}>
+      <div className="min-w-0">
+        <h4 id={`${listId}-title`} className="font-black [color:var(--mega-link)]">Придут · {users.length}</h4>
+      </div>
+      {visibleUsers.length ? (
+        <div className="mt-2 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-2 rounded-xl bg-white px-3 py-2.5">
+          <p id={listId} className="min-w-0 flex-1 break-words text-sm font-bold leading-6 text-slate-700">
+            {visibleUsers.map((user) => user.realName).join(', ')}
+          </p>
+          {users.length > 3 && (
+            <button
+              type="button"
+              onClick={onToggle}
+              aria-expanded={expanded}
+              aria-controls={listId}
+              className={`${miniButtonClass} shrink-0`}
+            >
+              {expanded ? <CaretUp className="h-4 w-4" /> : <CaretDown className="h-4 w-4" />}
+              {expanded ? 'Скрыть' : 'Раскрыть'}
+            </button>
+          )}
+        </div>
+      ) : (
+        <p id={listId} className="mt-3 rounded-xl bg-white px-3 py-3 text-sm font-bold text-slate-600">Пока никто не подтвердил участие.</p>
+      )}
+    </section>
   );
 }
 
