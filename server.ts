@@ -3034,6 +3034,18 @@ async function startServer() {
           await answerCallback(callback.id, 'Задача не найдена');
           return res.json({ ok: true });
         }
+        const webAppUrl = configuredWebAppUrl();
+        if (webAppUrl && callbackMessageId) {
+          const targetUrl = new URL(webAppUrl);
+          targetUrl.searchParams.set('tab', 'tasks');
+          await editTelegramReplyMarkup(chatId, callbackMessageId, [[{
+            text: 'Посмотреть задачу',
+            web_app: { url: targetUrl.toString() },
+          }]]);
+          await answerCallback(callback.id, 'Кнопка обновлена — нажми ещё раз');
+          await sendNavigationKeyboard(chatId, [['Меню']], user);
+          return res.json({ ok: true });
+        }
         await answerCallback(callback.id);
         const buttons = task.status === 'open'
           ? [[{ text: 'Взять задачу', callback_data: `task_claim:${task.id}` }]]

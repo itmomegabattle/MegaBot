@@ -945,11 +945,9 @@ try {
       message: { message_id: 10061, chat: { id: 200, type: 'private' } },
     },
   });
-  const legacyTaskPanel = telegramCalls.find((call) => (
-    call.path.endsWith('/sendMessage')
-    && call.body.reply_markup?.inline_keyboard?.flat().some((button) => button.callback_data?.startsWith('task_claim:'))
-  ));
-  assert.ok(legacyTaskPanel, 'old task notification buttons must remain usable');
+  const upgradedLegacyTaskButton = telegramCalls.find((call) => call.path.endsWith('/editMessageReplyMarkup'));
+  assert.equal(new URL(upgradedLegacyTaskButton.body.reply_markup.inline_keyboard[0][0].web_app.url).searchParams.get('tab'), 'tasks');
+  assert.ok(telegramCalls.some((call) => call.path.endsWith('/answerCallbackQuery') && String(call.body.text || '').includes('нажми ещё раз')));
   const legacyTaskNavigation = telegramCalls.find((call) => call.path.endsWith('/sendMessage') && call.body.reply_markup?.keyboard);
   assert.deepEqual(legacyTaskNavigation.body.reply_markup.keyboard.flat().map((button) => button.text), ['Меню']);
   assert.equal(legacyTaskNavigation.body.reply_markup.is_persistent, true);
