@@ -1,6 +1,10 @@
 import crypto from 'crypto';
+import dns from 'dns';
 import fs from 'fs';
 import { AvailabilitySettings, normalizeAvailabilityConfig } from './availabilityConfig.js';
+
+dns.setDefaultResultOrder('ipv4first');
+const GOOGLE_API_TIMEOUT_MS = 15_000;
 
 export type GoogleSheetsConfig = {
   spreadsheetId: string;
@@ -95,6 +99,7 @@ async function accessToken(config: Pick<GoogleSheetsConfig, 'credentialsFile'>) 
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({ grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer', assertion }),
+    signal: AbortSignal.timeout(GOOGLE_API_TIMEOUT_MS),
   });
   const body = await response.json() as { access_token?: string; expires_in?: number; error_description?: string };
   if (!response.ok || !body.access_token) throw new Error(body.error_description || `Google token request failed: ${response.status}`);
@@ -107,6 +112,7 @@ export async function googleSheetsApiRequest(config: Pick<GoogleSheetsConfig, 's
   const response = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${config.spreadsheetId}${path}`, {
     ...init,
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...(init.headers || {}) },
+    signal: init.signal || AbortSignal.timeout(GOOGLE_API_TIMEOUT_MS),
   });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(`Google Sheets API ${response.status}: ${JSON.stringify(body)}`);
