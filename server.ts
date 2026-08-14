@@ -823,10 +823,23 @@ async function flushDatabaseSheetsSnapshots() {
 
 async function hydrateDatabaseFromGoogleSheets() {
   if (!DATABASE_SHEETS_CONFIG?.enabled) return;
-  const remote = await importStateFromGoogleSheetsDatabase(DATABASE_SHEETS_CONFIG);
-  if (!remote.initialized || !remote.state) throw new Error('Google Sheets database has no complete snapshot');
-  databaseStateCache = sanitizeSimulationState(remote.state);
-  console.log(`Google Sheets database loaded at revision ${remote.revision}.`);
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= 6; attempt += 1) {
+    try {
+      const remote = await importStateFromGoogleSheetsDatabase(DATABASE_SHEETS_CONFIG);
+      if (!remote.initialized || !remote.state) throw new Error('Google Sheets database has no complete snapshot');
+      databaseStateCache = sanitizeSimulationState(remote.state);
+      console.log(`Google Sheets database loaded at revision ${remote.revision}.`);
+      return;
+    } catch (error) {
+      lastError = error;
+      if (attempt === 6) break;
+      const retryDelayMs = attempt * 1_000;
+      console.warn(`Google Sheets database snapshot is temporarily unavailable; retrying in ${retryDelayMs}ms (${attempt}/6).`);
+      await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error('Google Sheets database has no complete snapshot');
 }
 
 function normalizeTaskReminders(value: unknown): TaskReminder[] {
@@ -1010,6 +1023,7 @@ async function startServer() {
   type StoredChatUiState = {
     version: 2;
     panels: Record<string, { current?: number; known: number[] }>;
+    navigation?: Record<string, number>;
     pendingSheetExports: string[];
     groupMembers?: Record<string, Record<string, {
       telegramId: string;
@@ -1048,7 +1062,9 @@ async function startServer() {
     Object.entries(chatUiState.panels)
       .map(([chatId, panel]) => [chatId, new Set(panel.known.filter(Number.isInteger))]),
   );
-  const chatNavigationMessageIds = new Map<string, number>();
+  const chatNavigationMessageIds = new Map<string, number>(
+    Object.entries(chatUiState.navigation || {}).filter(([, messageId]) => Number.isInteger(messageId)),
+  );
   const chatSlotDrafts = new Map<string, StoredSlotDraft>(Object.entries(chatUiState.slotDrafts || {}));
   const pendingSheetAvailabilityExports = new Set(chatUiState.pendingSheetExports || []);
   const groupMembers = new Map(Object.entries(chatUiState.groupMembers || {}).map(([chatId, members]) => [
@@ -1069,6 +1085,7 @@ async function startServer() {
       fs.writeFileSync(temporaryFile, JSON.stringify({
         version: 2,
         panels,
+        navigation: Object.fromEntries(chatNavigationMessageIds),
         pendingSheetExports: [...pendingSheetAvailabilityExports],
         groupMembers: Object.fromEntries([...groupMembers.entries()].map(([chatId, members]) => [
           chatId,
@@ -1491,7 +1508,11 @@ async function startServer() {
     if (!botToken) return;
     const chatKey = String(chatId);
     const previousMessageId = chatNavigationMessageIds.get(chatKey);
-    if (previousMessageId) await deleteTelegramMessage(chatId, previousMessageId);
+    if (previousMessageId) {
+      await deleteTelegramMessage(chatId, previousMessageId);
+      chatNavigationMessageIds.delete(chatKey);
+      persistChatPanelMessageIds();
+    }
     const tgApiBase = process.env.TELEGRAM_API_BASE || 'https://api.telegram.org';
     try {
       const response = await telegramFetch(`${tgApiBase}/bot${botToken}/sendMessage`, {
@@ -1512,6 +1533,7 @@ async function startServer() {
       if (data.result?.message_id) {
         const messageId = data.result.message_id;
         chatNavigationMessageIds.set(chatKey, messageId);
+        persistChatPanelMessageIds();
       }
     } catch (error) {
       console.error('Telegram navigation keyboard send failed:', error);
@@ -2052,6 +2074,7 @@ async function startServer() {
     if (navigationMessageId) {
       await deleteTelegramMessage(chatId, navigationMessageId);
       chatNavigationMessageIds.delete(String(chatId));
+      persistChatPanelMessageIds();
     }
     chatSessions.delete(String(chatId));
     const rows = isFacultyUser(user)
@@ -3016,6 +3039,7 @@ async function startServer() {
           ? [[{ text: 'Взять задачу', callback_data: `task_claim:${task.id}` }]]
           : [];
         await sendTaskInlinePanel(chatId, taskDetailsText(task, state), buttons);
+        await sendNavigationKeyboard(chatId, [['Меню']], user);
         return res.json({ ok: true });
       }
 
@@ -3073,7 +3097,7 @@ async function startServer() {
           await sendTaskTelegramMessage(creator.telegramId, `${userMention(user)} отказался от задачи *"${task.title}"*. Она снова на бирже.`);
         }
         for (const target of state.users.filter(u => u.telegramId && u.id !== user.id)) {
-          await sendTaskTelegramMessage(target.telegramId!, `Задача снова свободна:\n\n${taskDetailsText(task, state)}`, [{ text: 'Посмотреть задачу', action: `task_view:${task.id}` }]);
+          await sendTaskTelegramMessage(target.telegramId!, `Задача снова свободна:\n\n${taskDetailsText(task, state)}`, [{ text: 'Посмотреть задачу', action: 'open_tasks' }], false, target);
         }
         return res.json({ ok: true });
       }
@@ -5309,7 +5333,7 @@ async function startServer() {
     }
 
     for (const target of state.users.filter(u => u.telegramId && u.id !== user.id)) {
-      sendJobs.push(sendTaskTelegramMessage(target.telegramId!, `Задача снова свободна:\n\n${taskDetailsText(task, state)}`, [{ text: 'Посмотреть задачу', action: `task_view:${task.id}` }]));
+      sendJobs.push(sendTaskTelegramMessage(target.telegramId!, `Задача снова свободна:\n\n${taskDetailsText(task, state)}`, [{ text: 'Посмотреть задачу', action: 'open_tasks' }], false, target));
     }
     await Promise.allSettled(sendJobs);
 

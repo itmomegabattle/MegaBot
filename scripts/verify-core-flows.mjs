@@ -523,6 +523,8 @@ try {
   assert.equal(slotsNavigationCall.body.text, '\u2063');
   assert.equal(slotsNavigationCall.body.reply_markup.is_persistent, true);
   assert.ok(slotsNavigationCall.resultMessageId > slotsSendCall.resultMessageId, 'reply navigation must be sent after the inline slot panel');
+  const slotsNavigationState = JSON.parse(await readFile(`${testDatabasePath}.chat-panels.json`, 'utf8'));
+  assert.equal(slotsNavigationState.navigation['200'], slotsNavigationCall.resultMessageId, 'reply navigation anchor must survive a bot restart');
   assert.deepEqual(slotsSendCall.body.reply_markup.inline_keyboard.flat().map((button) => button.callback_data), ['slot_edit']);
   const slotsPanelId = slotsSendCall.resultMessageId;
 
@@ -925,6 +927,33 @@ try {
   });
   assert.equal(openTaskResult.response.status, 200);
   assert.ok(telegramCalls.filter((call) => call.path.endsWith('/sendMessage')).every((call) => call.body.disable_notification === true));
+  const openTaskAppLinks = telegramCalls
+    .filter((call) => call.path.endsWith('/sendMessage'))
+    .flatMap((call) => call.body.reply_markup?.inline_keyboard?.flat() || [])
+    .map((button) => button.web_app?.url)
+    .filter(Boolean);
+  assert.ok(openTaskAppLinks.length > 0);
+  assert.ok(openTaskAppLinks.every((url) => new URL(url).searchParams.get('tab') === 'tasks'));
+
+  telegramCalls.length = 0;
+  await request('/api/telegram-webhook', {
+    update_id: 1061,
+    callback_query: {
+      id: 'legacy-task-view',
+      from: aliceTelegram,
+      data: `task_view:${openTaskResult.data.task.id}`,
+      message: { message_id: 10061, chat: { id: 200, type: 'private' } },
+    },
+  });
+  const legacyTaskPanel = telegramCalls.find((call) => (
+    call.path.endsWith('/sendMessage')
+    && call.body.reply_markup?.inline_keyboard?.flat().some((button) => button.callback_data?.startsWith('task_claim:'))
+  ));
+  assert.ok(legacyTaskPanel, 'old task notification buttons must remain usable');
+  const legacyTaskNavigation = telegramCalls.find((call) => call.path.endsWith('/sendMessage') && call.body.reply_markup?.keyboard);
+  assert.deepEqual(legacyTaskNavigation.body.reply_markup.keyboard.flat().map((button) => button.text), ['Меню']);
+  assert.equal(legacyTaskNavigation.body.reply_markup.is_persistent, true);
+
   telegramCalls.length = 0;
   const selfClaim = await request('/api/task/claim', {
     taskId: openTaskResult.data.task.id,
