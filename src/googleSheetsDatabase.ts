@@ -9,7 +9,7 @@ export type GoogleSheetsDatabaseConfig = {
 
 type SchemaSheet = { title: string; headers: string[] };
 
-export const DATABASE_SCHEMA_VERSION = 6;
+export const DATABASE_SCHEMA_VERSION = 7;
 
 const SCHEMA: SchemaSheet[] = [
   { title: 'meta', headers: ['key', 'value'] },
@@ -20,7 +20,7 @@ const SCHEMA: SchemaSheet[] = [
   { title: 'faculties', headers: ['id', 'name'] },
   { title: 'availability_weeks', headers: ['user_id', 'week_start', 'updated_at', 'hard_unavailable_days_json', 'out_week_indexes_json'] },
   { title: 'availability_slots', headers: ['user_id', 'week_start', 'day_index', 'hour'] },
-  { title: 'meetings', headers: ['id', 'title', 'type', 'date', 'time', 'duration_hours', 'host_id', 'participants_all', 'competency', 'topic', 'description', 'status', 'google_calendar_event_id'] },
+  { title: 'meetings', headers: ['id', 'title', 'type', 'date', 'time', 'duration_hours', 'host_id', 'participants_all', 'competency', 'topic', 'description', 'status', 'google_calendar_event_id', 'kind', 'event_id'] },
   { title: 'meeting_participants', headers: ['meeting_id', 'user_id', 'kind'] },
   { title: 'tasks', headers: ['id', 'event_id', 'faculty_id', 'title', 'description', 'deadline', 'creator_id', 'competency', 'competencies_json', 'sow', 'status', 'priority', 'created_at', 'completed_at', 'time_spent_minutes', 'tips_json', 'cancelled_at', 'cancelled_by'] },
   { title: 'task_assignees', headers: ['task_id', 'user_id'] },
@@ -180,7 +180,7 @@ function stateRows(state: SimulationState) {
   const meetingRows: unknown[][] = [];
   const meetingParticipantRows: unknown[][] = [];
   state.meetings.forEach((meeting) => {
-    meetingRows.push([meeting.id, meeting.title, meeting.type, meeting.date, meeting.time, meeting.duration || 1, meeting.hostId, meeting.participants === 'all', meeting.competency || '', meeting.topic || '', meeting.description || '', meeting.status, meeting.googleCalendarEventId || '']);
+    meetingRows.push([meeting.id, meeting.title, meeting.type, meeting.date, meeting.time, meeting.duration || 1, meeting.hostId, meeting.participants === 'all', meeting.competency || '', meeting.topic || '', meeting.description || '', meeting.status, meeting.googleCalendarEventId || '', meeting.kind || 'meeting', meeting.eventId || '']);
     if (Array.isArray(meeting.participants)) meeting.participants.forEach((userId) => meetingParticipantRows.push([meeting.id, userId, 'invited']));
     (meeting.attendeeIds || []).forEach((userId) => meetingParticipantRows.push([meeting.id, userId, 'attending']));
   });
@@ -301,7 +301,7 @@ export async function importStateFromGoogleSheetsDatabase(config: GoogleSheetsDa
   const meta = Object.fromEntries(metaRows.map((row) => [String(row.key), row.value]));
   if (!bool(meta.data_present)) return { initialized: false, revision: 0, state: null, counts: null };
   if (String(meta.sync_state || '') !== 'ready') return { initialized: false, revision: Number(meta.revision || 0), state: null, counts: null };
-  if (![1, 2, 3, 4, 5, DATABASE_SCHEMA_VERSION].includes(Number(meta.schema_version))) throw new Error(`Unsupported Google Sheets database schema: ${meta.schema_version}`);
+  if (![1, 2, 3, 4, 5, 6, DATABASE_SCHEMA_VERSION].includes(Number(meta.schema_version))) throw new Error(`Unsupported Google Sheets database schema: ${meta.schema_version}`);
 
   const snapshotState = decodeGoogleSheetsDatabaseSnapshot(objects(valuesByTitle.get('snapshot')));
   if (snapshotState) {
@@ -345,7 +345,8 @@ export async function importStateFromGoogleSheetsDatabase(config: GoogleSheetsDa
   });
   const participantRows = objects(valuesByTitle.get('meeting_participants'));
   const meetings = objects(valuesByTitle.get('meetings')).map((row) => ({
-    id: String(row.id), title: String(row.title), type: String(row.type) as any, date: String(row.date), time: String(row.time), duration: Number(row.duration_hours || 1), hostId: String(row.host_id),
+    id: String(row.id), title: String(row.title), kind: row.kind === 'setup' ? 'setup' as const : 'meeting' as const,
+    eventId: String(row.event_id || '') || undefined, type: String(row.type) as any, date: String(row.date), time: String(row.time), duration: Number(row.duration_hours || 1), hostId: String(row.host_id),
     participants: bool(row.participants_all) ? 'all' as const : participantRows.filter((item) => item.meeting_id === row.id && item.kind === 'invited').map((item) => String(item.user_id)),
     attendeeIds: participantRows.filter((item) => item.meeting_id === row.id && item.kind === 'attending').map((item) => String(item.user_id)),
     competency: String(row.competency || ''), topic: String(row.topic || ''), description: String(row.description || ''), status: String(row.status) as any,

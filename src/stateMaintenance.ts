@@ -111,7 +111,8 @@ export function sanitizeSimulationState(input: SimulationState): SimulationState
         weekStart: optionalText(availability.weekStart),
       }])),
     meetings: (input.meetings || []).map((meeting) => ({
-      id: text(meeting.id), title: text(meeting.title), type: meeting.type, date: text(meeting.date), time: text(meeting.time),
+      id: text(meeting.id), title: text(meeting.title), kind: meeting.kind === 'setup' ? 'setup' : 'meeting',
+      eventId: optionalText(meeting.eventId), type: meeting.type, date: text(meeting.date), time: text(meeting.time),
       duration: Number(meeting.duration), hostId: text(meeting.hostId),
       participants: meeting.participants === 'all' ? 'all' : [...new Set((meeting.participants || []).map(String).filter(Boolean))],
       attendeeIds: [...new Set((meeting.attendeeIds || []).map(String).filter(Boolean))],

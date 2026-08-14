@@ -256,7 +256,8 @@ try {
   });
   assert.ok(telegramCalls.some((call) => call.path.endsWith('/deleteMessage')));
   assert.ok(telegramCalls.some((call) => call.path.endsWith('/sendMessage')));
-  const menuButtonCall = telegramCalls.find((call) => call.path.endsWith('/setChatMenuButton'));
+  const menuButtonCall = telegramCalls.find((call) => call.path.endsWith('/setChatMenuButton') && String(call.body.chat_id) === '200');
+  assert.ok(menuButtonCall, 'the private chat must receive its own Mini App menu button configuration');
   assert.equal(menuButtonCall.body.menu_button.web_app.url, 'https://megaorgiabot.ru');
   assert.equal(menuButtonCall.body.menu_button.text, 'Начать');
   assert.ok(!telegramCalls.some((call) => String(call.body.text || '').includes('меняет администратор')));
@@ -1498,6 +1499,36 @@ try {
   ));
   assert.ok(importantTopicNotification, 'meeting notifications must be duplicated into the IMPORTANT topic');
   assert.ok(!String(importantTopicNotification.body.text || '').includes('Придут:'));
+
+  telegramCalls.length = 0;
+  const setupMeeting = await request('/api/meeting', {
+    kind: 'setup', eventId: createdEventId, title: 'Монтаж тестовой площадки',
+    type: 'custom', date: '03.01.30', time: '19:00', duration: 4,
+    hostId: 'u_admin', participants: [], topic: 'Это поле должно быть очищено', description: 'И это тоже',
+  });
+  assert.equal(setupMeeting.response.status, 200);
+  assert.equal(setupMeeting.data.meeting.kind, 'setup');
+  assert.equal(setupMeeting.data.meeting.eventId, createdEventId);
+  assert.equal(setupMeeting.data.meeting.type, 'general');
+  assert.equal(setupMeeting.data.meeting.participants, 'all');
+  assert.equal(setupMeeting.data.meeting.duration, 1);
+  assert.equal(setupMeeting.data.meeting.topic, '');
+  assert.equal(setupMeeting.data.meeting.description, '');
+  const setupNotifications = telegramCalls.filter((call) => call.path.endsWith('/sendMessage'));
+  assert.ok(setupNotifications.some((call) => String(call.body.text || '').includes('Новый монтаж запланирован!')));
+  assert.ok(setupNotifications.some((call) => String(call.body.text || '').includes('Тестовое мероприятие — обновлено')));
+  assert.ok(setupNotifications.some((call) => call.body.chat_id === '-100500' && call.body.message_thread_id === 321), 'setup notifications must be duplicated into IMPORTANT');
+  assert.ok(setupNotifications.some((call) => String(call.body.chat_id) === '100'), 'setup host must receive a personal notification');
+  assert.ok(setupNotifications.some((call) => String(call.body.chat_id) === '200'), 'whole team must receive setup notifications');
+
+  telegramCalls.length = 0;
+  const setupUpdate = await request('/api/meeting/update', {
+    requesterId: 'u_admin', meetingId: setupMeeting.data.meeting.id, title: 'Монтаж главной сцены', time: '20:00',
+  });
+  assert.equal(setupUpdate.response.status, 200);
+  assert.equal(setupUpdate.data.meeting.kind, 'setup');
+  assert.equal(setupUpdate.data.meeting.participants, 'all');
+  assert.ok(telegramCalls.some((call) => String(call.body.text || '').includes('Монтаж изменён')));
 
   const oneDayAvailability = await request('/api/availability', {
     userId: 'u_alice',

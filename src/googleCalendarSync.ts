@@ -116,18 +116,22 @@ export function googleCalendarEventId(meetingId: string) {
 
 const userLabel = (user?: User) => user ? `${user.realName}${user.username ? ` (${user.username})` : ''}` : 'не указан';
 
-export function buildGoogleCalendarEvent(meeting: Meeting, state: Pick<SimulationState, 'users'>, timeZone = 'Europe/Moscow'): GoogleCalendarEvent {
+export function buildGoogleCalendarEvent(meeting: Meeting, state: Pick<SimulationState, 'users' | 'events'>, timeZone = 'Europe/Moscow'): GoogleCalendarEvent {
   const date = isoDate(meeting.date);
   const time = /^\d{2}:\d{2}$/.test(meeting.time) ? meeting.time : `0${meeting.time}`.slice(-5);
   const startDateTime = `${date}T${time}:00`;
   const duration = Number.isFinite(Number(meeting.duration)) && Number(meeting.duration) > 0 ? Number(meeting.duration) : 1;
   const invitedIds = meeting.participants === 'all' ? state.users.map((user) => user.id) : meeting.participants;
   const invited = invitedIds.map((id) => state.users.find((user) => user.id === id)).filter(Boolean) as User[];
+  const workEvent = (state.events || []).find((item) => item.id === meeting.eventId);
+  const isSetup = meeting.kind === 'setup';
   const description = [
+    isSetup && 'Тип: монтаж площадки',
+    isSetup && `Мероприятие: ${workEvent?.name || 'не указано'}`,
     meeting.description && `Описание: ${meeting.description}`,
     meeting.topic && `Повестка: ${meeting.topic}`,
     meeting.competency && `Направление: ${meeting.competency}`,
-    `Формат: ${meeting.type === 'general' ? 'общее собрание' : 'выбранные участники'}`,
+    `Формат: ${isSetup ? 'монтаж, приглашена вся команда' : meeting.type === 'general' ? 'общее собрание' : 'выбранные участники'}`,
     `Организатор: ${userLabel(state.users.find((user) => user.id === meeting.hostId))}`,
     `Участники: ${meeting.participants === 'all' ? 'вся команда' : invited.map(userLabel).join(', ') || 'не указаны'}`,
     `MegaBot ID: ${meeting.id}`,
@@ -147,7 +151,7 @@ export async function checkGoogleCalendarAccess(config: GoogleCalendarConfig) {
   return result.body;
 }
 
-export async function syncMeetingToGoogleCalendar(config: GoogleCalendarConfig, meeting: Meeting, state: Pick<SimulationState, 'users'>) {
+export async function syncMeetingToGoogleCalendar(config: GoogleCalendarConfig, meeting: Meeting, state: Pick<SimulationState, 'users' | 'events'>) {
   if (!config.enabled) return { skipped: true as const };
   let eventId = meeting.googleCalendarEventId || googleCalendarEventId(meeting.id);
   let eventPath = `/calendars/${encodeURIComponent(config.calendarId)}/events/${encodeURIComponent(eventId)}`;

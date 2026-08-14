@@ -27,10 +27,13 @@ export interface Availability {
 }
 
 export type MeetingType = 'general' | 'custom';
+export type MeetingKind = 'meeting' | 'setup';
 
 export interface Meeting {
   id: string;
   title: string;
+  kind?: MeetingKind;
+  eventId?: string;
   type: MeetingType;
   date: string;
   time: string;

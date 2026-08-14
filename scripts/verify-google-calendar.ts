@@ -18,7 +18,8 @@ const state = {
     { id: 'u1', realName: 'Никита', username: '@nikita' },
     { id: 'u2', realName: 'Анна', username: '@anna' },
   ],
-} as Pick<SimulationState, 'users'>;
+  events: [{ id: 'event-1', name: 'Фестиваль', status: 'active', createdAt: '2026-08-01T00:00:00.000Z' }],
+} as Pick<SimulationState, 'users' | 'events'>;
 const meeting: Meeting = {
   id: 'm_test_1', title: 'Планёрка', type: 'custom', date: '06.08.26', time: '17:30', duration: 0,
   hostId: 'u1', participants: ['u2'], attendeeIds: ['u1'], competency: 'Продакшн', topic: 'Дедлайны',
@@ -33,6 +34,22 @@ assert.match(event.description, /Повестка: Дедлайны/);
 assert.match(event.description, /Организатор: Никита/);
 assert.match(event.description, /Участники: Анна/);
 assert.match(googleCalendarEventId(meeting.id), /^[a-v0-9]{5,1024}$/);
+
+const setupEvent = buildGoogleCalendarEvent({
+  ...meeting,
+  id: 'm_setup_1',
+  kind: 'setup',
+  eventId: 'event-1',
+  title: 'Монтаж сцены',
+  participants: 'all',
+  description: '',
+  topic: '',
+  competency: '',
+}, state);
+assert.equal(setupEvent.summary, 'Монтаж сцены');
+assert.match(setupEvent.description, /Тип: монтаж площадки/);
+assert.match(setupEvent.description, /Мероприятие: Фестиваль/);
+assert.match(setupEvent.description, /Формат: монтаж, приглашена вся команда/);
 
 const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'megabot-calendar-'));
 const credentialsFile = path.join(tempRoot, 'service-account.json');

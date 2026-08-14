@@ -120,10 +120,10 @@ export default function App() {
       const data = await res.json();
       if (data.success) {
         await fetchState();
-        triggerToast(`Встреча "${meetingData.title}" запланирована`, 'success');
+        triggerToast(`${meetingData.kind === 'setup' ? 'Монтаж' : 'Встреча'} "${meetingData.title}" ${meetingData.kind === 'setup' ? 'запланирован' : 'запланирована'}`, 'success');
         return true;
       }
-      triggerToast(data.error || 'Не удалось назначить встречу', 'warning');
+      triggerToast(data.error || `Не удалось назначить ${meetingData.kind === 'setup' ? 'монтаж' : 'встречу'}`, 'warning');
     } catch (err) {
       console.error(err);
     }

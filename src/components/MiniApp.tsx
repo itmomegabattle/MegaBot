@@ -322,6 +322,8 @@ export default function MiniApp({
   const [showMeetingForm, setShowMeetingForm] = useState(false);
   const [savingMeeting, setSavingMeeting] = useState(false);
   const [expandedMeetingId, setExpandedMeetingId] = useState<string | null>(null);
+  const [meetingKind, setMeetingKind] = useState<'meeting' | 'setup'>('meeting');
+  const [meetingEventId, setMeetingEventId] = useState('');
   const [meetingTitle, setMeetingTitle] = useState('Общее собрание');
   const [meetingDate, setMeetingDate] = useState('');
   const [meetingTime, setMeetingTime] = useState('18:00');
@@ -827,6 +829,8 @@ export default function MiniApp({
   };
 
   const applySuggestion = (suggestion: MeetingSuggestion) => {
+    setMeetingKind('meeting');
+    setMeetingEventId('');
     setMeetingType('general');
     setMeetingTitle('Общее собрание');
     setMeetingDate(suggestion.date || nextDateForDay(suggestion.weekIndex * 7 + suggestion.dayIndex));
@@ -866,6 +870,8 @@ export default function MiniApp({
   const resetMeetingForm = () => {
     setEditingMeetingId(null);
     setShowMeetingForm(false);
+    setMeetingKind('meeting');
+    setMeetingEventId('');
     setMeetingTitle('Общее собрание');
     setMeetingDate('');
     setMeetingTime('18:00');
@@ -883,6 +889,8 @@ export default function MiniApp({
     setMeetingError('');
     setEditingMeetingId(meeting.id);
     setShowMeetingForm(true);
+    setMeetingKind(meeting.kind === 'setup' ? 'setup' : 'meeting');
+    setMeetingEventId(meeting.eventId || '');
     setMeetingTitle(meeting.title);
     setMeetingDate(formatDateShort(meeting.date));
     setMeetingTime(meeting.time);
@@ -909,29 +917,35 @@ export default function MiniApp({
     event.preventDefault();
     setMeetingError('');
     if (!meetingTitle.trim()) {
-      setMeetingError('Укажи название собрания.');
+      setMeetingError(meetingKind === 'setup' ? 'Укажи название монтажа.' : 'Укажи название собрания.');
+      return;
+    }
+    if (meetingKind === 'setup' && !meetingEventId) {
+      setMeetingError('Выбери мероприятие для монтажа.');
       return;
     }
     if (!meetingDate) {
-      setMeetingError('Выбери дату собрания.');
+      setMeetingError(meetingKind === 'setup' ? 'Выбери дату монтажа.' : 'Выбери дату собрания.');
       return;
     }
-    if (meetingType !== 'general' && participants.length === 0) {
+    if (meetingKind === 'meeting' && meetingType !== 'general' && participants.length === 0) {
       setMeetingError(meetingType === 'competency' ? 'В выбранном блоке пока нет участников.' : 'Выбери хотя бы одного участника.');
       return;
     }
     setSavingMeeting(true);
     const payload = {
-      title: meetingTitle || 'Собрание',
-      type: meetingType === 'competency' ? 'custom' : meetingType,
+      title: meetingTitle || (meetingKind === 'setup' ? 'Монтаж' : 'Собрание'),
+      kind: meetingKind,
+      eventId: meetingKind === 'setup' ? meetingEventId : '',
+      type: meetingKind === 'setup' ? 'general' : meetingType === 'competency' ? 'custom' : meetingType,
       date: meetingDate || nextDateForDay(0),
       time: meetingTime,
-      duration: Number(meetingDuration) || 1,
+      duration: meetingKind === 'setup' ? 1 : Number(meetingDuration) || 1,
       hostId: currentUser.id,
-      participants: meetingType === 'general' ? 'all' : participants,
-      topic: meetingTopic,
-      description: meetingDescription,
-      competency: meetingType === 'competency' ? meetingCompetency : '',
+      participants: meetingKind === 'setup' || meetingType === 'general' ? 'all' : participants,
+      topic: meetingKind === 'setup' ? '' : meetingTopic,
+      description: meetingKind === 'setup' ? '' : meetingDescription,
+      competency: meetingKind === 'meeting' && meetingType === 'competency' ? meetingCompetency : '',
     };
 
     if (editingMeetingId) {
@@ -969,6 +983,24 @@ export default function MiniApp({
       setMeetingCompetency('');
       setParticipants([]);
     }
+  };
+
+  const selectMeetingKind = (nextKind: 'meeting' | 'setup') => {
+    setMeetingKind(nextKind);
+    setMeetingError('');
+    setShowAllMeetingParticipants(false);
+    if (nextKind === 'setup') {
+      setMeetingType('general');
+      setMeetingCompetency('');
+      setParticipants([]);
+      setMeetingTopic('');
+      setMeetingDescription('');
+      setMeetingDuration('1');
+      if (meetingTitle === 'Общее собрание') setMeetingTitle('Монтаж');
+      return;
+    }
+    setMeetingEventId('');
+    if (meetingTitle === 'Монтаж') setMeetingTitle('Общее собрание');
   };
 
   const setMeetingAttendance = async (meeting: Meeting, attending: boolean) => {
@@ -2056,24 +2088,32 @@ export default function MiniApp({
                 {showMeetingForm && editingMeetingId && (
                   <form ref={meetingFormRef} onSubmit={submitMeeting} className="scroll-mt-24 space-y-3 rounded-3xl border border-blue-100 bg-white p-4 shadow-sm animate-in fade-in slide-in-from-top-2 duration-200">
                     <div className="flex items-center justify-between gap-2">
-                      <h2 className="font-black">Редактировать собрание</h2>
+                      <h2 className="font-black">{meetingKind === 'setup' ? 'Редактировать монтаж' : 'Редактировать собрание'}</h2>
                       <button type="button" onClick={resetMeetingForm} className={miniButtonClass}><X className="h-4 w-4" /> Отмена</button>
                     </div>
                     {meetingError && <div role="alert" className="rounded-2xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-bold text-rose-800">{meetingError}</div>}
-                    <MeetingAudiencePicker value={meetingType} onChange={setMeetingAudience} />
+                    <MeetingKindPicker value={meetingKind} onChange={selectMeetingKind} />
+                    {meetingKind === 'meeting' && <MeetingAudiencePicker value={meetingType} onChange={setMeetingAudience} />}
+                    {meetingKind === 'setup' && (
+                      <Field label="Мероприятие">
+                        <select value={meetingEventId} onChange={(event) => setMeetingEventId(event.target.value)} className={selectClass} required>
+                          <option value="">Выбери мероприятие</option>
+                          {allEvents.filter((item) => item.status === 'active' || item.id === meetingEventId).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+                        </select>
+                      </Field>
+                    )}
                     <Field label="Название"><input value={meetingTitle} onChange={(event) => setMeetingTitle(event.target.value)} className={inputClass} /></Field>
-                    <div className="grid min-w-0 grid-cols-1 gap-3 min-[720px]:grid-cols-3">
+                    <div className={`grid min-w-0 grid-cols-1 gap-3 ${meetingKind === 'setup' ? 'min-[520px]:grid-cols-2' : 'min-[720px]:grid-cols-3'}`}>
                       <Field label="Дата"><DatePickerField value={meetingDate} onChange={setMeetingDate} placeholder="Выбери дату" /></Field>
                       <Field label="Время"><input type="time" min={`${String(availabilityConfig.startHour).padStart(2, '0')}:00`} max={`${String(availabilityConfig.endHour).padStart(2, '0')}:00`} value={meetingTime} onChange={(event) => setMeetingTime(event.target.value)} className={inputClass} /></Field>
-                      <Field label="Длительность">
+                      {meetingKind === 'meeting' && <Field label="Длительность">
                         <select value={meetingDuration} onChange={(event) => setMeetingDuration(event.target.value)} className={selectClass}>
                           <option value="0.5">30 минут</option><option value="1">1 час</option><option value="1.5">1,5 часа</option><option value="2">2 часа</option><option value="2.5">2,5 часа</option><option value="3">3 часа</option><option value="4">4 часа</option><option value="5">5 часов</option><option value="6">6 часов</option>
                         </select>
-                      </Field>
+                      </Field>}
                     </div>
-                    <Field label="Тема"><textarea value={meetingTopic} onChange={(event) => setMeetingTopic(event.target.value)} className={inputClass} rows={3} /></Field>
-                    <Field label="Описание"><textarea value={meetingDescription} onChange={(event) => setMeetingDescription(event.target.value)} className={inputClass} rows={3} placeholder="Можно оставить пустым" /></Field>
-                    {meetingType === 'competency' && (
+                    {meetingKind === 'meeting' && <Field label="Тема"><textarea value={meetingTopic} onChange={(event) => setMeetingTopic(event.target.value)} className={inputClass} rows={3} /></Field>}
+                    {meetingKind === 'meeting' && meetingType === 'competency' && (
                       <Field label="Блок">
                         <select value={meetingCompetency} onChange={(event) => selectMeetingCompetency(event.target.value)} className={selectClass}>
                           <option value="">Выбери блок</option>
@@ -2081,7 +2121,7 @@ export default function MiniApp({
                         </select>
                       </Field>
                     )}
-                    {(meetingType === 'custom' || meetingType === 'competency') && (
+                    {meetingKind === 'meeting' && (meetingType === 'custom' || meetingType === 'competency') && (
                       <div className="grid grid-cols-1 gap-2">
                         {coreTeamUsers.length > 3 && <ListDisclosure expanded={showAllMeetingParticipants} onToggle={() => setShowAllMeetingParticipants((value) => !value)} total={coreTeamUsers.length} />}
                         {(showAllMeetingParticipants ? coreTeamUsers : coreTeamUsers.slice(0, 3)).map((user) => (
@@ -2092,7 +2132,7 @@ export default function MiniApp({
                         ))}
                       </div>
                     )}
-                    <button disabled={savingMeeting} className={`${primaryButtonClass} disabled:opacity-70`}>{savingMeeting ? 'Сохраняю...' : 'Сохранить встречу'}</button>
+                    <button disabled={savingMeeting} className={`${primaryButtonClass} disabled:opacity-70`}>{savingMeeting ? 'Сохраняю...' : meetingKind === 'setup' ? 'Сохранить монтаж' : 'Сохранить встречу'}</button>
                   </form>
                 )}
 
@@ -2102,11 +2142,16 @@ export default function MiniApp({
                   <div className="mt-4 space-y-3">
                     {scheduledMeetings.length === 0 ? <EmptyState text="Встреч пока нет" /> : scheduledMeetings.map((meeting) => {
                       const host = state.users.find((user) => user.id === meeting.hostId);
+                      const workEvent = allEvents.find((item) => item.id === meeting.eventId);
                       return (
                         <div key={meeting.id} className="rounded-2xl bg-slate-50 p-3">
                           <div className="flex items-start justify-between gap-3">
                             <div className="min-w-0">
-                              <div className="font-black">{meeting.title}</div>
+                              <div className="flex flex-wrap items-center gap-2 font-black">
+                                {meeting.title}
+                                {meeting.kind === 'setup' && <span className="rounded-full bg-blue-100 px-2 py-0.5 text-xs font-black uppercase tracking-wide text-[#005BC4]">Монтаж</span>}
+                              </div>
+                              {meeting.kind === 'setup' && <div className="mt-1 text-xs font-bold text-[#005BC4]">{workEvent?.name || 'Мероприятие не найдено'}</div>}
                               <div className="mt-1 text-xs font-semibold text-slate-500">{formatDateShort(meeting.date)} · {meeting.time} · {host?.realName || 'Организатор'}</div>
                             </div>
                             <div className="flex shrink-0 gap-2">
@@ -2559,7 +2604,7 @@ export default function MiniApp({
             {showMeetingForm && (
             <form ref={meetingFormRef} onSubmit={submitMeeting} className={`${editingMeetingId ? 'order-first' : ''} scroll-mt-24 space-y-3 rounded-3xl border border-blue-100 bg-white p-4 shadow-sm animate-in fade-in slide-in-from-top-2 duration-200`}>
               <div className="flex min-w-0 items-start justify-between gap-2">
-                <h2 className="min-w-0 flex-1 break-words font-black">{editingMeetingId ? 'Редактировать собрание' : 'Назначить собрание'}</h2>
+                <h2 className="min-w-0 flex-1 break-words font-black">{editingMeetingId ? meetingKind === 'setup' ? 'Редактировать монтаж' : 'Редактировать собрание' : 'Назначить событие'}</h2>
                 {editingMeetingId && (
                   <button type="button" onClick={resetMeetingForm} className={`${miniButtonClass} shrink-0 whitespace-nowrap`}>
                     <span aria-hidden="true">❌</span>
@@ -2568,30 +2613,36 @@ export default function MiniApp({
                 )}
               </div>
               {meetingError && <div role="alert" className="rounded-2xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-bold text-rose-800">{meetingError}</div>}
-              <MeetingAudiencePicker value={meetingType} onChange={setMeetingAudience} />
+              <MeetingKindPicker value={meetingKind} onChange={selectMeetingKind} />
+              {meetingKind === 'meeting' && <MeetingAudiencePicker value={meetingType} onChange={setMeetingAudience} />}
+              {meetingKind === 'setup' && (
+                <Field label="Мероприятие">
+                  <select value={meetingEventId} onChange={(event) => setMeetingEventId(event.target.value)} className={selectClass} required>
+                    <option value="">Выбери мероприятие</option>
+                    {allEvents.filter((item) => item.status === 'active' || item.id === meetingEventId).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+                  </select>
+                </Field>
+              )}
               <Field label="Название">
                 <input value={meetingTitle} onChange={(e) => setMeetingTitle(e.target.value)} className={inputClass} />
               </Field>
-              <div className="grid min-w-0 grid-cols-1 gap-3 min-[520px]:grid-cols-2 min-[820px]:grid-cols-3 [&>*]:min-w-0">
+              <div className={`grid min-w-0 grid-cols-1 gap-3 min-[520px]:grid-cols-2 [&>*]:min-w-0 ${meetingKind === 'meeting' ? 'min-[820px]:grid-cols-3' : ''}`}>
                 <Field label="Дата">
                   <DatePickerField value={meetingDate} onChange={setMeetingDate} placeholder="Выбери дату" />
                 </Field>
                 <Field label="Время">
                   <input type="time" min={`${String(availabilityConfig.startHour).padStart(2, '0')}:00`} max={`${String(availabilityConfig.endHour).padStart(2, '0')}:00`} value={meetingTime} onChange={(e) => setMeetingTime(e.target.value)} className={inputClass} />
                 </Field>
-                <Field label="Длительность">
+                {meetingKind === 'meeting' && <Field label="Длительность">
                   <select value={meetingDuration} onChange={(event) => setMeetingDuration(event.target.value)} className={selectClass}>
                     <option value="0.5">30 минут</option><option value="1">1 час</option><option value="1.5">1,5 часа</option><option value="2">2 часа</option><option value="2.5">2,5 часа</option><option value="3">3 часа</option><option value="4">4 часа</option><option value="5">5 часов</option><option value="6">6 часов</option>
                   </select>
-                </Field>
+                </Field>}
               </div>
-              <Field label="Тема">
+              {meetingKind === 'meeting' && <Field label="Тема">
                 <textarea value={meetingTopic} onChange={(e) => setMeetingTopic(e.target.value)} className={inputClass} rows={3} />
-              </Field>
-              <Field label="Описание">
-                <textarea value={meetingDescription} onChange={(e) => setMeetingDescription(e.target.value)} className={inputClass} rows={3} placeholder="Можно оставить пустым" />
-              </Field>
-              {meetingType === 'competency' && (
+              </Field>}
+              {meetingKind === 'meeting' && meetingType === 'competency' && (
                 <Field label="Блок">
                   <select value={meetingCompetency} onChange={(e) => selectMeetingCompetency(e.target.value)} className={selectClass}>
                     <option value="">Выбери блок</option>
@@ -2601,7 +2652,7 @@ export default function MiniApp({
                   </select>
                 </Field>
               )}
-              {(meetingType === 'custom' || meetingType === 'competency') && (
+              {meetingKind === 'meeting' && (meetingType === 'custom' || meetingType === 'competency') && (
                 <div className="grid grid-cols-1 gap-2">
                   {coreTeamUsers.length > 3 && (
                     <ListDisclosure
@@ -2619,7 +2670,7 @@ export default function MiniApp({
                 </div>
               )}
               <button disabled={savingMeeting} className={`${primaryButtonClass} disabled:opacity-70`}>
-                {savingMeeting ? 'Сохраняю...' : editingMeetingId ? 'Сохранить встречу' : 'Запланировать'}
+                {savingMeeting ? 'Сохраняю...' : editingMeetingId ? meetingKind === 'setup' ? 'Сохранить монтаж' : 'Сохранить встречу' : meetingKind === 'setup' ? 'Запланировать монтаж' : 'Запланировать собрание'}
               </button>
             </form>
             )}
@@ -2640,6 +2691,7 @@ export default function MiniApp({
               ) : (
                 visibleScheduledMeetings.map((meeting) => {
                   const host = state.users.find((user) => user.id === meeting.hostId);
+                  const workEvent = allEvents.find((item) => item.id === meeting.eventId);
                   const canManage = meeting.hostId === currentUser.id;
                   const expanded = expandedMeetingId === meeting.id;
                   const invited = meeting.participants === 'all' || meeting.participants.includes(currentUser.id) || meeting.hostId === currentUser.id;
@@ -2652,8 +2704,11 @@ export default function MiniApp({
                     >
                       <div className="flex items-start justify-between gap-3">
                         <div>
-                          <h3 className="font-black">{meeting.title}</h3>
-                          <p className="mt-1 text-sm text-slate-500">{meeting.topic || 'Нажми, чтобы посмотреть детали'}</p>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <h3 className="font-black">{meeting.title}</h3>
+                            {meeting.kind === 'setup' && <span className="rounded-full bg-blue-100 px-2 py-0.5 text-xs font-black uppercase tracking-wide text-[#005BC4]">Монтаж</span>}
+                          </div>
+                          <p className="mt-1 text-sm text-slate-500">{meeting.kind === 'setup' ? workEvent?.name || 'Мероприятие не найдено' : meeting.topic || 'Нажми, чтобы посмотреть детали'}</p>
                         </div>
                         <div className="rounded-2xl bg-blue-50 px-3 py-2 text-right text-xs font-black text-[#0069E0]">
                           {weekdayShortByDate(meeting.date)}
@@ -2685,10 +2740,11 @@ export default function MiniApp({
                           <InfoRow label="Дата" value={`${weekdayShortByDate(meeting.date)} ${formatDateShort(meeting.date)}`} />
                           <InfoRow label="Время" value={meeting.time} />
                           <InfoRow label="Длительность" value={taskDurationText(Math.round(Number(meeting.duration || 1) * 60))} />
-                          <InfoRow label="Формат" value={meeting.type === 'general' ? 'Общее — вся команда' : meeting.competency ? `По блоку «${meeting.competency}»` : 'По выбранным людям'} />
-                          {meeting.competency && <InfoRow label="Блок" value={meeting.competency} />}
-                          <InfoRow label="Тема" value={meeting.topic || 'Без темы'} />
-                          {meeting.description && <InfoRow label="Описание" value={meeting.description} />}
+                          <InfoRow label="Формат" value={meeting.kind === 'setup' ? 'Монтаж — вся команда' : meeting.type === 'general' ? 'Общее — вся команда' : meeting.competency ? `По блоку «${meeting.competency}»` : 'По выбранным людям'} />
+                          {meeting.kind === 'setup' && <InfoRow label="Мероприятие" value={workEvent?.name || 'Не указано'} />}
+                          {meeting.kind !== 'setup' && meeting.competency && <InfoRow label="Блок" value={meeting.competency} />}
+                          {meeting.kind !== 'setup' && <InfoRow label="Тема" value={meeting.topic || 'Без темы'} />}
+                          {meeting.kind !== 'setup' && meeting.description && <InfoRow label="Описание" value={meeting.description} />}
                           {!invited && !attending && <p className="rounded-2xl bg-blue-50 px-3 py-2 text-xs font-bold text-[#005BC4]">Тебя не добавили в исходный состав, но к этому собранию можно присоединиться.</p>}
                           {canManage && (
                             <div className="flex gap-2 pt-2">
@@ -3861,6 +3917,33 @@ function Segmented({ value, onChange, options }: { value: string; onChange: (val
         </button>
       ))}
     </div>
+  );
+}
+
+function MeetingKindPicker({ value, onChange }: { value: 'meeting' | 'setup'; onChange: (value: 'meeting' | 'setup') => void }) {
+  const options = [
+    { id: 'meeting' as const, title: 'Собрание', description: 'Встреча команды или выбранных людей' },
+    { id: 'setup' as const, title: 'Монтаж', description: 'Подготовка площадки всей командой' },
+  ];
+  return (
+    <fieldset>
+      <legend className="mb-2 text-xs font-black uppercase tracking-wide text-slate-500">Что назначаем</legend>
+      <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Тип события">
+        {options.map((option) => (
+          <button
+            key={option.id}
+            type="button"
+            role="radio"
+            aria-checked={value === option.id}
+            onClick={() => onChange(option.id)}
+            className={`min-w-0 rounded-2xl border px-3 py-3 text-left transition ${pressClass} ${meetingAudienceOptionClass(value === option.id)}`}
+          >
+            <span className="block break-words text-sm font-black">{option.title}</span>
+            <span className="mt-1 hidden text-xs font-semibold opacity-75 min-[390px]:block">{option.description}</span>
+          </button>
+        ))}
+      </div>
+    </fieldset>
   );
 }
 

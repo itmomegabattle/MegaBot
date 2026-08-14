@@ -470,8 +470,10 @@ function taskDetailsText(task: Task, state: SimulationState) {
 
 function meetingDetailsText(meeting: Meeting, state: SimulationState) {
   const host = state.users.find((user) => user.id === meeting.hostId);
+  const workEvent = (state.events || []).find((item) => item.id === meeting.eventId);
+  const isSetup = meeting.kind === 'setup';
   const durationMinutes = Math.round(Number(meeting.duration || 1) * 60);
-  return `*${meeting.title}*\n\n*Дата:* ${formatMeetingDate(meeting.date)}\n*Время:* ${meeting.time}\n*Длительность:* ${taskDurationLabel(durationMinutes)}\n*Организатор:* ${userMention(host)}${meeting.competency ? `\n*Блок:* ${meeting.competency}` : ''}${meeting.topic ? `\n*Тема:* ${meeting.topic}` : ''}${meeting.description ? `\n*Описание:* ${meeting.description}` : ''}`;
+  return `*${meeting.title}*\n\n${isSetup ? `*Тип:* Монтаж\n*Мероприятие:* ${workEvent?.name || 'не указано'}\n` : ''}*Дата:* ${formatMeetingDate(meeting.date)}\n*Время:* ${meeting.time}\n*Длительность:* ${taskDurationLabel(durationMinutes)}\n*Организатор:* ${userMention(host)}${meeting.competency ? `\n*Блок:* ${meeting.competency}` : ''}${meeting.topic ? `\n*Тема:* ${meeting.topic}` : ''}${meeting.description ? `\n*Описание:* ${meeting.description}` : ''}`;
 }
 
 function meetingUpdateText(before: Meeting, after: Meeting, state: SimulationState) {
@@ -481,6 +483,12 @@ function meetingUpdateText(before: Meeting, after: Meeting, state: SimulationSta
     ? 'all'
     : [...meeting.participants].sort().join('|');
   if (before.title !== after.title) changes.push(`❗Название: ${value(before.title)} → ${value(after.title)}`);
+  if ((before.kind || 'meeting') !== (after.kind || 'meeting')) changes.push(`❗Тип: ${before.kind === 'setup' ? 'монтаж' : 'собрание'} → ${after.kind === 'setup' ? 'монтаж' : 'собрание'}`);
+  if (value(before.eventId) !== value(after.eventId)) {
+    const beforeEvent = state.events?.find((item) => item.id === before.eventId)?.name;
+    const afterEvent = state.events?.find((item) => item.id === after.eventId)?.name;
+    changes.push(`❗Мероприятие: ${value(beforeEvent)} → ${value(afterEvent)}`);
+  }
   if (before.date !== after.date) changes.push(`❗Дата: ${formatMeetingDate(before.date)} → ${formatMeetingDate(after.date)}`);
   if (before.time !== after.time) changes.push(`❗Время: ${value(before.time)} → ${value(after.time)}`);
   if (Number(before.duration || 1) !== Number(after.duration || 1)) {
@@ -494,7 +502,7 @@ function meetingUpdateText(before: Meeting, after: Meeting, state: SimulationSta
     changes.push(`❗Описание:\nБыло: ${value(before.description)}\nСтало: ${value(after.description)}`);
   }
   const details = meetingDetailsText(after, state).replace(/^\*[^\n]+\*\n\n/, '');
-  return `Встреча изменена: *${after.title}*\n${details}\n\n*Что изменилось:*\n${changes.join('\n')}`;
+  return `${after.kind === 'setup' ? 'Монтаж изменён' : 'Встреча изменена'}: *${after.title}*\n${details}\n\n*Что изменилось:*\n${changes.join('\n')}`;
 }
 
 function meetingRsvpButtons(meeting: Meeting, userId: string) {
@@ -1927,6 +1935,8 @@ async function startServer() {
 
   async function createMeetingAndNotify(state: SimulationState, data: {
     title: string;
+    kind?: Meeting['kind'];
+    eventId?: string;
     type: Meeting['type'];
     date: string;
     time: string;
@@ -1940,6 +1950,8 @@ async function startServer() {
     const meeting: Meeting = {
       id: 'm_' + Date.now(),
       title: data.title,
+      kind: data.kind === 'setup' ? 'setup' : 'meeting',
+      eventId: data.eventId || undefined,
       type: data.type,
       date: data.date,
       time: data.time,
@@ -1954,7 +1966,7 @@ async function startServer() {
     };
 
     state.meetings.push(meeting);
-    const text = `Новая встреча запланирована!\n\n${meetingDetailsText(meeting, state)}\n\nПожалуйста, освободите это время.`;
+    const text = `${meeting.kind === 'setup' ? 'Новый монтаж запланирован!' : 'Новая встреча запланирована!'}\n\n${meetingDetailsText(meeting, state)}\n\nПожалуйста, освободите это время.`;
     await notifyMeetingRecipients(
       state,
       meetingRecipientIds(state, data.participants, data.hostId),
@@ -4760,40 +4772,48 @@ async function startServer() {
 
   // Schedule a new meeting
   app.post('/api/meeting', async (req, res) => {
-    const { title, type, date, time, duration, hostId, participants, topic, description, competency } = req.body;
+    const { title, kind, eventId, type, date, time, duration, hostId, participants, topic, description, competency } = req.body;
     const state = loadDatabase();
+    const cleanKind: Meeting['kind'] = kind === 'setup' ? 'setup' : 'meeting';
+    const isSetup = cleanKind === 'setup';
 
     if (!isRegisteredUser(state, hostId)) {
       return res.status(403).json({ error: 'Сначала нужно зарегистрироваться в чате с ботом' });
     }
-    if (!String(title || '').trim()) return res.status(400).json({ error: 'Укажи название собрания' });
-    if (!parseShortDate(String(date || ''))) return res.status(400).json({ error: 'Укажи корректную дату собрания' });
-    if (!/^\d{1,2}:\d{2}$/.test(String(time || ''))) return res.status(400).json({ error: 'Укажи время собрания' });
-    const cleanDuration = Number(duration || 1);
+    if (!String(title || '').trim()) return res.status(400).json({ error: isSetup ? 'Укажи название монтажа' : 'Укажи название собрания' });
+    if (!parseShortDate(String(date || ''))) return res.status(400).json({ error: isSetup ? 'Укажи корректную дату монтажа' : 'Укажи корректную дату собрания' });
+    if (!/^\d{1,2}:\d{2}$/.test(String(time || ''))) return res.status(400).json({ error: isSetup ? 'Укажи время монтажа' : 'Укажи время собрания' });
+    const cleanEventId = isSetup ? String(eventId || '').trim() : '';
+    if (isSetup && !state.events?.some((item) => item.id === cleanEventId)) {
+      return res.status(400).json({ error: 'Выбери мероприятие для монтажа' });
+    }
+    const cleanDuration = isSetup ? 1 : Number(duration || 1);
     if (!Number.isFinite(cleanDuration) || cleanDuration < 0.5 || cleanDuration > 6) {
       return res.status(400).json({ error: 'Длительность собрания должна быть от 30 минут до 6 часов' });
     }
     const scheduleError = meetingScheduleError(String(date), String(time), cleanDuration, state.settings);
     if (scheduleError) return res.status(400).json({ error: scheduleError });
 
-    const cleanParticipants = participants === 'all'
+    const cleanParticipants = isSetup || participants === 'all'
       ? 'all'
       : [...new Set(Array.isArray(participants) ? participants : [])]
           .filter((id) => state.users.some((user) => user.id === id && !isFacultyUser(user)));
-    if (type !== 'general' && cleanParticipants !== 'all' && cleanParticipants.length === 0) {
+    if (!isSetup && type !== 'general' && cleanParticipants !== 'all' && cleanParticipants.length === 0) {
       return res.status(400).json({ error: 'Выбери хотя бы одного участника собрания' });
     }
     const newMeeting = await createMeetingAndNotify(state, {
-      title,
-      type,
+      title: String(title).trim(),
+      kind: cleanKind,
+      eventId: cleanEventId || undefined,
+      type: isSetup ? 'general' : type,
       date,
       time,
       duration: cleanDuration,
       hostId,
       participants: cleanParticipants,
-      topic,
-      description,
-      competency,
+      topic: isSetup ? '' : topic,
+      description: isSetup ? '' : description,
+      competency: isSetup ? '' : competency,
     });
 
     saveDatabase(state);
@@ -4801,7 +4821,7 @@ async function startServer() {
   });
 
   app.post('/api/meeting/update', async (req, res) => {
-    const { requesterId, meetingId, title, type, date, time, duration, participants, topic, description, competency } = req.body;
+    const { requesterId, meetingId, title, kind, eventId, type, date, time, duration, participants, topic, description, competency } = req.body;
     const state = loadDatabase();
     const meeting = state.meetings.find(m => m.id === meetingId);
 
@@ -4816,7 +4836,13 @@ async function startServer() {
       participants: meeting.participants === 'all' ? 'all' : [...meeting.participants],
       attendeeIds: [...(meeting.attendeeIds || [])],
     };
-    const nextDuration = duration === undefined ? meeting.duration : Number(duration);
+    const nextKind: Meeting['kind'] = kind === undefined ? (meeting.kind === 'setup' ? 'setup' : 'meeting') : kind === 'setup' ? 'setup' : 'meeting';
+    const isSetup = nextKind === 'setup';
+    const nextEventId = isSetup ? String(eventId === undefined ? meeting.eventId || '' : eventId || '').trim() : '';
+    if (isSetup && !state.events?.some((item) => item.id === nextEventId)) {
+      return res.status(400).json({ error: 'Выбери мероприятие для монтажа' });
+    }
+    const nextDuration = isSetup ? 1 : duration === undefined ? meeting.duration : Number(duration);
     const nextDate = String(date || meeting.date);
     const nextTime = String(time || meeting.time);
     if (!Number.isFinite(nextDuration) || nextDuration < 0.5 || nextDuration > 6) {
@@ -4824,22 +4850,31 @@ async function startServer() {
     }
     const scheduleError = meetingScheduleError(nextDate, nextTime, nextDuration, state.settings);
     if (scheduleError) return res.status(400).json({ error: scheduleError });
-    if (title) meeting.title = title;
-    if (type) meeting.type = type;
+    if (title) meeting.title = String(title).trim();
+    meeting.kind = nextKind;
+    meeting.eventId = nextEventId || undefined;
+    if (isSetup) meeting.type = 'general';
+    else if (type) meeting.type = type;
     if (date) meeting.date = date;
     if (time) meeting.time = time;
-    if (duration !== undefined) {
-      meeting.duration = nextDuration;
-    }
-    if (participants !== undefined) {
+    meeting.duration = nextDuration;
+    if (isSetup) {
+      meeting.participants = 'all';
+    } else if (participants !== undefined) {
       meeting.participants = participants === 'all'
         ? 'all'
         : [...new Set(Array.isArray(participants) ? participants : [])]
             .filter((id) => state.users.some((user) => user.id === id && !isFacultyUser(user)));
     }
-    if (topic !== undefined) meeting.topic = topic || '';
-    if (description !== undefined) meeting.description = description || '';
-    if (competency !== undefined) meeting.competency = competency || '';
+    if (isSetup) {
+      meeting.topic = '';
+      meeting.description = '';
+      meeting.competency = '';
+    } else {
+      if (topic !== undefined) meeting.topic = topic || '';
+      if (description !== undefined) meeting.description = description || '';
+      if (competency !== undefined) meeting.competency = competency || '';
+    }
 
     const recipients = meetingRecipientIds(state, meeting.participants, meeting.hostId);
     previousRecipientIds.forEach((id) => recipients.add(id));
@@ -4873,7 +4908,7 @@ async function startServer() {
     await notifyMeetingRecipients(
       state,
       recipients,
-      `Встреча отменена.\n\n${meeting.title}\nДата: ${formatMeetingDate(meeting.date)}\nВремя: ${meeting.time}`,
+      `${meeting.kind === 'setup' ? 'Монтаж отменён.' : 'Встреча отменена.'}\n\n${meeting.title}\nДата: ${formatMeetingDate(meeting.date)}\nВремя: ${meeting.time}`,
       'meeting_cancelled',
     );
     await syncMeetingCalendar(state, meeting);
