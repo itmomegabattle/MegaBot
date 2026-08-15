@@ -1487,6 +1487,7 @@ try {
   assert.ok(!telegramCalls.some((call) => call.path.endsWith('/deleteMessage') && call.body.message_id === 20001));
 
   telegramCalls.length = 0;
+  failNextTelegramSend = true;
   const importantMeeting = await request('/api/meeting', {
     title: 'Встреча для важного топика', type: 'general', date: '03.01.30', time: '18:00', duration: 1,
     hostId: 'u_admin', participants: 'all', description: 'Проверка дублирования',
@@ -1498,6 +1499,11 @@ try {
     && call.body.message_thread_id === 321
   ));
   assert.ok(importantTopicNotification, 'meeting notifications must be duplicated into the IMPORTANT topic');
+  assert.equal(telegramCalls.filter((call) => (
+    call.path.endsWith('/sendMessage')
+    && call.body.chat_id === '-100500'
+    && call.body.message_thread_id === 321
+  )).length, 2, 'a failed IMPORTANT topic notification must be retried before personal notifications');
   assert.ok(!String(importantTopicNotification.body.text || '').includes('Придут:'));
 
   telegramCalls.length = 0;

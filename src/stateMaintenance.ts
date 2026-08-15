@@ -91,6 +91,15 @@ export function sanitizeSimulationState(input: SimulationState): SimulationState
     availabilityEndHour: availabilityConfig.endHour,
     availabilityWeekNames: availabilityConfig.weekNames,
     availabilityWeekDescriptions: availabilityConfig.weekDescriptions,
+    pendingImportantNotifications: (input.settings?.pendingImportantNotifications || [])
+      .filter((item) => item && text(item.id) && text(item.text))
+      .slice(-100)
+      .map((item) => ({
+        id: text(item.id), text: text(item.text), silent: Boolean(item.silent),
+        createdAt: text(item.createdAt) || new Date().toISOString(),
+        attempts: Math.max(0, Number(item.attempts || 0)),
+        lastAttemptAt: optionalText(item.lastAttemptAt),
+      })),
     databaseRevision: Math.max(0, Number(input.settings?.databaseRevision || 0)),
   };
   return {
@@ -142,6 +151,6 @@ export function resetOperationalData(input: SimulationState): SimulationState {
     events: [],
     tasks: [],
     messages: {},
-    settings: { ...state.settings, databaseRevision: Number(state.settings?.databaseRevision || 0) + 1 },
+    settings: { ...state.settings, pendingImportantNotifications: [], databaseRevision: Number(state.settings?.databaseRevision || 0) + 1 },
   };
 }

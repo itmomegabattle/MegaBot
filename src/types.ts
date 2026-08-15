@@ -143,6 +143,14 @@ export interface SimulationState {
     availabilityEndHour?: number;
     availabilityWeekNames?: string[];
     availabilityWeekDescriptions?: string[];
+    pendingImportantNotifications?: Array<{
+      id: string;
+      text: string;
+      silent: boolean;
+      createdAt: string;
+      attempts: number;
+      lastAttemptAt?: string;
+    }>;
     databaseRevision?: number;
   };
 }

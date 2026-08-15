@@ -1587,6 +1587,80 @@ async function startServer() {
     }
   }
 
+  function importantNotificationId(prefix: string, text: string) {
+    return `${prefix}_${crypto.createHash('sha256').update(text).digest('hex').slice(0, 20)}`;
+  }
+
+  function enqueueImportantNotification(state: SimulationState, id: string, text: string, silent: boolean, attempts: number) {
+    state.settings ||= {};
+    const queue = state.settings.pendingImportantNotifications ||= [];
+    const existing = queue.find((item) => item.id === id);
+    if (existing) {
+      existing.attempts = Math.max(existing.attempts, attempts);
+      existing.lastAttemptAt = new Date().toISOString();
+      return;
+    }
+    queue.push({ id, text, silent, createdAt: new Date().toISOString(), attempts, lastAttemptAt: new Date().toISOString() });
+  }
+
+  async function deliverImportantNotification(
+    state: SimulationState,
+    text: string,
+    prefix: string,
+    silent = false,
+    immediateAttempts = 3,
+    existingNotificationId?: string,
+  ) {
+    const notificationId = existingNotificationId || importantNotificationId(prefix, text);
+    const teamChatId = state.settings?.teamChatId;
+    const importantThreadId = state.settings?.teamImportantThreadId;
+    if (!teamChatId || !importantThreadId) {
+      enqueueImportantNotification(state, notificationId, text, silent, 0);
+      console.error(`[Important topic] queued ${notificationId}: team chat or IMPORTANT topic is not bound.`);
+      return false;
+    }
+
+    for (let attempt = 1; attempt <= immediateAttempts; attempt += 1) {
+      const messageId = await sendGroupMessage(teamChatId, text, silent, importantThreadId);
+      if (messageId) {
+        if (state.settings?.pendingImportantNotifications?.length) {
+          state.settings.pendingImportantNotifications = state.settings.pendingImportantNotifications
+            .filter((item) => item.id !== notificationId);
+        }
+        console.log(`[Important topic] delivered ${notificationId} to chat=${teamChatId} thread=${importantThreadId} message=${messageId}.`);
+        return true;
+      }
+      if (attempt < immediateAttempts) await new Promise((resolve) => setTimeout(resolve, 600 * attempt));
+    }
+
+    enqueueImportantNotification(state, notificationId, text, silent, immediateAttempts);
+    console.error(`[Important topic] queued ${notificationId} after ${immediateAttempts} failed delivery attempts.`);
+    return false;
+  }
+
+  async function flushPendingImportantNotifications() {
+    const state = loadDatabase();
+    const pending = [...(state.settings?.pendingImportantNotifications || [])];
+    if (!pending.length) return;
+    if (!state.settings?.teamChatId || !state.settings?.teamImportantThreadId) return;
+    let changed = false;
+    for (const item of pending) {
+      const lastAttemptAt = Date.parse(item.lastAttemptAt || item.createdAt);
+      const retryDelayMs = Math.min(30 * 60_000, 60_000 * (2 ** Math.max(0, item.attempts - 3)));
+      if (Number.isFinite(lastAttemptAt) && Date.now() - lastAttemptAt < retryDelayMs) continue;
+      const delivered = await deliverImportantNotification(state, item.text, 'meeting_retry', item.silent, 1, item.id);
+      if (!delivered) {
+        const queued = state.settings?.pendingImportantNotifications?.find((candidate) => candidate.id === item.id);
+        if (queued) {
+          queued.attempts = item.attempts + 1;
+          queued.lastAttemptAt = new Date().toISOString();
+        }
+      }
+      changed = true;
+    }
+    if (changed) saveDatabase(state);
+  }
+
   let telegramBotIdPromise: Promise<string | null> | null = null;
   async function telegramBotId() {
     if (telegramBotIdPromise) return telegramBotIdPromise;
@@ -1781,6 +1855,9 @@ async function startServer() {
     notificationPrefix: string,
     buttons: { text: string; action: string }[] | ((userId: string) => { text: string; action: string }[]) = [{ text: 'Открыть встречи', action: 'open_tma' }],
   ) {
+    // The IMPORTANT topic is the canonical team announcement channel. Deliver it
+    // before fan-out to personal chats so a burst of direct messages cannot starve it.
+    await deliverImportantNotification(state, text, notificationPrefix);
     const sendJobs: Promise<boolean>[] = [];
     for (const userId of recipientIds) {
       const target = state.users.find((user) => user.id === userId);
@@ -1798,11 +1875,6 @@ async function startServer() {
       if (target.telegramId) {
         sendJobs.push(sendTelegramMessage(target.telegramId, text, targetButtons, false, target));
       }
-    }
-    const teamChatId = state.settings?.teamChatId;
-    const importantThreadId = state.settings?.teamImportantThreadId;
-    if (teamChatId && importantThreadId) {
-      await sendGroupMessage(teamChatId, text, false, importantThreadId);
     }
     return Promise.allSettled(sendJobs);
   }
@@ -5727,6 +5799,7 @@ async function startServer() {
 
     await sendDueBirthdayReminders();
     await sendTaskReminders();
+    await flushPendingImportantNotifications();
     setInterval(() => {
       sendDueBirthdayReminders().catch((err) => {
         console.error('Birthday reminder check failed:', err.message);
@@ -5751,6 +5824,11 @@ async function startServer() {
         console.error('Task reminder check failed:', err.message);
       });
     }, 15 * 60 * 1000);
+    setInterval(() => {
+      flushPendingImportantNotifications().catch((err) => {
+        console.error('IMPORTANT topic notification retry failed:', err.message);
+      });
+    }, 60 * 1000);
 
     console.log('Telegram long polling started.');
     let offset = 0;
