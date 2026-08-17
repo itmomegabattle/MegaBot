@@ -1965,6 +1965,17 @@ async function startServer() {
     return true;
   }
 
+  async function sendAllGroupMentions(chatId: string | number, messageThreadId?: number) {
+    const targets = resolveGroupMentionTargets(loadDatabase(), chatId);
+    if (targets.length === 0) return false;
+    const mentions = targets.map(groupMentionToken).join(' ');
+    if (mentions.length > 4000) {
+      console.error(`Telegram /all mention list is too long for one message: chat=${chatId}, length=${mentions.length}.`);
+      return false;
+    }
+    return Boolean(await sendGroupMessage(chatId, mentions, false, messageThreadId));
+  }
+
   async function reconcileMeetingCalendar() {
     if (!calendarConfig?.enabled || calendarReconciliationRunning) return;
     calendarReconciliationRunning = true;
@@ -3354,7 +3365,13 @@ async function startServer() {
           return res.json({ ok: true });
         }
 
-        if (commandName === 'all' || selectedCompetency) {
+        if (commandName === 'all') {
+          if (pendingGroupMentions.has(pendingKey)) await clearPendingGroupMention(pendingKey, chatId);
+          await sendAllGroupMentions(chatId, messageThreadId);
+          return res.json({ ok: true });
+        }
+
+        if (selectedCompetency) {
           if (pendingGroupMentions.has(pendingKey)) await clearPendingGroupMention(pendingKey, chatId);
           if (!commandText) {
             const canReceiveMessages = await botCanReceiveOrdinaryGroupMessages(chatId);

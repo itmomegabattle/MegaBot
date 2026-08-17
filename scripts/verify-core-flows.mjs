@@ -1697,32 +1697,15 @@ try {
       text: '/all@megaorgi_bot',
     },
   });
-  const allPrompt = telegramCalls.find((call) => call.path.endsWith('/sendMessage'));
-  assert.equal(allPrompt?.body.message_thread_id, 88);
-  assert.ok(String(allPrompt?.body.text || '').includes('следующим сообщением'));
-  assert.ok(!String(allPrompt?.body.text || '').includes('@chat_only'));
-  const allPromptMessageId = allPrompt.resultMessageId;
-
-  telegramCalls.length = 0;
-  await request('/api/telegram-webhook', {
-    update_id: 214,
-    message: {
-      message_id: 214,
-      message_thread_id: 88,
-      chat: { id: -100500, type: 'supergroup' },
-      from: { id: 100, username: 'admin', first_name: 'Админ' },
-      text: 'Срочно собираемся',
-    },
-  });
   const allParticipantsMessage = telegramCalls.find((call) => call.path.endsWith('/sendMessage'));
-  assert.ok(String(allParticipantsMessage?.body.text || '').includes('Срочно собираемся'));
-  assert.ok(String(allParticipantsMessage?.body.text || '').includes('Автор:'));
+  assert.equal(allParticipantsMessage?.body.message_thread_id, 88);
   assert.ok(String(allParticipantsMessage?.body.text || '').includes('@admin'));
   assert.ok(String(allParticipantsMessage?.body.text || '').includes('@chat_only'));
   assert.ok(String(allParticipantsMessage?.body.text || '').includes('tg://user?id=600'));
-  assert.equal(allParticipantsMessage?.body.message_thread_id, 88);
-  assert.ok(!telegramCalls.some((call) => call.path.endsWith('/deleteMessage') && call.body.message_id === 214));
-  assert.ok(telegramCalls.some((call) => call.path.endsWith('/deleteMessage') && call.body.message_id === allPromptMessageId));
+  assert.ok(!String(allParticipantsMessage?.body.text || '').includes('Уведомление'));
+  assert.ok(!String(allParticipantsMessage?.body.text || '').includes('Автор:'));
+  assert.equal(telegramCalls.filter((call) => call.path.endsWith('/sendMessage')).length, 1);
+  assert.ok(!telegramCalls.some((call) => call.path.endsWith('/deleteMessage')));
 
   telegramCalls.length = 0;
   groupBotIsAdmin = false;
@@ -1735,9 +1718,9 @@ try {
       text: '/all',
     },
   });
-  assert.ok(telegramCalls.some((call) => call.path.includes('/getChatMember')));
-  assert.ok(telegramCalls.some((call) => call.path.endsWith('/sendMessage') && String(call.body.text || '').includes('администратором')));
-  assert.ok(!telegramCalls.some((call) => call.path.endsWith('/sendMessage') && String(call.body.text || '').includes('следующим сообщением')));
+  assert.ok(!telegramCalls.some((call) => call.path.includes('/getChatMember')));
+  assert.equal(telegramCalls.filter((call) => call.path.endsWith('/sendMessage')).length, 1);
+  assert.ok(String(telegramCalls.find((call) => call.path.endsWith('/sendMessage'))?.body.text || '').includes('@admin'));
   groupBotIsAdmin = true;
 
   telegramCalls.length = 0;
@@ -1764,43 +1747,6 @@ try {
   });
   assert.ok(telegramCalls.some((call) => call.path.endsWith('/deleteMessage') && call.body.message_id === blockPrompt.resultMessageId));
   assert.ok(telegramCalls.some((call) => call.path.endsWith('/sendMessage') && String(call.body.text || '').includes('отменено')));
-
-  telegramCalls.length = 0;
-  await request('/api/telegram-webhook', {
-    update_id: 2144,
-    message: {
-      message_id: 2144,
-      chat: { id: -100500, type: 'supergroup' },
-      from: { id: 100, username: 'admin', first_name: 'Админ' },
-      text: '/all',
-    },
-  });
-  const retryPrompt = telegramCalls.find((call) => call.path.endsWith('/sendMessage') && String(call.body.text || '').includes('следующим сообщением'));
-  assert.ok(retryPrompt);
-  telegramCalls.length = 0;
-  failNextTelegramSend = true;
-  await request('/api/telegram-webhook', {
-    update_id: 2145,
-    message: {
-      message_id: 2145,
-      chat: { id: -100500, type: 'supergroup' },
-      from: { id: 100, username: 'admin', first_name: 'Админ' },
-      text: 'Не потерять при ошибке Telegram',
-    },
-  });
-  assert.ok(!telegramCalls.some((call) => call.path.endsWith('/deleteMessage') && [2145, retryPrompt.resultMessageId].includes(call.body.message_id)));
-  assert.ok(telegramCalls.some((call) => call.path.endsWith('/sendMessage') && String(call.body.text || '').includes('Не удалось отправить уведомление')));
-  telegramCalls.length = 0;
-  await request('/api/telegram-webhook', {
-    update_id: 2146,
-    message: {
-      message_id: 2146,
-      chat: { id: -100500, type: 'supergroup' },
-      from: { id: 100, username: 'admin', first_name: 'Админ' },
-      text: '/cancel',
-    },
-  });
-  assert.ok(telegramCalls.some((call) => call.path.endsWith('/deleteMessage') && call.body.message_id === retryPrompt.resultMessageId));
 
   telegramCalls.length = 0;
   await request('/api/telegram-webhook', {
