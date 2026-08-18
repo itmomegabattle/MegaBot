@@ -16,6 +16,7 @@ let nextTelegramMessageId = 1000;
 let sessionCookie = '';
 let failNextTelegramEdit = false;
 let failNextTelegramSend = false;
+let delayNextTelegramSendMs = 0;
 let groupBotIsAdmin = true;
 let createdEventId = '';
 
@@ -137,7 +138,7 @@ const fakeTelegram = http.createServer((req, res) => {
   req.on('data', (chunk) => {
     rawBody += chunk;
   });
-  req.on('end', () => {
+  req.on('end', async () => {
     const resultMessageId = req.url.endsWith('/sendMessage') ? nextTelegramMessageId++ : undefined;
     telegramCalls.push({
       path: req.url,
@@ -155,6 +156,11 @@ const fakeTelegram = http.createServer((req, res) => {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: false, error_code: 403, description: 'Forbidden: bot was blocked by the user' }));
       return;
+    }
+    if (delayNextTelegramSendMs && req.url.endsWith('/sendMessage')) {
+      const delayMs = delayNextTelegramSendMs;
+      delayNextTelegramSendMs = 0;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
     const result = req.url.endsWith('/getMe')
       ? { id: 999, is_bot: true, username: 'megaorgi_bot' }
@@ -1216,7 +1222,8 @@ try {
   assert.equal(completedChatTask.completionComments.u_alice, 'Заняло дольше из-за согласования макета');
 
   telegramCalls.length = 0;
-  const meetingResult = await request('/api/meeting', {
+  delayNextTelegramSendMs = 400;
+  const meetingRequest = request('/api/meeting', {
     title: 'Общая встреча',
     type: 'general',
     date: '2030-01-02',
@@ -1227,6 +1234,15 @@ try {
     topic: 'Проверка',
     description: '',
   });
+  let meetingPersistedBeforeNotification = false;
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    const stateWhileNotifying = JSON.parse(await readFile(testDatabasePath, 'utf8'));
+    meetingPersistedBeforeNotification = stateWhileNotifying.meetings.some((meeting) => meeting.title === 'Общая встреча');
+    if (meetingPersistedBeforeNotification) break;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(meetingPersistedBeforeNotification, true, 'meeting must be durable before Telegram delivery completes');
+  const meetingResult = await meetingRequest;
   assert.equal(meetingResult.response.status, 200);
   assert.equal(meetingResult.data.meeting.duration, 6);
   assert.deepEqual(meetingResult.data.meeting.attendeeIds, ['u_alice']);

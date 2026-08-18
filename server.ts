@@ -758,11 +758,29 @@ function loadDatabase(): SimulationState {
   return structuredClone(databaseStateCache);
 }
 
-function saveDatabase(state: SimulationState) {
+function saveDatabase(state: SimulationState, options: { changedMeetingIds?: Iterable<string> } = {}) {
   const cleanState = sanitizeSimulationState(state);
   if (DATABASE_SHEETS_CONFIG?.enabled) {
     cleanState.settings ||= {};
-    cleanState.settings.databaseRevision = Math.max(0, Number(cleanState.settings.databaseRevision || 0)) + 1;
+    const incomingRevision = Math.max(0, Number(cleanState.settings.databaseRevision || 0));
+    const currentRevision = Math.max(0, Number(databaseStateCache?.settings?.databaseRevision || 0));
+    if (databaseStateCache && currentRevision > incomingRevision) {
+      // Async requests may save stale clones after another request has committed.
+      // Preserve every meeting except the records explicitly changed by this save.
+      const changedMeetingIds = new Set(options.changedMeetingIds || []);
+      const incomingMeetings = new Map(cleanState.meetings.map((meeting) => [meeting.id, meeting]));
+      const mergedMeetings = databaseStateCache.meetings.map((currentMeeting) => (
+        changedMeetingIds.has(currentMeeting.id)
+          ? incomingMeetings.get(currentMeeting.id) || currentMeeting
+          : currentMeeting
+      ));
+      const mergedMeetingIds = new Set(mergedMeetings.map((meeting) => meeting.id));
+      cleanState.meetings.forEach((meeting) => {
+        if (!mergedMeetingIds.has(meeting.id)) mergedMeetings.push(meeting);
+      });
+      cleanState.meetings = mergedMeetings;
+    }
+    cleanState.settings.databaseRevision = Math.max(incomingRevision, currentRevision) + 1;
   }
   Object.keys(state).forEach((key) => delete (state as unknown as Record<string, unknown>)[key]);
   Object.assign(state, cleanState);
@@ -1863,22 +1881,35 @@ async function startServer() {
     // before fan-out to personal chats so a burst of direct messages cannot starve it.
     await deliverImportantNotification(state, text, notificationPrefix);
     const sendJobs: Promise<boolean>[] = [];
+    const storedMessages: BotMessage[] = [];
     for (const userId of recipientIds) {
       const target = state.users.find((user) => user.id === userId);
       if (!target) continue;
       const targetButtons = typeof buttons === 'function' ? buttons(target.id) : buttons;
       if (!state.messages[target.id]) state.messages[target.id] = [];
-      state.messages[target.id].push({
+      const storedMessage: BotMessage = {
         id: `${notificationPrefix}_${Date.now()}_${target.id}`,
         userId: target.id,
         sender: 'bot',
         text,
         timestamp: new Date().toISOString(),
         buttons: targetButtons,
-      });
+      };
+      state.messages[target.id].push(storedMessage);
+      storedMessages.push(storedMessage);
       if (target.telegramId) {
         sendJobs.push(sendTelegramMessage(target.telegramId, text, targetButtons, false, target));
       }
+    }
+    if (storedMessages.length) {
+      const latestState = loadDatabase();
+      for (const message of storedMessages) {
+        if (!latestState.messages[message.userId]) latestState.messages[message.userId] = [];
+        if (!latestState.messages[message.userId].some((item) => item.id === message.id)) {
+          latestState.messages[message.userId].push(message);
+        }
+      }
+      saveDatabase(latestState);
     }
     return Promise.allSettled(sendJobs);
   }
@@ -1895,6 +1926,21 @@ async function startServer() {
       console.error(`Google Calendar sync failed for meeting ${meeting.id}:`, error.message || error);
       return false;
     }
+  }
+
+  async function syncPersistedMeetingCalendar(meetingId: string) {
+    const syncState = loadDatabase();
+    const meeting = syncState.meetings.find((item) => item.id === meetingId);
+    if (!meeting) return false;
+    const previousEventId = meeting.googleCalendarEventId;
+    const synced = await syncMeetingCalendar(syncState, meeting);
+    if (!synced || meeting.googleCalendarEventId === previousEventId) return synced;
+    const latestState = loadDatabase();
+    const latestMeeting = latestState.meetings.find((item) => item.id === meetingId);
+    if (!latestMeeting) return false;
+    latestMeeting.googleCalendarEventId = meeting.googleCalendarEventId;
+    saveDatabase(latestState, { changedMeetingIds: [meetingId] });
+    return true;
   }
 
   function groupMentionToken(target: { telegramId?: string; username?: string; displayName: string }) {
@@ -1990,7 +2036,17 @@ async function startServer() {
       pendingCalendarMeetingIds.clear();
       result.failed.forEach((failure) => pendingCalendarMeetingIds.add(failure.meetingId));
       const nextEventIds = state.meetings.map((meeting) => meeting.googleCalendarEventId || '').join('|');
-      if (nextEventIds !== previousEventIds) saveDatabase(state);
+      if (nextEventIds !== previousEventIds) {
+        const latestState = loadDatabase();
+        const changedMeetingIds: string[] = [];
+        for (const reconciledMeeting of state.meetings) {
+          const latestMeeting = latestState.meetings.find((item) => item.id === reconciledMeeting.id);
+          if (!latestMeeting || latestMeeting.googleCalendarEventId === reconciledMeeting.googleCalendarEventId) continue;
+          latestMeeting.googleCalendarEventId = reconciledMeeting.googleCalendarEventId;
+          changedMeetingIds.push(reconciledMeeting.id);
+        }
+        if (changedMeetingIds.length) saveDatabase(latestState, { changedMeetingIds });
+      }
       if (!result.passed) console.error('Google Calendar reconciliation incomplete:', result.failed);
       else console.log(`Google Calendar synchronized: created=${result.created}, updated=${result.updated}, deleted=${result.deleted}.`);
     } finally {
@@ -2002,19 +2058,14 @@ async function startServer() {
     if (!calendarConfig?.enabled || calendarReconciliationRunning || pendingCalendarMeetingIds.size === 0) return;
     calendarReconciliationRunning = true;
     try {
-      const state = loadDatabase();
-      let changed = false;
       for (const meetingId of [...pendingCalendarMeetingIds]) {
-        const meeting = state.meetings.find((item) => item.id === meetingId);
+        const meeting = loadDatabase().meetings.find((item) => item.id === meetingId);
         if (!meeting) {
           pendingCalendarMeetingIds.delete(meetingId);
           continue;
         }
-        const previousEventId = meeting.googleCalendarEventId;
-        const synced = await syncMeetingCalendar(state, meeting);
-        if (synced && meeting.googleCalendarEventId !== previousEventId) changed = true;
+        await syncPersistedMeetingCalendar(meetingId);
       }
-      if (changed) saveDatabase(state);
     } finally {
       calendarReconciliationRunning = false;
     }
@@ -2053,6 +2104,7 @@ async function startServer() {
     };
 
     state.meetings.push(meeting);
+    saveDatabase(state, { changedMeetingIds: [meeting.id] });
     const text = `${meeting.kind === 'setup' ? 'Новый монтаж запланирован!' : 'Новая встреча запланирована!'}\n\n${meetingDetailsText(meeting, state)}\n\nПожалуйста, освободите это время.`;
     await notifyMeetingRecipients(
       state,
@@ -2061,9 +2113,9 @@ async function startServer() {
       'meeting_created',
       (userId) => meetingRsvpButtons(meeting, userId),
     );
-    await syncMeetingCalendar(state, meeting);
+    await syncPersistedMeetingCalendar(meeting.id);
 
-    return meeting;
+    return loadDatabase().meetings.find((item) => item.id === meeting.id) || meeting;
   }
 
   async function configureBotProfile() {
@@ -3113,8 +3165,8 @@ async function startServer() {
         }
         const wasAttending = (meeting.attendeeIds || []).includes(user.id);
         const result = updateMeetingAttendance(meeting, user.id, !wasAttending);
-        if (result.changed) await syncMeetingCalendar(state, meeting);
-        saveDatabase(state);
+        saveDatabase(state, { changedMeetingIds: [meeting.id] });
+        if (result.changed) await syncPersistedMeetingCalendar(meeting.id);
         await answerCallback(callback.id, result.attending ? 'Отметил: вы придёте' : 'Отметку снял: вы не придёте');
         const currentKeyboard = callback.message?.reply_markup?.inline_keyboard;
         if (Array.isArray(currentKeyboard) && callbackMessageId) {
@@ -3918,9 +3970,8 @@ async function startServer() {
           description: session.description || '',
           competency: isBlockMeeting ? session.competency : '',
         });
-        saveDatabase(freshState);
         chatSessions.delete(chatKey);
-        await sendTelegramKeyboard(chatId, `Готово, назначил собрание:\n\n${meetingDetailsText(meeting, freshState)}`, [['Меню', 'Назад'], ['Назначить собрание']], true);
+        await sendTelegramKeyboard(chatId, `Готово, назначил собрание:\n\n${meetingDetailsText(meeting, loadDatabase())}`, [['Меню', 'Назад'], ['Назначить собрание']], true);
         return res.json({ ok: true });
       }
 
@@ -4909,7 +4960,6 @@ async function startServer() {
       competency: isSetup ? '' : competency,
     });
 
-    saveDatabase(state);
     res.json({ success: true, meeting: newMeeting });
   });
 
@@ -4972,6 +5022,7 @@ async function startServer() {
     const recipients = meetingRecipientIds(state, meeting.participants, meeting.hostId);
     previousRecipientIds.forEach((id) => recipients.add(id));
     const updateText = meetingUpdateText(previousMeeting, meeting, state);
+    saveDatabase(state, { changedMeetingIds: [meeting.id] });
     if (!updateText.endsWith('*Что изменилось:*\n')) {
       await notifyMeetingRecipients(
         state,
@@ -4981,9 +5032,8 @@ async function startServer() {
         (userId) => meetingRsvpButtons(meeting, userId),
       );
     }
-    await syncMeetingCalendar(state, meeting);
-    saveDatabase(state);
-    res.json({ success: true, meeting });
+    await syncPersistedMeetingCalendar(meeting.id);
+    res.json({ success: true, meeting: loadDatabase().meetings.find((item) => item.id === meeting.id) || meeting });
   });
 
   app.post('/api/meeting/delete', async (req, res) => {
@@ -4998,15 +5048,15 @@ async function startServer() {
 
     const recipients = meetingRecipientIds(state, meeting.participants, meeting.hostId);
     meeting.status = 'cancelled';
+    saveDatabase(state, { changedMeetingIds: [meeting.id] });
     await notifyMeetingRecipients(
       state,
       recipients,
       `${meeting.kind === 'setup' ? 'Монтаж отменён.' : 'Встреча отменена.'}\n\n${meeting.title}\nДата: ${formatMeetingDate(meeting.date)}\nВремя: ${meeting.time}`,
       'meeting_cancelled',
     );
-    await syncMeetingCalendar(state, meeting);
-    saveDatabase(state);
-    res.json({ success: true, meeting });
+    await syncPersistedMeetingCalendar(meeting.id);
+    res.json({ success: true, meeting: loadDatabase().meetings.find((item) => item.id === meeting.id) || meeting });
   });
 
   app.post('/api/meeting/rsvp', async (req, res) => {
@@ -5018,9 +5068,9 @@ async function startServer() {
     if (!meeting) return res.status(404).json({ error: 'Собрание не найдено' });
 
     const result = updateMeetingAttendance(meeting, requester.id, Boolean(attending));
-    if (result.changed) await syncMeetingCalendar(state, meeting);
-    saveDatabase(state);
-    return res.json({ success: true, meeting, attending: result.attending });
+    saveDatabase(state, { changedMeetingIds: [meeting.id] });
+    if (result.changed) await syncPersistedMeetingCalendar(meeting.id);
+    return res.json({ success: true, meeting: loadDatabase().meetings.find((item) => item.id === meeting.id) || meeting, attending: result.attending });
   });
 
   // Create a new task
