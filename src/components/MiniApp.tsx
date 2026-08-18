@@ -2704,24 +2704,25 @@ export default function MiniApp({
                   return (
                     <div
                       key={meeting.id}
-                      className={`rounded-3xl border border-blue-100 bg-white p-4 shadow-sm ${pressClass}`}
+                      className={`overflow-hidden rounded-3xl border border-blue-100 bg-white p-4 shadow-sm ${pressClass}`}
                       onClick={() => setExpandedMeetingId(expanded ? null : meeting.id)}
                     >
-                      <div className="flex items-start justify-between gap-3">
-                        <div>
-                          <div className="flex flex-wrap items-center gap-2">
-                            <h3 className="font-black">{meeting.title}</h3>
+                      <div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-3">
+                        <div className="min-w-0">
+                          <div className="flex min-w-0 flex-wrap items-center gap-2">
+                            <h3 className="max-w-full min-w-0 break-words font-black [overflow-wrap:anywhere]">{meeting.title}</h3>
                             {meeting.kind === 'setup' && <span className="rounded-full bg-blue-100 px-2 py-0.5 text-xs font-black uppercase tracking-wide text-[#005BC4]">Монтаж</span>}
                           </div>
-                          <p className="mt-1 text-sm text-slate-500">{meeting.kind === 'setup' ? workEvent?.name || 'Мероприятие не найдено' : meeting.topic || 'Нажми, чтобы посмотреть детали'}</p>
+                          <p className="mt-1 min-w-0 break-words text-sm text-slate-500 [overflow-wrap:anywhere]">{meeting.kind === 'setup' ? workEvent?.name || 'Мероприятие не найдено' : meeting.topic || 'Нажми, чтобы посмотреть детали'}</p>
                         </div>
-                        <div className="rounded-2xl bg-blue-50 px-3 py-2 text-right text-xs font-black text-[#0069E0]">
-                          {weekdayShortByDate(meeting.date)}
-                          <br />
-                          {formatDateShort(meeting.date)}
-                          <br />
-                          {meeting.time}
-                        </div>
+                        <time
+                          dateTime={`${formatDateShort(meeting.date).split('.').reverse().map((part, index) => index === 0 && part.length === 2 ? `20${part}` : part).join('-')}T${meeting.time}`}
+                          className="box-border grid w-[clamp(4.75rem,18vw,5.25rem)] shrink-0 place-items-center self-start overflow-hidden rounded-2xl bg-blue-50 px-2 py-2 text-center text-[clamp(0.68rem,3vw,0.75rem)] font-black leading-5 tabular-nums text-[#0069E0]"
+                        >
+                          <span className="block whitespace-nowrap">{weekdayShortByDate(meeting.date)}</span>
+                          <span className="block whitespace-nowrap">{formatDateShort(meeting.date)}</span>
+                          <span className="block whitespace-nowrap">{meeting.time}</span>
+                        </time>
                       </div>
 
                       <button
