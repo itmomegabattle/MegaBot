@@ -1200,8 +1200,12 @@ async function startServer() {
     if (sheetAvailabilityPull) return sheetAvailabilityPull;
     nextSheetAvailabilityPullAt = now + Math.max(maxAgeMs, sheetAvailabilityPullMinIntervalMs);
     sheetAvailabilityPull = (async () => {
+      const usersSnapshot = loadDatabase().users;
+      const result = await importAvailabilitiesFromSheet(sheetsConfig, usersSnapshot);
+      // The Sheets request may take seconds. Always merge its narrow availability
+      // result into the newest state so it cannot overwrite meetings or tasks that
+      // were created while the request was in flight.
       const state = loadDatabase();
-      const result = await importAvailabilitiesFromSheet(sheetsConfig, state.users);
       let changed = false;
       for (const availability of result.imported) {
         const previous = state.availabilities[availability.userId];
