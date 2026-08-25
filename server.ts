@@ -4785,14 +4785,18 @@ async function startServer() {
   });
 
   app.post('/api/availability/week-name', (req, res) => {
-    const { requesterId, weekIndex, name, description } = req.body || {};
+    const { requesterId, weekIndex, weekStart, name, description } = req.body || {};
     const state = loadDatabase();
     if (!isAdminUser(state, requesterId)) return res.status(403).json({ error: 'Редактировать неделю может только администратор' });
-    const { weekCount, weekNames, weekDescriptions } = normalizeAvailabilityConfig(state.settings);
+    const { weekCount, weekStarts, weekNames, weekDescriptions, weekMetadata } = normalizeAvailabilityConfig(state.settings);
     const index = Number(weekIndex);
     const cleanName = String(name || '').trim().replace(/\s+/g, ' ').slice(0, 80);
     const cleanDescription = String(description || '').replace(/\r\n?/g, '\n').trim().slice(0, 600);
     if (!Number.isInteger(index) || index < 0 || index >= weekCount) return res.status(400).json({ error: 'Неизвестная неделя' });
+    const targetWeekStart = weekStarts[index];
+    if (String(weekStart || targetWeekStart) !== targetWeekStart) {
+      return res.status(409).json({ error: 'Список недель уже обновился. Перезагрузи страницу и повтори изменение.' });
+    }
     if (!cleanName) return res.status(400).json({ error: 'Название недели не может быть пустым' });
     const nextNames = [...weekNames];
     const nextDescriptions = [...weekDescriptions];
@@ -4802,9 +4806,13 @@ async function startServer() {
       ...(state.settings || {}),
       availabilityWeekNames: nextNames,
       availabilityWeekDescriptions: nextDescriptions,
+      availabilityWeekMetadata: {
+        ...weekMetadata,
+        [targetWeekStart]: { name: cleanName, description: cleanDescription },
+      },
     };
     saveDatabase(state);
-    return res.json({ success: true, weekIndex: index, name: cleanName, description: cleanDescription });
+    return res.json({ success: true, weekIndex: index, weekStart: targetWeekStart, name: cleanName, description: cleanDescription });
   });
 
   app.post('/api/event/create', (req, res) => {

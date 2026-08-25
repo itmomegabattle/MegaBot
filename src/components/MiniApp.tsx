@@ -51,7 +51,7 @@ interface MiniAppProps {
   onCompleteTask: (taskId: string, timeSpentMinutes?: number, completionComment?: string) => Promise<boolean>;
   onReleaseTask: (taskId: string) => void;
   onRefreshState: () => boolean | Promise<boolean>;
-  onRenameAvailabilityWeek: (weekIndex: number, name: string, description: string) => Promise<boolean>;
+  onRenameAvailabilityWeek: (weekIndex: number, weekStart: string, name: string, description: string) => Promise<boolean>;
 }
 
 type MeetingSuggestion = {
@@ -2248,7 +2248,7 @@ export default function MiniApp({
                           }
                           setSlotError('');
                           setSavingWeekInfoIndex(weekIndex);
-                          await onRenameAvailabilityWeek(weekIndex, weekNameDraft, weekDescriptionDraft);
+                          await onRenameAvailabilityWeek(weekIndex, availabilityConfig.weekStarts[weekIndex], weekNameDraft, weekDescriptionDraft);
                           setSavingWeekInfoIndex(null);
                         }}>
                           <Field label="Название недели">

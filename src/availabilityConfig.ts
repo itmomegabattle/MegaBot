@@ -5,13 +5,34 @@ export type AvailabilitySettings = {
   availabilityEndHour?: number;
   availabilityWeekNames?: string[];
   availabilityWeekDescriptions?: string[];
+  availabilityWeekMetadata?: Record<string, { name?: string; description?: string }>;
 };
 
 export const DEFAULT_AVAILABILITY_ACTIVE_DAYS = [0, 1, 2, 3, 4];
 export const DEFAULT_AVAILABILITY_START_HOUR = 17;
 export const DEFAULT_AVAILABILITY_END_HOUR = 23;
 
-export function normalizeAvailabilityConfig(settings?: AvailabilitySettings) {
+const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
+export function currentAvailabilityWeekStart(reference = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Europe/Moscow', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(reference);
+  const value = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  const date = new Date(`${value.year}-${value.month}-${value.day}T12:00:00Z`);
+  const mondayOffset = date.getUTCDay() === 0 ? 6 : date.getUTCDay() - 1;
+  date.setUTCDate(date.getUTCDate() - mondayOffset);
+  return date.toISOString().slice(0, 10);
+}
+
+export function addAvailabilityWeeks(weekStart: string, weeks: number) {
+  const validStart = ISO_DATE_PATTERN.test(weekStart) ? weekStart : currentAvailabilityWeekStart();
+  const date = new Date(`${validStart}T12:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + weeks * 7);
+  return date.toISOString().slice(0, 10);
+}
+
+export function normalizeAvailabilityConfig(settings?: AvailabilitySettings, baseWeekStart = currentAvailabilityWeekStart()) {
   const requestedWeekCount = Number(settings?.availabilityWeekCount);
   const weekCount = Number.isInteger(requestedWeekCount) && requestedWeekCount >= 2 && requestedWeekCount <= 5
     ? requestedWeekCount
@@ -29,18 +50,29 @@ export function normalizeAvailabilityConfig(settings?: AvailabilitySettings) {
   const startHour = hour(settings?.availabilityStartHour, DEFAULT_AVAILABILITY_START_HOUR);
   const requestedEndHour = hour(settings?.availabilityEndHour, DEFAULT_AVAILABILITY_END_HOUR);
   const endHour = Math.max(startHour, requestedEndHour);
+  const weekStarts = Array.from({ length: weekCount }, (_, index) => addAvailabilityWeeks(baseWeekStart, index));
+  const metadata = Object.fromEntries(Object.entries(settings?.availabilityWeekMetadata || {})
+    .filter(([weekStart]) => ISO_DATE_PATTERN.test(weekStart))
+    .slice(-260)
+    .map(([weekStart, value]) => [weekStart, {
+      name: String(value?.name || '').trim().replace(/\s+/g, ' ').slice(0, 80),
+      description: String(value?.description || '').replace(/\r\n?/g, '\n').trim().slice(0, 600),
+    }]));
+  const hasDateBoundMetadata = Object.keys(metadata).length > 0;
   return {
     weekCount,
     activeDays: activeDays.length ? activeDays : [...DEFAULT_AVAILABILITY_ACTIVE_DAYS],
     startHour,
     endHour,
     hours: Array.from({ length: endHour - startHour + 1 }, (_, index) => startHour + index),
+    weekStarts,
+    weekMetadata: metadata,
     weekNames: Array.from({ length: weekCount }, (_, index) => {
-      const name = String(settings?.availabilityWeekNames?.[index] || '').trim().replace(/\s+/g, ' ').slice(0, 80);
+      const name = String(metadata[weekStarts[index]]?.name || (!hasDateBoundMetadata ? settings?.availabilityWeekNames?.[index] : '') || '').trim().replace(/\s+/g, ' ').slice(0, 80);
       return name || (index === 0 ? 'Эта неделя' : `Неделя ${index + 1}`);
     }),
     weekDescriptions: Array.from({ length: weekCount }, (_, index) => (
-      String(settings?.availabilityWeekDescriptions?.[index] || '').replace(/\r\n?/g, '\n').trim().slice(0, 600)
+      String(metadata[weekStarts[index]]?.description || (!hasDateBoundMetadata ? settings?.availabilityWeekDescriptions?.[index] : '') || '').replace(/\r\n?/g, '\n').trim().slice(0, 600)
     )),
   };
 }

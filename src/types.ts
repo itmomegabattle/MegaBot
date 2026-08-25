@@ -143,6 +143,7 @@ export interface SimulationState {
     availabilityEndHour?: number;
     availabilityWeekNames?: string[];
     availabilityWeekDescriptions?: string[];
+    availabilityWeekMetadata?: Record<string, { name?: string; description?: string }>;
     pendingImportantNotifications?: Array<{
       id: string;
       text: string;

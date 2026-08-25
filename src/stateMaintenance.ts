@@ -91,6 +91,7 @@ export function sanitizeSimulationState(input: SimulationState): SimulationState
     availabilityEndHour: availabilityConfig.endHour,
     availabilityWeekNames: availabilityConfig.weekNames,
     availabilityWeekDescriptions: availabilityConfig.weekDescriptions,
+    availabilityWeekMetadata: availabilityConfig.weekMetadata,
     pendingImportantNotifications: (input.settings?.pendingImportantNotifications || [])
       .filter((item) => item && text(item.id) && text(item.text))
       .slice(-100)

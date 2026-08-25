@@ -204,13 +204,13 @@ export default function App() {
     return false;
   };
 
-  const handleRenameAvailabilityWeek = async (weekIndex: number, name: string, description: string): Promise<boolean> => {
+  const handleRenameAvailabilityWeek = async (weekIndex: number, weekStart: string, name: string, description: string): Promise<boolean> => {
     if (!currentUserId) return false;
     try {
       const res = await fetch('/api/availability/week-name', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ requesterId: currentUserId, weekIndex, name, description }),
+        body: JSON.stringify({ requesterId: currentUserId, weekIndex, weekStart, name, description }),
       });
       const data = await res.json();
       if (!res.ok) {

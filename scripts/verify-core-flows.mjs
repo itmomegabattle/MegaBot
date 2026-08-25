@@ -3,13 +3,22 @@ import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
 import http from 'node:http';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'megabot-core-'));
-const appPort = 31847;
+const appPort = await new Promise((resolve, reject) => {
+  const probe = net.createServer();
+  probe.once('error', reject);
+  probe.listen(0, '127.0.0.1', () => {
+    const address = probe.address();
+    const port = typeof address === 'object' && address ? address.port : 0;
+    probe.close((error) => error ? reject(error) : resolve(port));
+  });
+});
 const botToken = 'integration-test-token';
 const telegramCalls = [];
 let nextTelegramMessageId = 1000;
@@ -1866,6 +1875,7 @@ try {
   const weekMetadata = await request('/api/availability/week-name', {
     requesterId: 'u_admin',
     weekIndex: 0,
+    weekStart: currentWeekStart(),
     name: 'Финальная подготовка',
     description: 'Закрываем последние задачи перед мероприятием.',
   });
@@ -1890,6 +1900,8 @@ try {
   assert.equal(sharedWeekMetadata.response.status, 200);
   assert.equal(sharedWeekMetadata.data.settings.availabilityWeekNames[0], 'Финальная подготовка');
   assert.equal(sharedWeekMetadata.data.settings.availabilityWeekDescriptions[0], 'Закрываем последние задачи перед мероприятием.');
+  assert.equal(sharedWeekMetadata.data.settings.availabilityWeekMetadata[currentWeekStart()].name, 'Финальная подготовка');
+  assert.equal(sharedWeekMetadata.data.settings.availabilityWeekMetadata[currentWeekStart()].description, 'Закрываем последние задачи перед мероприятием.');
 
   const database = JSON.parse(await readFile(testDatabasePath, 'utf8'));
   assert.equal(database.users.length, fixture.users.length);
@@ -1902,6 +1914,7 @@ try {
   assert.equal(database.settings.availabilityEndHour, 21);
   assert.equal(database.settings.availabilityWeekNames[0], 'Финальная подготовка');
   assert.equal(database.settings.availabilityWeekDescriptions[0], 'Закрываем последние задачи перед мероприятием.');
+  assert.equal(database.settings.availabilityWeekMetadata[currentWeekStart()].name, 'Финальная подготовка');
   assert.ok(database.messages.u_alice.length > 0);
   assert.ok(!database.messages.u_admin.some((message) => message.id.startsWith('task_comp_admin_')));
   const persistedCommentTask = database.tasks.find((task) => task.id === openTaskResult.data.task.id);

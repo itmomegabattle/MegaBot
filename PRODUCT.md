@@ -67,6 +67,8 @@ The production Mini App uses `https://megaorgiabot.ru`; temporary tunnel hosts a
 
 Next product work: show synchronization state to users, add retry/error feedback, collect completion telemetry, and run repeatable real-device checks on Telegram Desktop, Android and iOS.
 
+Availability week names and descriptions are bound to each Monday's ISO date. Weekly rollover removes expired metadata from the visible horizon without reusing it for a newly appended week.
+
 Google Sheets uses one stable operational tab, `ОСНОВА`, addressed by its permanent sheet ID. Weekly rotation backs it up before changing dates or clearing slot values, restores native checkboxes, and preserves older generated week tabs as hidden recovery data instead of creating more tabs.
 
 Tasks use one page-level active-event selector shared by personal, open, completed, and backlog views. Creation inherits that event and supports multiple executor blocks. The database workbook exposes a readable `task_log` sheet, while profiles support locally cropped and compressed avatars.
