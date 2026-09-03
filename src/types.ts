@@ -27,7 +27,7 @@ export interface Availability {
 }
 
 export type MeetingType = 'general' | 'custom';
-export type MeetingKind = 'meeting' | 'setup';
+export type MeetingKind = 'meeting' | 'setup' | 'vibe';
 
 export interface Meeting {
   id: string;
@@ -144,6 +144,7 @@ export interface SimulationState {
     availabilityWeekNames?: string[];
     availabilityWeekDescriptions?: string[];
     availabilityWeekMetadata?: Record<string, { name?: string; description?: string }>;
+    availabilityWeekStart?: string;
     pendingImportantNotifications?: Array<{
       id: string;
       text: string;

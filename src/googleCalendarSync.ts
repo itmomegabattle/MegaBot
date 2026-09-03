@@ -126,12 +126,13 @@ export function buildGoogleCalendarEvent(meeting: Meeting, state: Pick<Simulatio
   const workEvent = (state.events || []).find((item) => item.id === meeting.eventId);
   const isSetup = meeting.kind === 'setup';
   const description = [
+    meeting.kind === 'vibe' && 'Тип: Вайбик — неформальная встреча с командой',
     isSetup && 'Тип: монтаж площадки',
     isSetup && `Мероприятие: ${workEvent?.name || 'не указано'}`,
     meeting.description && `Описание: ${meeting.description}`,
     meeting.topic && `Повестка: ${meeting.topic}`,
     meeting.competency && `Направление: ${meeting.competency}`,
-    `Формат: ${isSetup ? 'монтаж, приглашена вся команда' : meeting.type === 'general' ? 'общее собрание' : 'выбранные участники'}`,
+    `Формат: ${isSetup ? 'монтаж, приглашена вся команда' : meeting.kind === 'vibe' ? 'неформальная встреча' : meeting.type === 'general' ? 'общее собрание' : 'выбранные участники'}`,
     `Организатор: ${userLabel(state.users.find((user) => user.id === meeting.hostId))}`,
     `Участники: ${meeting.participants === 'all' ? 'вся команда' : invited.map(userLabel).join(', ') || 'не указаны'}`,
     `MegaBot ID: ${meeting.id}`,

@@ -1,8 +1,36 @@
-import type { SimulationState, Task, User } from './types.js';
-import { filterSlotsByAvailabilityConfig, normalizeAvailabilityConfig } from './availabilityConfig.js';
+import { normalizeMeetingKind } from './meetingKind.js';
+import type { Availability, SimulationState, Task, User } from './types.js';
+import { alignAvailabilityToWeek, currentAvailabilityWeekStart, filterSlotsByAvailabilityConfig, normalizeAvailabilityConfig } from './availabilityConfig.js';
 
 const text = (value: unknown) => value == null ? '' : String(value);
 const optionalText = (value: unknown) => text(value) || undefined;
+
+export function mergePrimarySheetAvailability(
+  previous: Availability | undefined,
+  imported: Availability,
+  weekStart = currentAvailabilityWeekStart(),
+): Availability {
+  const aligned = alignAvailabilityToWeek(previous, weekStart);
+  // A Google request can straddle midnight. Wait for a fresh import in that case.
+  if (imported.weekStart !== weekStart) {
+    return { ...previous, ...aligned, userId: imported.userId, updatedAt: previous?.updatedAt || imported.updatedAt };
+  }
+  return {
+    ...previous,
+    ...imported,
+    slots: {
+      ...Object.fromEntries(Object.entries(aligned.slots).filter(([day]) => Number(day) >= 7)),
+      ...Object.fromEntries(Object.entries(imported.slots || {}).filter(([day]) => Number(day) >= 0 && Number(day) < 7)),
+    },
+    hardUnavailableDays: aligned.hardUnavailableDays.filter((day) => (
+      day >= 7 || !(imported.slots?.[day] || []).length
+    )),
+    outWeekIndexes: [
+      ...aligned.outWeekIndexes.filter((index) => index >= 1),
+      ...((imported.outWeekIndexes ?? aligned.outWeekIndexes).includes(0) ? [0] : []),
+    ],
+  };
+}
 
 function cleanUser(user: User): User {
   const role = ['admin', 'organizer', 'faculty_responsible', 'faculty_helper'].includes(String(user.role)) ? user.role : 'organizer';
@@ -74,10 +102,10 @@ function cleanTask(task: Task): Task {
   };
 }
 
-export function sanitizeSimulationState(input: SimulationState): SimulationState {
+export function sanitizeSimulationState(input: SimulationState, baseWeekStart = currentAvailabilityWeekStart()): SimulationState {
   const users = (input.users || []).map(cleanUser);
   const userIds = new Set(users.map((user) => user.id));
-  const availabilityConfig = normalizeAvailabilityConfig(input.settings);
+  const availabilityConfig = normalizeAvailabilityConfig(input.settings, baseWeekStart);
   const requestedWeekCount = Number(input.settings?.availabilityWeekCount);
   const cleanSettings: SimulationState['settings'] = {
     teamChatId: optionalText(input.settings?.teamChatId),
@@ -92,6 +120,7 @@ export function sanitizeSimulationState(input: SimulationState): SimulationState
     availabilityWeekNames: availabilityConfig.weekNames,
     availabilityWeekDescriptions: availabilityConfig.weekDescriptions,
     availabilityWeekMetadata: availabilityConfig.weekMetadata,
+    availabilityWeekStart: baseWeekStart,
     pendingImportantNotifications: (input.settings?.pendingImportantNotifications || [])
       .filter((item) => item && text(item.id) && text(item.text))
       .slice(-100)
@@ -110,18 +139,19 @@ export function sanitizeSimulationState(input: SimulationState): SimulationState
     competencies: [...new Set((input.competencies || []).map(String).filter(Boolean))],
     availabilities: Object.fromEntries(Object.entries(input.availabilities || {})
       .filter(([userId]) => userIds.has(userId))
-      .map(([userId, availability]) => [userId, {
-        userId,
-        slots: filterSlotsByAvailabilityConfig(availability.slots, cleanSettings),
-        hardUnavailableDays: [...new Set((availability.hardUnavailableDays || []).map(Number).filter(Number.isFinite))].sort((a, b) => a - b),
-        outWeekIndexes: [...new Set((availability.outWeekIndexes || []).map(Number).filter((weekIndex) => (
-          Number.isInteger(weekIndex) && weekIndex >= 0 && weekIndex < cleanSettings.availabilityWeekCount!
-        )))].sort((a, b) => a - b),
-        updatedAt: text(availability.updatedAt),
-        weekStart: optionalText(availability.weekStart),
-      }])),
+      .map(([userId, availability]) => {
+        const aligned = alignAvailabilityToWeek(availability, baseWeekStart, availabilityConfig.weekCount);
+        return [userId, {
+          userId,
+          slots: filterSlotsByAvailabilityConfig(aligned.slots, cleanSettings),
+          hardUnavailableDays: [...new Set(aligned.hardUnavailableDays)].sort((a, b) => a - b),
+          outWeekIndexes: [...new Set(aligned.outWeekIndexes)].sort((a, b) => a - b),
+          updatedAt: text(availability.updatedAt),
+          weekStart: baseWeekStart,
+        }];
+      })),
     meetings: (input.meetings || []).map((meeting) => ({
-      id: text(meeting.id), title: text(meeting.title), kind: meeting.kind === 'setup' ? 'setup' : 'meeting',
+      id: text(meeting.id), title: text(meeting.title), kind: normalizeMeetingKind(meeting.kind),
       eventId: optionalText(meeting.eventId), type: meeting.type, date: text(meeting.date), time: text(meeting.time),
       duration: Number(meeting.duration), hostId: text(meeting.hostId),
       participants: meeting.participants === 'all' ? 'all' : [...new Set((meeting.participants || []).map(String).filter(Boolean))],

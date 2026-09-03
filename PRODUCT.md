@@ -84,3 +84,9 @@ Tasks are now scoped by simultaneous work events. Administrators create and fini
 Chat navigation now has one rule: `Назад` is always in the reply keyboard. A day-level slot edit is reversible with `Отменить`, which restores the hours present when that day was opened. Profile editing supports one primary and multiple secondary blocks behind a collapsed disclosure. Avatar positioning uses identical preview and saved-image rendering.
 
 Current multi-assignee tasks still have one global task status: when any assignee completes the task, it becomes completed for every assignee. Planned, not implemented: an explicit creation mode — `Каждому лично` creates independent assignee states and finishes only after all personal copies are done; `Одна задача на всех` keeps one shared status and records who completed it. Existing tasks should migrate as shared to preserve current behavior.
+
+## Product update — 2026-09-02
+
+Meeting kinds now include `vibe` («Вайбик»), an informal team gathering. It follows the ordinary meeting flow, audience selection, RSVP, permissions, notifications and Google Calendar synchronization. Setup remains the special whole-team preparation workflow.
+
+Birthday gift reminders are sent two days before, one day before and on the birthday, using Moscow dates and distinct persistent delivery markers. The collection closes at 19:00 Moscow time on the birthday. Default bank is Сбер; phone remains 89105408050.

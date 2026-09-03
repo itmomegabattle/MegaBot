@@ -1,3 +1,4 @@
+import { normalizeMeetingKind } from './meetingKind.js';
 import { SimulationState, Task, WorkEvent } from './types.js';
 import { googleSheetsApiRequest } from './googleSheetsSync.js';
 
@@ -9,7 +10,7 @@ export type GoogleSheetsDatabaseConfig = {
 
 type SchemaSheet = { title: string; headers: string[] };
 
-export const DATABASE_SCHEMA_VERSION = 7;
+export const DATABASE_SCHEMA_VERSION = 8;
 
 const SCHEMA: SchemaSheet[] = [
   { title: 'meta', headers: ['key', 'value'] },
@@ -301,7 +302,7 @@ export async function importStateFromGoogleSheetsDatabase(config: GoogleSheetsDa
   const meta = Object.fromEntries(metaRows.map((row) => [String(row.key), row.value]));
   if (!bool(meta.data_present)) return { initialized: false, revision: 0, state: null, counts: null };
   if (String(meta.sync_state || '') !== 'ready') return { initialized: false, revision: Number(meta.revision || 0), state: null, counts: null };
-  if (![1, 2, 3, 4, 5, 6, DATABASE_SCHEMA_VERSION].includes(Number(meta.schema_version))) throw new Error(`Unsupported Google Sheets database schema: ${meta.schema_version}`);
+  if (![1, 2, 3, 4, 5, 6, 7, DATABASE_SCHEMA_VERSION].includes(Number(meta.schema_version))) throw new Error(`Unsupported Google Sheets database schema: ${meta.schema_version}`);
 
   const snapshotState = decodeGoogleSheetsDatabaseSnapshot(objects(valuesByTitle.get('snapshot')));
   if (snapshotState) {
@@ -345,7 +346,7 @@ export async function importStateFromGoogleSheetsDatabase(config: GoogleSheetsDa
   });
   const participantRows = objects(valuesByTitle.get('meeting_participants'));
   const meetings = objects(valuesByTitle.get('meetings')).map((row) => ({
-    id: String(row.id), title: String(row.title), kind: row.kind === 'setup' ? 'setup' as const : 'meeting' as const,
+    id: String(row.id), title: String(row.title), kind: normalizeMeetingKind(row.kind),
     eventId: String(row.event_id || '') || undefined, type: String(row.type) as any, date: String(row.date), time: String(row.time), duration: Number(row.duration_hours || 1), hostId: String(row.host_id),
     participants: bool(row.participants_all) ? 'all' as const : participantRows.filter((item) => item.meeting_id === row.id && item.kind === 'invited').map((item) => String(item.user_id)),
     attendeeIds: participantRows.filter((item) => item.meeting_id === row.id && item.kind === 'attending').map((item) => String(item.user_id)),

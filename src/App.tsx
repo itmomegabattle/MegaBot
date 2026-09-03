@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { CheckCircle, WarningCircle } from '@phosphor-icons/react';
 import { SimulationState } from './types';
 import MiniApp from './components/MiniApp';
+import { meetingKindText } from './meetingKind';
 
 type ToastType = 'info' | 'success' | 'warning';
 
@@ -104,6 +105,8 @@ export default function App() {
         await fetchState();
         return true;
       }
+      triggerToast(data.error || 'Не удалось сохранить слоты.', 'warning');
+      if (res.status === 409) await fetchState();
     } catch (err) {
       console.error(err);
     }
@@ -120,10 +123,10 @@ export default function App() {
       const data = await res.json();
       if (data.success) {
         await fetchState();
-        triggerToast(`${meetingData.kind === 'setup' ? 'Монтаж' : 'Встреча'} "${meetingData.title}" ${meetingData.kind === 'setup' ? 'запланирован' : 'запланирована'}`, 'success');
+        triggerToast(`${meetingKindText(meetingData.kind).label} "${meetingData.title}" ${meetingData.kind === 'setup' || meetingData.kind === 'vibe' ? 'запланирован' : 'запланировано'}`, 'success');
         return true;
       }
-      triggerToast(data.error || `Не удалось назначить ${meetingData.kind === 'setup' ? 'монтаж' : 'встречу'}`, 'warning');
+      triggerToast(data.error || `Не удалось назначить ${meetingKindText(meetingData.kind).accusative}`, 'warning');
     } catch (err) {
       console.error(err);
     }

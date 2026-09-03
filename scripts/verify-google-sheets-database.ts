@@ -6,22 +6,6 @@ import {
 } from '../src/googleSheetsDatabase.js';
 import type { SimulationState } from '../src/types.js';
 import { resetOperationalData, sanitizeSimulationState } from '../src/stateMaintenance.js';
-import { birthdayGiftCollectionText } from '../src/birthdayGift.js';
-
-assert.equal(
-  birthdayGiftCollectionText({}),
-  '🎁 Сбор на подарок: переводите на Т-Банк по номеру 89105408050.\nДо 400 ₽ с человека — это максимальная сумма, можно отправить меньше.',
-  'birthday collection defaults must match the production message',
-);
-assert.equal(
-  birthdayGiftCollectionText({
-    BIRTHDAY_PAYMENT_PHONE: '80000000000',
-    BIRTHDAY_PAYMENT_BANK: 'Другой банк',
-    BIRTHDAY_GIFT_MAX_AMOUNT: '250',
-  }),
-  '🎁 Сбор на подарок: переводите на Другой банк по номеру 80000000000.\nДо 250 ₽ с человека — это максимальная сумма, можно отправить меньше.',
-  'birthday collection message must remain configurable through environment variables',
-);
 
 const state: SimulationState = {
   users: [{ id: 'u1', username: 'nikita', realName: 'Никита 🚀', role: 'admin', avatarSeed: 'seed', avatarDataUrl: `data:image/webp;base64,${'a'.repeat(64)}` }],
@@ -55,6 +39,10 @@ assert.equal('obsoleteFlag' in sanitized.users[0], false, 'obsolete user fields 
 assert.equal(sanitized.meetings[0].googleCalendarEventId, 'megabot-calendar-event');
 assert.equal(sanitized.meetings[0].kind, 'setup');
 assert.equal(sanitized.meetings[0].eventId, 'e1');
+const vibeState = sanitizeSimulationState({ ...state, meetings: [{ ...state.meetings[0], kind: 'vibe' }] });
+assert.equal(vibeState.meetings[0].kind, 'vibe', 'informal meeting kind must survive sanitization and database snapshots');
+const vibeSnapshot = encodeGoogleSheetsDatabaseSnapshot(vibeState);
+assert.equal(decodeGoogleSheetsDatabaseSnapshot(vibeSnapshot.map(([chunk_index, data]) => ({ chunk_index, data })))?.meetings[0].kind, 'vibe');
 assert.equal(sanitized.users[0].avatarDataUrl, state.users[0].avatarDataUrl, 'compressed avatar must survive maintenance');
 assert.deepEqual(sanitized.tasks[0].competencies, ['Продакшн', 'Дизайн'], 'multiple executor blocks must survive maintenance');
 assert.deepEqual(sanitized.tasks[0].assignedTo, ['u1'], 'legacy single-assignee tasks must migrate without breaking startup');

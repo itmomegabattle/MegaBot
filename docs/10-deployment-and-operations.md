@@ -173,7 +173,7 @@ ADMIN_TELEGRAM_IDS=658274366
 PORT=3000
 DISABLE_TELEGRAM_POLLING=true
 BIRTHDAY_PAYMENT_PHONE=89105408050
-BIRTHDAY_PAYMENT_BANK=Т-Банк
+BIRTHDAY_PAYMENT_BANK=Сбер
 BIRTHDAY_GIFT_MAX_AMOUNT=400
 HTTP_PROXY=
 HTTPS_PROXY=
@@ -191,6 +191,7 @@ GOOGLE_CALENDAR_TIME_ZONE=Europe/Moscow
 ```
 
 Токен бота нельзя коммитить, отправлять в публичные чаты и вставлять в документацию.
+При выпуске изменения дней рождения от 2026-09-02 заменить явно заданный `BIRTHDAY_PAYMENT_BANK` на `Сбер` в серверном окружении и применить `--update-env`. Если переменная отсутствует, используется новый стандарт `Сбер`; телефон остаётся прежним. Перед выпуском запустить `npm run verify:birthdays`.
 JSON-ключ Google также нельзя коммитить. Он хранится в `/opt/megabot/secrets/` с правами `600`; порядок установки описан в [документе интеграции Google Sheets](./11-google-sheets-integration.md).
 
 ## Данные

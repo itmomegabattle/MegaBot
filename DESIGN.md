@@ -293,3 +293,7 @@ The Tasks event selector uses two equal columns for compact labels. An odd final
 - Avatar preview and exported avatar must be rendered by the same crop geometry; separate CSS preview math is prohibited.
 - Profile blocks use progressive disclosure: the list starts collapsed, supports multiple memberships, and marks exactly one selected membership as primary.
 - Native date controls must stay inside their container at 320 px viewport width (`inline-size`, `min-inline-size: 0`, and border-box are mandatory).
+
+## Meeting kinds — 2026-09-02
+
+The existing event-kind picker contains Собрание, Монтаж and Вайбик. It uses the established selectable-card styling, one column on narrow phones and three columns from 520 px. Each option has a persistent short explanation. Вайбик is described as «Неформальная встреча с командой» and uses the ordinary meeting fields and audience picker. Cards expose its kind as a text badge using the existing visual treatment.

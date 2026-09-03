@@ -26,9 +26,10 @@ import {
   googleSheetsDatabaseConfigFromEnv,
   importStateFromGoogleSheetsDatabase,
 } from './src/googleSheetsDatabase.js';
-import { sanitizeSimulationState } from './src/stateMaintenance.js';
-import { filterSlotsByAvailabilityConfig, normalizeAvailabilityConfig } from './src/availabilityConfig.js';
-import { birthdayGiftCollectionText } from './src/birthdayGift.js';
+import { mergePrimarySheetAvailability, sanitizeSimulationState } from './src/stateMaintenance.js';
+import { alignAvailabilityToWeek, filterSlotsByAvailabilityConfig, normalizeAvailabilityConfig } from './src/availabilityConfig.js';
+import { birthdayParts, deliverBirthdayReminders } from './src/birthdayGift.js';
+import { meetingKindText, normalizeMeetingKind } from './src/meetingKind.js';
 import {
   googleCalendarConfigFromEnv,
   reconcileGoogleCalendar,
@@ -291,27 +292,6 @@ function formatMeetingDate(value?: string) {
   return `${weekdays[date.getUTCDay()]}, ${formatted}`;
 }
 
-function birthdayParts(value?: string) {
-  const rawValue = String(value || '').trim();
-  const isoMatch = rawValue.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  const normalizedValue = isoMatch
-    ? `${isoMatch[3]}.${isoMatch[2]}.${isoMatch[1]}`
-    : rawValue;
-  const match = normalizedValue.match(/^(\d{2})\.(\d{2})(?:\.(\d{2}|\d{4}))?$/);
-  if (!match) return null;
-  const rawYear = match[3];
-  const year = rawYear
-    ? Number(rawYear.length === 2 ? `20${rawYear}` : rawYear)
-    : undefined;
-  const day = Number(match[1]);
-  const month = Number(match[2]);
-  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
-  const validationYear = year || 2000;
-  const candidate = new Date(validationYear, month - 1, day);
-  if (candidate.getFullYear() !== validationYear || candidate.getMonth() !== month - 1 || candidate.getDate() !== day) return null;
-  return { day, month, year };
-}
-
 function ageOnBirthday(value: string | undefined, year = new Date().getFullYear()) {
   const parts = birthdayParts(value);
   return parts?.year ? year - parts.year : null;
@@ -473,7 +453,7 @@ function meetingDetailsText(meeting: Meeting, state: SimulationState) {
   const workEvent = (state.events || []).find((item) => item.id === meeting.eventId);
   const isSetup = meeting.kind === 'setup';
   const durationMinutes = Math.round(Number(meeting.duration || 1) * 60);
-  return `*${meeting.title}*\n\n${isSetup ? `*Тип:* Монтаж\n*Мероприятие:* ${workEvent?.name || 'не указано'}\n` : ''}*Дата:* ${formatMeetingDate(meeting.date)}\n*Время:* ${meeting.time}\n*Длительность:* ${taskDurationLabel(durationMinutes)}\n*Организатор:* ${userMention(host)}${meeting.competency ? `\n*Блок:* ${meeting.competency}` : ''}${meeting.topic ? `\n*Тема:* ${meeting.topic}` : ''}${meeting.description ? `\n*Описание:* ${meeting.description}` : ''}`;
+  return `*${meeting.title}*\n\n*Тип:* ${meetingKindText(meeting.kind).label}\n${isSetup ? `*Мероприятие:* ${workEvent?.name || 'не указано'}\n` : ''}*Дата:* ${formatMeetingDate(meeting.date)}\n*Время:* ${meeting.time}\n*Длительность:* ${taskDurationLabel(durationMinutes)}\n*Организатор:* ${userMention(host)}${meeting.competency ? `\n*Блок:* ${meeting.competency}` : ''}${meeting.topic ? `\n*Тема:* ${meeting.topic}` : ''}${meeting.description ? `\n*Описание:* ${meeting.description}` : ''}`;
 }
 
 function meetingUpdateText(before: Meeting, after: Meeting, state: SimulationState) {
@@ -483,7 +463,7 @@ function meetingUpdateText(before: Meeting, after: Meeting, state: SimulationSta
     ? 'all'
     : [...meeting.participants].sort().join('|');
   if (before.title !== after.title) changes.push(`❗Название: ${value(before.title)} → ${value(after.title)}`);
-  if ((before.kind || 'meeting') !== (after.kind || 'meeting')) changes.push(`❗Тип: ${before.kind === 'setup' ? 'монтаж' : 'собрание'} → ${after.kind === 'setup' ? 'монтаж' : 'собрание'}`);
+  if ((before.kind || 'meeting') !== (after.kind || 'meeting')) changes.push(`❗Тип: ${meetingKindText(before.kind).label} → ${meetingKindText(after.kind).label}`);
   if (value(before.eventId) !== value(after.eventId)) {
     const beforeEvent = state.events?.find((item) => item.id === before.eventId)?.name;
     const afterEvent = state.events?.find((item) => item.id === after.eventId)?.name;
@@ -502,7 +482,7 @@ function meetingUpdateText(before: Meeting, after: Meeting, state: SimulationSta
     changes.push(`❗Описание:\nБыло: ${value(before.description)}\nСтало: ${value(after.description)}`);
   }
   const details = meetingDetailsText(after, state).replace(/^\*[^\n]+\*\n\n/, '');
-  return `${after.kind === 'setup' ? 'Монтаж изменён' : 'Встреча изменена'}: *${after.title}*\n${details}\n\n*Что изменилось:*\n${changes.join('\n')}`;
+  return `${meetingKindText(after.kind).updated}: *${after.title}*\n${details}\n\n*Что изменилось:*\n${changes.join('\n')}`;
 }
 
 function meetingRsvpButtons(meeting: Meeting, userId: string) {
@@ -616,24 +596,11 @@ function currentWeekStartIso() {
 }
 
 function alignedAvailabilitySlots(availability?: Availability) {
-  const result: Record<number, number[]> = {};
-  if (!availability?.slots) return result;
-  const savedWeekStart = availability.weekStart || currentWeekStartIso();
-  const weekOffset = Math.floor((new Date(currentWeekStartIso()).getTime() - new Date(savedWeekStart).getTime()) / (7 * 24 * 60 * 60 * 1000));
-  for (const [key, value] of Object.entries(availability.slots)) {
-    const nextKey = Number(key) - weekOffset * 7;
-    if (nextKey >= 0 && nextKey < 35) result[nextKey] = Array.isArray(value) ? value : [];
-  }
-  return result;
+  return alignAvailabilityToWeek(availability).slots;
 }
 
 function alignedHardUnavailableDays(availability?: Availability) {
-  if (!availability?.hardUnavailableDays) return [];
-  const savedWeekStart = availability.weekStart || currentWeekStartIso();
-  const weekOffset = Math.floor((new Date(currentWeekStartIso()).getTime() - new Date(savedWeekStart).getTime()) / (7 * 24 * 60 * 60 * 1000));
-  return availability.hardUnavailableDays
-    .map((day) => Number(day) - weekOffset * 7)
-    .filter((day) => Number.isFinite(day) && day >= 0 && day < 35);
+  return alignAvailabilityToWeek(availability).hardUnavailableDays;
 }
 
 function slotWeekRange(weekIndex: number) {
@@ -646,12 +613,7 @@ function slotWeekRange(weekIndex: number) {
 }
 
 function alignedOutWeekIndexes(availability?: Availability) {
-  if (!availability?.outWeekIndexes) return [];
-  const savedWeekStart = availability.weekStart || currentWeekStartIso();
-  const weekOffset = Math.floor((new Date(currentWeekStartIso()).getTime() - new Date(savedWeekStart).getTime()) / (7 * 24 * 60 * 60 * 1000));
-  return availability.outWeekIndexes
-    .map((weekIndex) => Number(weekIndex) - weekOffset)
-    .filter((weekIndex) => Number.isInteger(weekIndex) && weekIndex >= 0 && weekIndex < 5);
+  return alignAvailabilityToWeek(availability).outWeekIndexes;
 }
 
 function isOutForWeek(availability: Availability | undefined, weekIndex = 0) {
@@ -733,7 +695,12 @@ function parseFacultyTaskStatus(text: string): Task['status'] | null {
 }
 
 function loadDatabase(): SimulationState {
-  if (databaseStateCache) return structuredClone(databaseStateCache);
+  if (databaseStateCache) {
+    if (databaseStateCache.settings?.availabilityWeekStart !== currentWeekStartIso()) {
+      saveDatabase(structuredClone(databaseStateCache));
+    }
+    return structuredClone(databaseStateCache);
+  }
   if (DATABASE_SHEETS_CONFIG?.enabled) throw new Error('Google Sheets database has not finished loading');
   let state: SimulationState;
   try {
@@ -755,6 +722,7 @@ function loadDatabase(): SimulationState {
     }
   });
   databaseStateCache = cleanState;
+  if (JSON.stringify(state) !== JSON.stringify(cleanState)) saveDatabase(cleanState);
   return structuredClone(databaseStateCache);
 }
 
@@ -854,7 +822,8 @@ async function hydrateDatabaseFromGoogleSheets() {
     try {
       const remote = await importStateFromGoogleSheetsDatabase(DATABASE_SHEETS_CONFIG);
       if (!remote.initialized || !remote.state) throw new Error('Google Sheets database has no complete snapshot');
-      databaseStateCache = sanitizeSimulationState(remote.state);
+      databaseStateCache = remote.state;
+      saveDatabase(structuredClone(remote.state));
       console.log(`Google Sheets database loaded at revision ${remote.revision}.`);
       return;
     } catch (error) {
@@ -884,22 +853,8 @@ function normalizeTaskReminders(value: unknown): TaskReminder[] {
 }
 
 function pruneExpiredAvailabilityWeeks() {
-  const state = loadDatabase();
-  const weekStart = currentWeekStartIso();
-  let changed = false;
-  Object.entries(state.availabilities).forEach(([userId, availability]) => {
-    if ((availability.weekStart || weekStart) === weekStart) return;
-    state.availabilities[userId] = {
-      ...availability,
-      slots: alignedAvailabilitySlots(availability),
-      hardUnavailableDays: alignedHardUnavailableDays(availability),
-      outWeekIndexes: alignedOutWeekIndexes(availability),
-      weekStart,
-      updatedAt: new Date().toISOString(),
-    };
-    changed = true;
-  });
-  if (changed) saveDatabase(state);
+  const changed = databaseStateCache?.settings?.availabilityWeekStart !== currentWeekStartIso();
+  loadDatabase();
   return changed;
 }
 
@@ -1192,24 +1147,11 @@ async function startServer() {
   let sheetAvailabilityPull: Promise<void> | null = null;
   const sheetAvailabilityPullMinIntervalMs = Math.max(5_000, Number(process.env.GOOGLE_SHEETS_AVAILABILITY_PULL_INTERVAL_MS) || 10_000);
   const sheetAvailabilityErrorBackoffMs = Math.max(15_000, Number(process.env.GOOGLE_SHEETS_AVAILABILITY_ERROR_BACKOFF_MS) || 60_000);
-  const mergePrimarySheetAvailability = (previous: Availability | undefined, imported: Availability): Availability => ({
-    ...previous,
-    ...imported,
-    slots: {
-      ...Object.fromEntries(Object.entries(previous?.slots || {}).filter(([day]) => Number(day) >= 7)),
-      ...Object.fromEntries(Object.entries(imported.slots || {}).filter(([day]) => Number(day) >= 0 && Number(day) < 7)),
-    },
-    hardUnavailableDays: (previous?.hardUnavailableDays || []).filter((day) => (
-      Number(day) >= 7 || !(imported.slots?.[Number(day)] || []).length
-    )),
-    outWeekIndexes: [
-      ...(previous?.outWeekIndexes || []).filter((weekIndex) => Number(weekIndex) >= 1),
-      ...(imported.outWeekIndexes?.includes(0) ? [0] : []),
-    ],
-  });
   const sameAvailability = (left: Availability | undefined, right: Availability) => JSON.stringify({
+    weekStart: left?.weekStart,
     slots: left?.slots || {}, hardUnavailableDays: left?.hardUnavailableDays || [], outWeekIndexes: left?.outWeekIndexes || [],
   }) === JSON.stringify({
+    weekStart: right.weekStart,
     slots: right.slots || {}, hardUnavailableDays: right.hardUnavailableDays || [], outWeekIndexes: right.outWeekIndexes || [],
   });
   const reconcileAvailabilityFromPrimarySheet = async (maxAgeMs = 0) => {
@@ -2088,7 +2030,7 @@ async function startServer() {
     const meeting: Meeting = {
       id: 'm_' + Date.now(),
       title: data.title,
-      kind: data.kind === 'setup' ? 'setup' : 'meeting',
+      kind: normalizeMeetingKind(data.kind),
       eventId: data.eventId || undefined,
       type: data.type,
       date: data.date,
@@ -2105,7 +2047,7 @@ async function startServer() {
 
     state.meetings.push(meeting);
     saveDatabase(state, { changedMeetingIds: [meeting.id] });
-    const text = `${meeting.kind === 'setup' ? 'Новый монтаж запланирован!' : 'Новая встреча запланирована!'}\n\n${meetingDetailsText(meeting, state)}\n\nПожалуйста, освободите это время.`;
+    const text = `${meetingKindText(meeting.kind).created}\n\n${meetingDetailsText(meeting, state)}\n\nПожалуйста, освободите это время.`;
     await notifyMeetingRecipients(
       state,
       meetingRecipientIds(state, data.participants, data.hostId),
@@ -2593,46 +2535,18 @@ async function startServer() {
     await Promise.allSettled(sendJobs);
   }
 
+  let birthdayReminderCheckRunning = false;
   async function sendDueBirthdayReminders() {
-    const state = loadDatabase();
-    const targetDate = new Date();
-    targetDate.setDate(targetDate.getDate() + 1);
-    const targetBday = `${String(targetDate.getDate()).padStart(2, '0')}.${String(targetDate.getMonth() + 1).padStart(2, '0')}`;
-    const markerYear = targetDate.getFullYear();
-    let changed = false;
-
-    for (const birthdayUser of state.users) {
-      const parts = birthdayParts(birthdayUser.birthday);
-      if (!parts || `${String(parts.day).padStart(2, '0')}.${String(parts.month).padStart(2, '0')}` !== targetBday) continue;
-      const nextAge = ageOnBirthday(birthdayUser.birthday, targetDate.getFullYear());
-
-      for (const recipient of state.users) {
-        if (recipient.id === birthdayUser.id) continue;
-        const notificationId = `bday_notify_${markerYear}_${birthdayUser.id}_${recipient.id}`;
-        if (!state.messages[recipient.id]) state.messages[recipient.id] = [];
-        if (state.messages[recipient.id].some((message) => message.id === notificationId)) continue;
-
-        const paymentText = `\n\n${birthdayGiftCollectionText()}`;
-        const text = `🎂 Завтра день рождения у ${birthdayUser.realName}!`
-          + `${nextAge !== null ? ` Исполняется ${nextAge} лет.` : ''}`
-          + `\n\nНе забудьте поздравить 🎉${paymentText}`;
-        state.messages[recipient.id].push({
-          id: notificationId,
-          userId: recipient.id,
-          sender: 'bot',
-          text,
-          timestamp: new Date().toISOString(),
-        });
-        changed = true;
-
-        if (recipient.telegramId) {
-          await sendTelegramMessage(recipient.telegramId, text);
-        }
-      }
-    }
-
-    if (changed) {
-      saveDatabase(state);
+    if (birthdayReminderCheckRunning) return;
+    birthdayReminderCheckRunning = true;
+    try {
+      await deliverBirthdayReminders({
+        loadState: loadDatabase,
+        saveState: saveDatabase,
+        send: (telegramId, text) => sendTelegramMessage(telegramId, text),
+      });
+    } finally {
+      birthdayReminderCheckRunning = false;
     }
   }
 
@@ -2901,6 +2815,12 @@ async function startServer() {
       if (isSlotPanelAction && currentPanelId && callbackMessageId !== currentPanelId) {
         await deleteTelegramMessage(chatId, callbackMessageId);
         await answerCallback(callback.id, 'Эта панель устарела. Открой «Слоты» ещё раз.');
+        return res.json({ ok: true });
+      }
+      const slotDraft = chatSlotDrafts.get(String(chatId));
+      if (isSlotPanelAction && slotDraft && slotDraft.weekStart !== currentWeekStartIso()) {
+        await answerCallback(callback.id, 'Началась новая неделя. Выбери актуальную неделю.');
+        await showSlotWeekPicker(chatId, user, state, callbackMessageId);
         return res.json({ ok: true });
       }
 
@@ -4794,7 +4714,7 @@ async function startServer() {
     const cleanDescription = String(description || '').replace(/\r\n?/g, '\n').trim().slice(0, 600);
     if (!Number.isInteger(index) || index < 0 || index >= weekCount) return res.status(400).json({ error: 'Неизвестная неделя' });
     const targetWeekStart = weekStarts[index];
-    if (String(weekStart || targetWeekStart) !== targetWeekStart) {
+    if (weekStart !== targetWeekStart) {
       return res.status(409).json({ error: 'Список недель уже обновился. Перезагрузи страницу и повтори изменение.' });
     }
     if (!cleanName) return res.status(400).json({ error: 'Название недели не может быть пустым' });
@@ -4874,6 +4794,9 @@ async function startServer() {
       return res.status(403).json({ error: 'Сначала нужно зарегистрироваться в чате с ботом' });
     }
 
+    if (weekStart !== currentWeekStartIso()) {
+      return res.status(409).json({ error: 'Началась новая неделя. Обнови слоты и повтори сохранение.' });
+    }
     const cleanSlots = filterSlotsByAvailabilityConfig(slots && typeof slots === 'object' ? slots : {}, state.settings);
     const activeDays = new Set(normalizeAvailabilityConfig(state.settings).activeDays);
     const weekCount = normalizeAvailabilityConfig(state.settings).weekCount;
@@ -4889,7 +4812,7 @@ async function startServer() {
       ? [...new Set(hardUnavailableDays.map(Number).filter((day) => (
           Number.isInteger(day)
           && day >= 0
-          && day < 35
+          && day < weekCount * 7
           && !cleanOutWeekIndexes.includes(Math.floor(day / 7))
           && activeDays.has(day % 7)
           && (cleanSlots[day] || []).length === 0
@@ -4926,15 +4849,15 @@ async function startServer() {
   app.post('/api/meeting', async (req, res) => {
     const { title, kind, eventId, type, date, time, duration, hostId, participants, topic, description, competency } = req.body;
     const state = loadDatabase();
-    const cleanKind: Meeting['kind'] = kind === 'setup' ? 'setup' : 'meeting';
+    const cleanKind: Meeting['kind'] = normalizeMeetingKind(kind);
     const isSetup = cleanKind === 'setup';
 
     if (!isRegisteredUser(state, hostId)) {
       return res.status(403).json({ error: 'Сначала нужно зарегистрироваться в чате с ботом' });
     }
-    if (!String(title || '').trim()) return res.status(400).json({ error: isSetup ? 'Укажи название монтажа' : 'Укажи название собрания' });
-    if (!parseShortDate(String(date || ''))) return res.status(400).json({ error: isSetup ? 'Укажи корректную дату монтажа' : 'Укажи корректную дату собрания' });
-    if (!/^\d{1,2}:\d{2}$/.test(String(time || ''))) return res.status(400).json({ error: isSetup ? 'Укажи время монтажа' : 'Укажи время собрания' });
+    if (!String(title || '').trim()) return res.status(400).json({ error: `Укажи название ${meetingKindText(cleanKind).genitive}` });
+    if (!parseShortDate(String(date || ''))) return res.status(400).json({ error: `Укажи корректную дату ${meetingKindText(cleanKind).genitive}` });
+    if (!/^\d{1,2}:\d{2}$/.test(String(time || ''))) return res.status(400).json({ error: `Укажи время ${meetingKindText(cleanKind).genitive}` });
     const cleanEventId = isSetup ? String(eventId || '').trim() : '';
     if (isSetup && !state.events?.some((item) => item.id === cleanEventId)) {
       return res.status(400).json({ error: 'Выбери мероприятие для монтажа' });
@@ -4987,7 +4910,7 @@ async function startServer() {
       participants: meeting.participants === 'all' ? 'all' : [...meeting.participants],
       attendeeIds: [...(meeting.attendeeIds || [])],
     };
-    const nextKind: Meeting['kind'] = kind === undefined ? (meeting.kind === 'setup' ? 'setup' : 'meeting') : kind === 'setup' ? 'setup' : 'meeting';
+    const nextKind = normalizeMeetingKind(kind === undefined ? meeting.kind : kind);
     const isSetup = nextKind === 'setup';
     const nextEventId = isSetup ? String(eventId === undefined ? meeting.eventId || '' : eventId || '').trim() : '';
     if (isSetup && !state.events?.some((item) => item.id === nextEventId)) {
@@ -5060,7 +4983,7 @@ async function startServer() {
     await notifyMeetingRecipients(
       state,
       recipients,
-      `${meeting.kind === 'setup' ? 'Монтаж отменён.' : 'Встреча отменена.'}\n\n${meeting.title}\nДата: ${formatMeetingDate(meeting.date)}\nВремя: ${meeting.time}`,
+      `${meetingKindText(meeting.kind).cancelled}\n\n${meeting.title}\nДата: ${formatMeetingDate(meeting.date)}\nВремя: ${meeting.time}`,
       'meeting_cancelled',
     );
     await syncPersistedMeetingCalendar(meeting.id);
@@ -5883,7 +5806,7 @@ async function startServer() {
       sendDueBirthdayReminders().catch((err) => {
         console.error('Birthday reminder check failed:', err.message);
       });
-    }, 24 * 60 * 60 * 1000);
+    }, 15 * 60 * 1000);
     const scheduleNextAvailabilityReminderCheck = () => {
       const delayMs = millisecondsUntilNextWholeHour();
       setTimeout(() => {

@@ -347,9 +347,10 @@ export async function importAvailabilitiesFromSheet(config: GoogleSheetsConfig, 
     for (const row of layout.rows) {
       allMatches.push({ sheet: grid.title, sheetRow: row.rowIndex + 1, sheetName: row.name, userId: row.user?.id, telegramId: row.user?.telegramId });
       if (!row.user || (changedRow && row.rowIndex + 1 !== changedRow)) continue;
-      const availability = byUser.get(row.user.id) || { userId: row.user.id, slots: {}, hardUnavailableDays: [], outWeekIndexes: [], weekStart, updatedAt: now };
-      if (layout.outColumn >= 0 && isSelected(grid.raw[row.rowIndex]?.[layout.outColumn])) {
-        availability.outWeekIndexes = [0];
+      const availability = byUser.get(row.user.id) || { userId: row.user.id, slots: {}, hardUnavailableDays: [], weekStart, updatedAt: now };
+      const firstSheetDate = layout.columnDates.find(Boolean);
+      if (layout.outColumn >= 0 && firstSheetDate && Math.floor(dayIndexFor(firstSheetDate, weekStart) / 7) === 0) {
+        availability.outWeekIndexes = isSelected(grid.raw[row.rowIndex]?.[layout.outColumn]) ? [0] : [];
       }
       for (let col = 0; col < layout.columnHours.length; col += 1) {
         const hour = layout.columnHours[col];
@@ -392,9 +393,11 @@ export async function exportAvailabilityToSheet(config: GoogleSheetsConfig, user
     const row = layout.rows.find((item) => item.user?.id === availability.userId);
     if (!row) continue;
     matchedRow = row.rowIndex + 1;
-    if (layout.outColumn >= 0) data.push({
+    const firstSheetDate = layout.columnDates.find(Boolean);
+    const outWeekIndex = firstSheetDate ? Math.floor(dayIndexFor(firstSheetDate, weekStart) / 7) : -1;
+    if (layout.outColumn >= 0 && outWeekIndex >= 0) data.push({
       range: `${quotedSheet(grid.title)}!${columnName(layout.outColumn)}${row.rowIndex + 1}`,
-      values: [[Boolean(availability.outWeekIndexes?.includes(0))]],
+      values: [[Boolean(availability.outWeekIndexes?.includes(outWeekIndex))]],
     });
     for (let col = 0; col < layout.columnHours.length; col += 1) {
       const hour = layout.columnHours[col];
@@ -424,9 +427,11 @@ export async function exportAvailabilitiesToSheet(config: GoogleSheetsConfig, us
     for (const row of layout.rows) {
       if (!row.user) continue;
       const availability = availabilities[row.user.id];
-      if (layout.outColumn >= 0) data.push({
+      const firstSheetDate = layout.columnDates.find(Boolean);
+      const outWeekIndex = firstSheetDate ? Math.floor(dayIndexFor(firstSheetDate, availability?.weekStart || weekStart) / 7) : -1;
+      if (layout.outColumn >= 0 && outWeekIndex >= 0) data.push({
         range: `${quotedSheet(grid.title)}!${columnName(layout.outColumn)}${row.rowIndex + 1}`,
-        values: [[Boolean(availability?.outWeekIndexes?.includes(0))]],
+        values: [[Boolean(availability?.outWeekIndexes?.includes(outWeekIndex))]],
       });
       for (let col = 0; col < layout.columnHours.length; col += 1) {
         const hour = layout.columnHours[col];

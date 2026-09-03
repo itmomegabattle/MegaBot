@@ -50,6 +50,12 @@ assert.equal(setupEvent.summary, 'Монтаж сцены');
 assert.match(setupEvent.description, /Тип: монтаж площадки/);
 assert.match(setupEvent.description, /Мероприятие: Фестиваль/);
 assert.match(setupEvent.description, /Формат: монтаж, приглашена вся команда/);
+const vibe: Meeting = { ...meeting, id: 'm_vibe', kind: 'vibe', title: 'Вечер с командой', duration: 2 };
+const vibeEvent = buildGoogleCalendarEvent(vibe, state);
+assert.equal(vibeEvent.summary, 'Вечер с командой');
+assert.match(vibeEvent.description, /Тип: Вайбик — неформальная встреча с командой/);
+assert.match(vibeEvent.description, /Участники: Анна/);
+assert.equal(vibeEvent.end.dateTime, '2026-08-06T19:30:00');
 
 const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'megabot-calendar-'));
 const credentialsFile = path.join(tempRoot, 'service-account.json');
@@ -122,6 +128,13 @@ try {
   assert.equal('created' in recreated && recreated.created, true);
   assert.notEqual(recreated.eventId, created.eventId, 'a deleted Google Calendar event ID must not be reused');
   assert.equal(requests.filter((request) => request.method === 'POST' && request.url?.endsWith('/events')).length, 2, 'only initial creation and deleted-event recovery may insert');
+  const vibeCreated = await syncMeetingToGoogleCalendar(config, vibe, state);
+  assert.equal('created' in vibeCreated && vibeCreated.created, true);
+  const vibeUpdated = await syncMeetingToGoogleCalendar(config, { ...vibe, title: 'Новый план', googleCalendarEventId: vibeCreated.eventId }, state);
+  assert.equal('created' in vibeUpdated && vibeUpdated.created, false);
+  assert.equal(vibeUpdated.eventId, vibeCreated.eventId);
+  const vibeDeleted = await syncMeetingToGoogleCalendar(config, { ...vibe, status: 'cancelled', googleCalendarEventId: vibeCreated.eventId }, state);
+  assert.equal('deleted' in vibeDeleted && vibeDeleted.deleted, true);
   console.log('Google Calendar verification passed: access check, one-hour fallback, metadata, idempotent update, cancellation, and deleted-event recovery.');
 } finally {
   await new Promise<void>((resolve) => server.close(() => resolve()));

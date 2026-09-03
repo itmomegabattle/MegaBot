@@ -108,12 +108,12 @@ function telegramInitData(user) {
 }
 
 function currentWeekStart() {
-  const today = new Date();
-  const day = today.getDay() === 0 ? 6 : today.getDay() - 1;
-  const monday = new Date(today);
-  monday.setHours(0, 0, 0, 0);
-  monday.setDate(today.getDate() - day);
-  return `${monday.getFullYear()}-${String(monday.getMonth() + 1).padStart(2, '0')}-${String(monday.getDate()).padStart(2, '0')}`;
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Europe/Moscow', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(new Date()).map((part) => [part.type, part.value]));
+  const monday = new Date(`${parts.year}-${parts.month}-${parts.day}T12:00:00Z`);
+  monday.setUTCDate(monday.getUTCDate() - (monday.getUTCDay() + 6) % 7);
+  return monday.toISOString().slice(0, 10);
 }
 
 async function request(pathname, body) {
@@ -193,8 +193,21 @@ let appProcess;
 try {
   const testDatabasePath = path.join(tempRoot, 'database.json');
   await writeFile(testDatabasePath, JSON.stringify(fixture, null, 2), 'utf8');
+  const clockPath = path.join(tempRoot, 'clock.txt');
+  const clockPreload = path.join(tempRoot, 'clock.cjs');
+  await writeFile(clockPreload, `
+    const fs = require('node:fs');
+    const RealDate = Date;
+    global.Date = class extends RealDate {
+      constructor(...args) { super(...(args.length ? args : [global.Date.now()])); }
+      static now() {
+        return fs.existsSync(process.env.TEST_CLOCK_FILE)
+          ? Number(fs.readFileSync(process.env.TEST_CLOCK_FILE, 'utf8')) : RealDate.now();
+      }
+    };
+  `);
 
-  appProcess = spawn(process.execPath, [path.join(repoRoot, 'dist', 'server.cjs')], {
+  appProcess = spawn(process.execPath, ['--require', clockPreload, path.join(repoRoot, 'dist', 'server.cjs')], {
     cwd: repoRoot,
     env: {
       ...process.env,
@@ -202,6 +215,7 @@ try {
       ALLOW_LOCAL_PREVIEW: 'false',
       PORT: String(appPort),
       DB_FILE: testDatabasePath,
+      TEST_CLOCK_FILE: clockPath,
       TELEGRAM_BOT_TOKEN: botToken,
       TELEGRAM_API_BASE: `http://127.0.0.1:${telegramPort}`,
       WEBAPP_URL: 'https://dead-tunnel.lhr.life',
@@ -903,7 +917,7 @@ try {
 
   const availability = await request('/api/availability', {
     userId: 'u_alice',
-    weekStart: '2030-01-07',
+    weekStart: currentWeekStart(),
     slots: { 0: [18, 19] },
     hardUnavailableDays: [1, 2, 2, 99, 'bad'],
     outWeekIndexes: [1, 1, 9, 'bad'],
@@ -1561,6 +1575,40 @@ try {
   assert.equal(setupUpdate.data.meeting.participants, 'all');
   assert.ok(telegramCalls.some((call) => String(call.body.text || '').includes('Монтаж изменён')));
 
+  telegramCalls.length = 0;
+  const beforeVibeSession = sessionCookie;
+  sessionCookie = adminSessionCookie;
+  const vibeMeeting = await request('/api/meeting', {
+    kind: 'vibe', title: 'Вечер настолок', type: 'custom', date: '03.01.30', time: '19:00', duration: 2,
+    hostId: 'u_admin', participants: ['u_alice'], topic: 'Неформально общаемся', description: 'Встречаемся с командой',
+  });
+  assert.equal(vibeMeeting.response.status, 200);
+  assert.equal(vibeMeeting.data.meeting.kind, 'vibe');
+  assert.equal(vibeMeeting.data.meeting.duration, 2);
+  assert.deepEqual(vibeMeeting.data.meeting.participants, ['u_alice']);
+  assert.equal(vibeMeeting.data.meeting.topic, 'Неформально общаемся');
+  const vibeNotifications = telegramCalls.filter((call) => call.path.endsWith('/sendMessage'));
+  assert.ok(vibeNotifications.some((call) => String(call.body.text).includes('Новый вайбик запланирован!')));
+  assert.ok(vibeNotifications.some((call) => call.body.chat_id === '-100500' && call.body.message_thread_id === 321));
+  assert.ok(vibeNotifications.some((call) => String(call.body.chat_id) === '100'));
+  assert.ok(vibeNotifications.some((call) => String(call.body.chat_id) === '200'));
+  assert.ok(!vibeNotifications.some((call) => String(call.body.chat_id) === '300'), 'custom vibe should notify only invitees and its host');
+  sessionCookie = beforeVibeSession;
+  const vibeRsvp = await request('/api/meeting/rsvp', { requesterId: 'u_alice', meetingId: vibeMeeting.data.meeting.id, attending: true });
+  assert.equal(vibeRsvp.response.status, 200);
+  sessionCookie = adminSessionCookie;
+  telegramCalls.length = 0;
+  const vibeUpdate = await request('/api/meeting/update', { requesterId: 'u_admin', meetingId: vibeMeeting.data.meeting.id, title: 'Вечер настолок и чая', time: '18:00' });
+  assert.equal(vibeUpdate.response.status, 200);
+  assert.equal(vibeUpdate.data.meeting.kind, 'vibe', 'editing without a kind must preserve vibe');
+  assert.ok(telegramCalls.some((call) => String(call.body.text || '').includes('Вайбик изменён')));
+  assert.equal((await request('/api/state')).data.meetings.find((item) => item.id === vibeMeeting.data.meeting.id).kind, 'vibe');
+  telegramCalls.length = 0;
+  const vibeDelete = await request('/api/meeting/delete', { requesterId: 'u_admin', meetingId: vibeMeeting.data.meeting.id });
+  assert.equal(vibeDelete.response.status, 200);
+  assert.ok(telegramCalls.some((call) => String(call.body.text || '').includes('Вайбик отменён.')));
+  sessionCookie = beforeVibeSession;
+
   const oneDayAvailability = await request('/api/availability', {
     userId: 'u_alice',
     weekStart: currentWeekStart(),
@@ -1927,6 +1975,39 @@ try {
   assert.ok(Array.isArray(persistedPanels.panels['200'].known));
   assert.equal(persistedPanels.slotDrafts['200'], undefined, 'changing availability rules must invalidate stale chat drafts');
   assert.match(serverErrors, /Temporary WEBAPP_URL dead-tunnel\.lhr\.life is not allowed in production/);
+
+  sessionCookie = adminSessionCookie;
+  const oldWeekStart = currentWeekStart();
+  const weekAt = (index) => new Date(Date.parse(`${oldWeekStart}T12:00:00Z`) + index * 7 * 86400000).toISOString().slice(0, 10);
+  for (let index = 0; index < 3; index += 1) {
+    const renamed = await request('/api/availability/week-name', {
+      requesterId: 'u_admin', weekIndex: index, weekStart: weekAt(index), name: `Событие ${index}`, description: `Описание ${index}`,
+    });
+    assert.equal(renamed.response.status, 200);
+  }
+  const rolloverSave = await request('/api/availability', {
+    userId: 'u_admin', weekStart: oldWeekStart, slots: { 0: [18], 7: [19], 14: [20] }, hardUnavailableDays: [2, 9, 16], outWeekIndexes: [],
+  });
+  assert.equal(rolloverSave.response.status, 200);
+  await writeFile(clockPath, String(Date.parse(`${weekAt(1)}T00:00:00+03:00`)));
+  const rolled = (await request('/api/state')).data;
+  assert.equal(rolled.settings.availabilityWeekCount, 3);
+  assert.deepEqual(rolled.settings.availabilityWeekNames, ['Событие 1', 'Событие 2', 'Неделя 3']);
+  assert.deepEqual(rolled.settings.availabilityWeekDescriptions, ['Описание 1', 'Описание 2', '']);
+  assert.deepEqual(rolled.availabilities.u_admin.slots, { 0: [19], 7: [20] });
+  assert.deepEqual(rolled.availabilities.u_admin.hardUnavailableDays, [2, 9]);
+  assert.equal(rolled.availabilities.u_admin.weekStart, weekAt(1));
+  for (const staleWeekStart of [oldWeekStart, '', 'invalid', weekAt(2)]) {
+    const rejected = await request('/api/availability', { userId: 'u_admin', weekStart: staleWeekStart, slots: { 0: [21] } });
+    assert.equal(rejected.response.status, 409);
+  }
+  const rejectedName = await request('/api/availability/week-name', {
+    requesterId: 'u_admin', weekIndex: 0, weekStart: oldWeekStart, name: 'Устаревшее название',
+  });
+  assert.equal(rejectedName.response.status, 409);
+  assert.deepEqual((await request('/api/state')).data.availabilities.u_admin, rolled.availabilities.u_admin);
+  const persistedRollover = JSON.parse(await readFile(testDatabasePath, 'utf8'));
+  assert.deepEqual(persistedRollover.availabilities.u_admin, rolled.availabilities.u_admin);
 
   console.log('Core flow verification passed: chat buttons, resilient slot editing, registration, access binding, task notifications, meeting notifications, and task completion.');
 } finally {
