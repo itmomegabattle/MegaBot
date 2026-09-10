@@ -1579,12 +1579,14 @@ try {
   const beforeVibeSession = sessionCookie;
   sessionCookie = adminSessionCookie;
   const vibeMeeting = await request('/api/meeting', {
-    kind: 'vibe', title: 'Вечер настолок', type: 'custom', date: '03.01.30', time: '19:00', duration: 2,
+    kind: 'vibe', title: 'Вечер настолок', type: 'custom', date: '05.01.30', time: '03:15', duration: 2,
     hostId: 'u_admin', participants: ['u_alice'], topic: 'Неформально общаемся', description: 'Встречаемся с командой',
   });
   assert.equal(vibeMeeting.response.status, 200);
   assert.equal(vibeMeeting.data.meeting.kind, 'vibe');
   assert.equal(vibeMeeting.data.meeting.duration, 2);
+  assert.equal(vibeMeeting.data.meeting.date, '05.01.30', 'vibes must be allowed on weekends');
+  assert.equal(vibeMeeting.data.meeting.time, '03:15', 'vibes must be allowed outside availability hours');
   assert.deepEqual(vibeMeeting.data.meeting.participants, ['u_alice']);
   assert.equal(vibeMeeting.data.meeting.topic, 'Неформально общаемся');
   const vibeNotifications = telegramCalls.filter((call) => call.path.endsWith('/sendMessage'));
@@ -1598,9 +1600,14 @@ try {
   assert.equal(vibeRsvp.response.status, 200);
   sessionCookie = adminSessionCookie;
   telegramCalls.length = 0;
-  const vibeUpdate = await request('/api/meeting/update', { requesterId: 'u_admin', meetingId: vibeMeeting.data.meeting.id, title: 'Вечер настолок и чая', time: '18:00' });
+  const vibeUpdate = await request('/api/meeting/update', {
+    requesterId: 'u_admin', meetingId: vibeMeeting.data.meeting.id,
+    title: 'Вечер настолок и чая', date: '06.01.30', time: '23:45',
+  });
   assert.equal(vibeUpdate.response.status, 200);
   assert.equal(vibeUpdate.data.meeting.kind, 'vibe', 'editing without a kind must preserve vibe');
+  assert.equal(vibeUpdate.data.meeting.date, '06.01.30', 'vibes must remain editable to a weekend');
+  assert.equal(vibeUpdate.data.meeting.time, '23:45', 'vibes must remain editable to any time of day');
   assert.ok(telegramCalls.some((call) => String(call.body.text || '').includes('Вайбик изменён')));
   assert.equal((await request('/api/state')).data.meetings.find((item) => item.id === vibeMeeting.data.meeting.id).kind, 'vibe');
   telegramCalls.length = 0;

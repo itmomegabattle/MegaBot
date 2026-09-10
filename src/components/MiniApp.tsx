@@ -2111,7 +2111,7 @@ export default function MiniApp({
                     <Field label="Название"><input value={meetingTitle} onChange={(event) => setMeetingTitle(event.target.value)} className={inputClass} /></Field>
                     <div className={`grid min-w-0 grid-cols-1 gap-3 ${meetingKind === 'setup' ? 'min-[520px]:grid-cols-2' : 'min-[720px]:grid-cols-3'}`}>
                       <Field label="Дата"><DatePickerField value={meetingDate} onChange={setMeetingDate} placeholder="Выбери дату" /></Field>
-                      <Field label="Время"><input type="time" min={`${String(availabilityConfig.startHour).padStart(2, '0')}:00`} max={`${String(availabilityConfig.endHour).padStart(2, '0')}:00`} value={meetingTime} onChange={(event) => setMeetingTime(event.target.value)} className={inputClass} /></Field>
+                      <Field label="Время"><input type="time" min={meetingKind === 'vibe' ? undefined : `${String(availabilityConfig.startHour).padStart(2, '0')}:00`} max={meetingKind === 'vibe' ? undefined : `${String(availabilityConfig.endHour).padStart(2, '0')}:00`} value={meetingTime} onChange={(event) => setMeetingTime(event.target.value)} className={inputClass} /></Field>
                       {meetingKind !== 'setup' && <Field label="Длительность">
                         <select value={meetingDuration} onChange={(event) => setMeetingDuration(event.target.value)} className={selectClass}>
                           <option value="0.5">30 минут</option><option value="1">1 час</option><option value="1.5">1,5 часа</option><option value="2">2 часа</option><option value="2.5">2,5 часа</option><option value="3">3 часа</option><option value="4">4 часа</option><option value="5">5 часов</option><option value="6">6 часов</option>
@@ -2637,7 +2637,7 @@ export default function MiniApp({
                   <DatePickerField value={meetingDate} onChange={setMeetingDate} placeholder="Выбери дату" />
                 </Field>
                 <Field label="Время">
-                  <input type="time" min={`${String(availabilityConfig.startHour).padStart(2, '0')}:00`} max={`${String(availabilityConfig.endHour).padStart(2, '0')}:00`} value={meetingTime} onChange={(e) => setMeetingTime(e.target.value)} className={inputClass} />
+                  <input type="time" min={meetingKind === 'vibe' ? undefined : `${String(availabilityConfig.startHour).padStart(2, '0')}:00`} max={meetingKind === 'vibe' ? undefined : `${String(availabilityConfig.endHour).padStart(2, '0')}:00`} value={meetingTime} onChange={(e) => setMeetingTime(e.target.value)} className={inputClass} />
                 </Field>
                 {meetingKind !== 'setup' && <Field label="Длительность">
                   <select value={meetingDuration} onChange={(event) => setMeetingDuration(event.target.value)} className={selectClass}>

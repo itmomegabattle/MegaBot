@@ -385,11 +385,20 @@ function taskCompetencyNames(task: Task) {
   return task.competencies?.length ? task.competencies : task.competency ? [task.competency] : [];
 }
 
-function meetingScheduleError(dateValue: string, timeValue: string, duration: number, settings: SimulationState['settings']) {
+function meetingScheduleError(
+  dateValue: string,
+  timeValue: string,
+  duration: number,
+  settings: SimulationState['settings'],
+  kind: Meeting['kind'] = 'meeting',
+) {
   const date = parseShortDate(dateValue);
   const timeMatch = String(timeValue || '').match(/^(\d{1,2}):(\d{2})$/);
   if (!date || !timeMatch) return 'Проверь дату и время собрания';
   if (Number(timeMatch[1]) > 23 || Number(timeMatch[2]) > 59) return 'Проверь время собрания';
+  // A vibe is an informal event and is deliberately independent from the
+  // team's working-day and availability-slot settings.
+  if (normalizeMeetingKind(kind) === 'vibe') return '';
   const config = normalizeAvailabilityConfig(settings);
   const dayIndex = date.getDay() === 0 ? 6 : date.getDay() - 1;
   if (!config.activeDays.includes(dayIndex)) return 'В этот день встречи отключены в настройках слотов';
@@ -4866,7 +4875,7 @@ async function startServer() {
     if (!Number.isFinite(cleanDuration) || cleanDuration < 0.5 || cleanDuration > 6) {
       return res.status(400).json({ error: 'Длительность собрания должна быть от 30 минут до 6 часов' });
     }
-    const scheduleError = meetingScheduleError(String(date), String(time), cleanDuration, state.settings);
+    const scheduleError = meetingScheduleError(String(date), String(time), cleanDuration, state.settings, cleanKind);
     if (scheduleError) return res.status(400).json({ error: scheduleError });
 
     const cleanParticipants = isSetup || participants === 'all'
@@ -4922,7 +4931,7 @@ async function startServer() {
     if (!Number.isFinite(nextDuration) || nextDuration < 0.5 || nextDuration > 6) {
       return res.status(400).json({ error: 'Длительность собрания должна быть от 30 минут до 6 часов' });
     }
-    const scheduleError = meetingScheduleError(nextDate, nextTime, nextDuration, state.settings);
+    const scheduleError = meetingScheduleError(nextDate, nextTime, nextDuration, state.settings, nextKind);
     if (scheduleError) return res.status(400).json({ error: scheduleError });
     if (title) meeting.title = String(title).trim();
     meeting.kind = nextKind;

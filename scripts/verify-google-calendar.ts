@@ -50,12 +50,21 @@ assert.equal(setupEvent.summary, 'Монтаж сцены');
 assert.match(setupEvent.description, /Тип: монтаж площадки/);
 assert.match(setupEvent.description, /Мероприятие: Фестиваль/);
 assert.match(setupEvent.description, /Формат: монтаж, приглашена вся команда/);
-const vibe: Meeting = { ...meeting, id: 'm_vibe', kind: 'vibe', title: 'Вечер с командой', duration: 2 };
+const vibe: Meeting = {
+  ...meeting,
+  id: 'm_vibe',
+  kind: 'vibe',
+  title: 'Вечер с командой',
+  date: '10.08.26',
+  time: '23:30',
+  duration: 2,
+};
 const vibeEvent = buildGoogleCalendarEvent(vibe, state);
 assert.equal(vibeEvent.summary, 'Вечер с командой');
 assert.match(vibeEvent.description, /Тип: Вайбик — неформальная встреча с командой/);
 assert.match(vibeEvent.description, /Участники: Анна/);
-assert.equal(vibeEvent.end.dateTime, '2026-08-06T19:30:00');
+assert.equal(vibeEvent.start.dateTime, '2026-08-10T23:30:00');
+assert.equal(vibeEvent.end.dateTime, '2026-08-11T01:30:00', 'late vibes must cross midnight correctly');
 
 const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'megabot-calendar-'));
 const credentialsFile = path.join(tempRoot, 'service-account.json');
