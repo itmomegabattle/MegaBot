@@ -13,7 +13,7 @@ Telegram / browser → https://megaorgiabot.ru → Caddy → 127.0.0.1:3000 → 
 - домен и `www`: DNS Selectel, TLS выдаёт Caddy;
 - репозиторий: `itmomegabattle/MegaBot`, ветка `master`.
 
-Конфигурация reverse proxy находится в `/etc/caddy/Caddyfile`; публично открыты `22`, `80` и `443`, а порт `3000` предназначен только для Caddy на сервере.
+Конфигурация reverse proxy находится в `/etc/caddy/Caddyfile`; целевой внешний доступ — `22`, `80`, `443`, а порт `3000` предназначен только для Caddy. Код слушает `0.0.0.0`, поэтому изоляция зависит от firewall. Параметры сервера приведены из прежней настройки; в повторном аудите 21.09.2026 firewall, доступность production и реальные бэкапы не проверялись.
 
 ## Штатный выпуск
 
@@ -46,10 +46,16 @@ bash scripts/deploy-selectel.sh
 
 Не заменять этот процесс простым `pm2 restart`: остановка во время полноснимочной записи может оставить незавершённый снимок.
 
+**Ограничения текущего выпуска:** build заменяет dist на месте; аварийный trap запускает новый bundle, а не предыдущий, поэтому это не гарантированный rollback (OPS-02). Приложение обрабатывает SIGTERM/SIGINT: перестаёт принимать mutations и до 10 секунд ждёт репликацию Sheets; подтверждённая локальная ревизия уже находится в recovery journal. Health и диагностика показывают состояние очередей и интеграций, но подтверждённая отправка Telegram всё равно не означает прочтение сообщения пользователем.
+
+Для переноса Java применять только [B-10](../backend.md), после release gates и эксплуатационной части B-11. Штатный Node deploy не умеет мигрировать PostgreSQL, менять транспорт Telegram или возвращать данные из Java обратно в Sheets. Автоматически запускать его для Java-релиза нельзя.
+
 ## Проверка после выпуска
 
 ```bash
 curl -fsS http://127.0.0.1:3000/api/health
+curl -fsS http://127.0.0.1:3000/api/health/live
+curl -fsS http://127.0.0.1:3000/api/health/ready
 curl -fsS https://megaorgiabot.ru/api/health
 pm2 status megabot
 pm2 logs megabot --lines 50 --nostream
@@ -57,7 +63,7 @@ npm run db:sheets:status
 npm run calendar:check
 ```
 
-Обе health-точки должны вернуть текущий commit SHA и включённые интеграции. В логах учитывать timestamp: старые ошибки PM2 не означают ошибку нового выпуска.
+Обе health-точки должны вернуть текущий commit SHA и состояние persistence. Для Sheets дождаться `pendingReplication=false` и равенства `durableRevision`/`replicatedRevision`; при недоступной Sheets сервис может работать из durable journal, но это должно быть явно видно. В логах учитывать timestamp: старые ошибки PM2 не означают ошибку нового выпуска.
 
 После изменения Sheets выполнить:
 
@@ -74,6 +80,12 @@ npm run calendar:sync
 
 Ручной smoke test выполняется на тестовой сущности и включает открытие Mini App из Telegram, сохранение целевого действия и проверку побочного уведомления. Не создавать тестовую массовую рассылку в production без необходимости.
 
+`/api/health/live` используется для liveness и отвечает, пока жив процесс. `/api/health/ready` и совместимый `/api/health` возвращают `503`, если сервис завершает работу или durable-запись не гарантирована. `degraded` при `200` означает, что подтверждённые ревизии сохраняются локально, но Sheets replication отстаёт. Подробности доступны только администратору в «Команда → Состояние сервиса»; там видны очереди, возраст ожидания, последние успехи и очищенные ошибки. При обращении в логи передавать `X-Request-ID`; mutation дополнительно получает `X-Operation-ID`, а доставка связывается по `deliveryId`.
+
+Проблемы Telegram-доставки проверяются администратором в разделе «Команда → Доставка сообщений». `retry` выполняется автоматически не раньше `availableAt`; `failed` и `unknown` требуют осознанного выбора и ручного повтора. Для `unknown` сначала проверить чат получателя: запрос мог быть принят Telegram до сетевого таймаута. Не повторять всю рассылку ради одного адресата. Перегрузка очереди показывается в Mini App; журнал не обрезает старые незавершённые записи.
+
+Входящие updates сохраняются в `settings.telegramInbox` до webhook-ответа или повышения polling offset. После аварийного перезапуска worker автоматически продолжает `received/retry` и записи с истёкшим lease; завершённый `update_id` повторно не исполняется. При диагностике проверить рост inbox, `status`, `attempts`, `availableAt`, `leasedUntil` и `lastError`. Не удалять незавершённые записи вручную: восстановление и многопроцессная транзакционная реализация окончательно закрепляются в B-08.
+
 ## Переменные окружения
 
 Файл: `/opt/megabot/.env`, права доступа должны быть ограничены. Основные группы:
@@ -82,13 +94,28 @@ npm run calendar:sync
 PORT=3000
 TELEGRAM_BOT_TOKEN=...
 TELEGRAM_API_BASE=https://api.telegram.org
+TELEGRAM_UPDATE_MODE=polling
+# TELEGRAM_WEBHOOK_SECRET=... # только для mode=webhook, отдельный случайный секрет
+SESSION_SECRET=... # отдельный случайный секрет не короче 32 символов
+SESSION_FILE=/opt/megabot/sessions.json
 WEBAPP_URL=https://megaorgiabot.ru
-ADMIN_USERNAMES=...
 ADMIN_TELEGRAM_IDS=...
+ALLOW_LOCAL_PREVIEW=false
+
+# Необязательно: значения ниже показаны как production defaults
+AUTH_RATE_LIMIT_WINDOW_MS=300000
+AUTH_RATE_LIMIT_IP_MAX=30
+AUTH_RATE_LIMIT_USER_MAX=10
+BROADCAST_RATE_LIMIT_WINDOW_MS=600000
+BROADCAST_RATE_LIMIT_MAX=10
+BROADCAST_VOLUME_WINDOW_MS=3600000
+BROADCAST_VOLUME_MAX_RECIPIENTS=500
 
 GOOGLE_SERVICE_ACCOUNT_FILE=/opt/megabot/secrets/google-service-account.json
 GOOGLE_SHEETS_DATABASE_SPREADSHEET_ID=...
 GOOGLE_SHEETS_DATABASE_ENABLED=true
+DATABASE_RECOVERY_DIR=/opt/megabot/recovery
+DATABASE_RECOVERY_RETENTION=20
 
 GOOGLE_SHEETS_SPREADSHEET_ID=...
 GOOGLE_SHEETS_WEBHOOK_SECRET=...
@@ -103,11 +130,39 @@ GOOGLE_CALENDAR_TIME_ZONE=Europe/Moscow
 BIRTHDAY_PAYMENT_PHONE=89105408050
 BIRTHDAY_PAYMENT_BANK=Сбер
 BIRTHDAY_GIFT_MAX_AMOUNT=400
+BIRTHDAY_REMINDER_HOUR=10
+# BACKGROUND_SCHEDULERS_ENABLED=true # default; false только для изолированного maintenance/test
 ```
 
-`DISABLE_TELEGRAM_POLLING=true` применяется только для локальной разработки или специального режима. Один токен нельзя одновременно получать двумя polling-процессами: Telegram вернёт `409 Conflict`.
+`TELEGRAM_UPDATE_MODE` принимает ровно `polling`, `webhook` или `disabled`; одновременно работает только один транспорт. По умолчанию используется `polling`. Старый `DISABLE_TELEGRAM_POLLING=true` без нового параметра совместим с режимом `disabled`. Один токен нельзя одновременно получать двумя polling-процессами: Telegram вернёт `409 Conflict`.
 
-Токен, webhook secret и JSON-ключ нельзя печатать в логах, коммитить или передавать в чат. Ключ сервисного аккаунта хранится в `/opt/megabot/secrets/google-service-account.json` с правами `600`.
+`TELEGRAM_INBOX_POLL_INTERVAL_MS` задаёт период фоновой проверки durable inbox, по умолчанию 1000 мс и не менее 250 мс. Этот worker запускается независимо от `BACKGROUND_SCHEDULERS_ENABLED`, потому что отвечает за уже принятые Telegram updates.
+
+`SESSION_SECRET` обязателен в production, не может совпадать с Telegram bot token и используется только для подписи непрозрачной session cookie. Реестр с правами `600` хранит только SHA-256 hash токена в `SESSION_FILE`; повторный вход отзывает прежнюю сессию пользователя, logout и деактивация пользователя удаляют её из реестра. Переход со старой cookie-схемы намеренно аннулирует все ранее выданные сессии: после выпуска пользователи должны заново открыть Mini App из Telegram.
+
+`ALLOW_LOCAL_PREVIEW=true` разрешён только для локальной разработки: production-процесс с таким значением не запускается. Вход ограничен одновременно по IP и Telegram ID, рассылки — по actor, числу команд и суммарному числу получателей. При превышении API отвечает `429`, передаёт `Retry-After` и `retryAfterSeconds`; лимиты текущего Node-процесса намеренно являются временной защитой до переноса в общее хранилище.
+
+`DATABASE_RECOVERY_DIR` обязателен для предсказуемой production-эксплуатации: это каталог на постоянном диске, доступный только пользователю процесса. По умолчанию используется `<DB_FILE>.recovery`, но production не должен размещать его во временной файловой системе. `DATABASE_RECOVERY_RETENTION` задаёт число неизменяемых ревизий, минимум фактически равен 2. Каталог нужно включить во внешнее резервное копирование вместе с `.env` и runtime-файлами.
+
+Реестр `settings.idempotencyRecords` является частью основной БД и recovery snapshot. Он не очищается молча: при достижении 5000 уникальных ключей новые защищённые операции получают `503`, чтобы не потерять дедупликацию. До релиза необходимо мониторить размер реестра; перенос в PostgreSQL заменит этот временный предел политикой retention и уникальным индексом `(actor_id, key)`.
+
+Часовой пояс продукта фиксирован как `Europe/Moscow`; TZ операционной системы не меняет смысл пользовательских дат. При этом точность instant зависит от системных часов. На VDS должен быть включён NTP/chrony: перед выпуском проверить `timedatectl status` и `chronyc tracking` (либо состояние используемого NTP-клиента). Значительное рассогласование часов является причиной остановить выпуск отложенных рассылок.
+
+Все cookie-auth mutations в production требуют `Origin`, совпадающий с текущим host или origin из `WEBAPP_URL`. Запросы без Origin и с чужого origin получают 403. Ответы UI содержат CSP с локальными ресурсами и официальным `https://telegram.org` SDK; `frame-ancestors` разрешает Telegram Web. После production-выпуска проверить открытие Mini App в Telegram Desktop, Web, Android и iOS до расширения CSP.
+
+Изменения задач используют optimistic version: клиент передаёт полученную `task.version`, stale-правка получает `409` и должна повторяться только после обновления состояния. Создание, редактирование, смена статуса и фоновые task reminders сохраняются до обращения к Telegram. `npm run verify:core` включает конкурентный сценарий с 20 созданиями, конфликтом версии и одновременной рассылкой.
+
+В режиме `webhook` обязателен независимый `TELEGRAM_WEBHOOK_SECRET`; входящие запросы без заголовка `X-Telegram-Bot-Api-Secret-Token` не обрабатываются. Публичного HTTP-маршрута настройки webhook нет. Управление выполняется вручную из доверенного окружения:
+
+```bash
+npm run telegram:webhook:info
+npm run telegram:webhook:set
+npm run telegram:webhook:delete
+```
+
+Перед `telegram:webhook:set` установить `WEBAPP_URL` и `TELEGRAM_WEBHOOK_SECRET`, затем переключить приложение на `TELEGRAM_UPDATE_MODE=webhook`. Для возврата к polling сначала удалить webhook и убедиться, что запущен единственный consumer.
+
+Токен, `initData`, оба webhook secret и JSON-ключ нельзя печатать в логах, коммитить или передавать в чат. Ключ сервисного аккаунта хранится в `/opt/megabot/secrets/google-service-account.json` с правами `600`.
 
 Публичные идентификаторы текущих интеграций:
 
@@ -142,6 +197,14 @@ Apps Script устанавливается в пользовательской �
 5. убедиться, что установлен триггер `sendMegaBotEdit` «При изменении».
 
 ## Основная база и восстановление
+
+Успешный mutation означает, что его ревизия уже записана и синхронизирована на диск в `DATABASE_RECOVERY_DIR`; это не обещание, что Google Sheets успела обновиться. В `/api/health`:
+
+- `durableRevision` — последняя подтверждённая приложением ревизия;
+- `replicatedRevision` — последняя успешно записанная в Sheets ревизия;
+- `pendingReplication` — есть ожидающая или выполняющаяся выгрузка.
+
+После перезапуска приложение сравнивает проверенный локальный journal с согласованным Sheets snapshot и выбирает более новую ревизию. Повреждённая последняя запись журнала пропускается в пользу предыдущей с корректной checksum. Не удалять каталог recovery до проверки, что Sheets имеет ту же или более новую ревизию.
 
 Проверка и ручная копия:
 

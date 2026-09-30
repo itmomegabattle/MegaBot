@@ -1,0 +1,12 @@
+spring:
+  datasource:
+    url: ${MEGABOT_DB_URL}
+    username: ${MEGABOT_DB_USERNAME}
+    password: ${MEGABOT_DB_PASSWORD}
+
+megabot:
+  integrations:
+    telegram:
+      mode: ${MEGABOT_TELEGRAM_MODE:disabled}
+    google:
+      mode: ${MEGABOT_GOOGLE_MODE:disabled}

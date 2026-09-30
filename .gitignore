@@ -5,7 +5,14 @@ coverage/
 .DS_Store
 *.log
 .env*
+!.env.example
+!backend/.env.example
 database.json
+*.recovery/
+sessions.json
+*.sessions.json
+chat-panels.json
+*.chat-panels.json
 backups/
 .idea/
 assets/.aistudio/
@@ -13,3 +20,7 @@ secrets/
 *.service-account.json
 *service-account-key*.json
 .codex_tmp/
+.playwright-cli/
+.tmp/
+tmp/
+output/

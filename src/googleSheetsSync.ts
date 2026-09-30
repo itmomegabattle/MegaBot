@@ -35,6 +35,7 @@ type SheetAvailability = {
   slots: Record<number, number[]>;
   hardUnavailableDays?: number[];
   outWeekIndexes?: number[];
+  coveredOutWeekIndexes?: number[];
   weekStart?: string;
   updatedAt: string;
 };
@@ -349,8 +350,11 @@ export async function importAvailabilitiesFromSheet(config: GoogleSheetsConfig, 
       if (!row.user || (changedRow && row.rowIndex + 1 !== changedRow)) continue;
       const availability = byUser.get(row.user.id) || { userId: row.user.id, slots: {}, hardUnavailableDays: [], weekStart, updatedAt: now };
       const firstSheetDate = layout.columnDates.find(Boolean);
-      if (layout.outColumn >= 0 && firstSheetDate && Math.floor(dayIndexFor(firstSheetDate, weekStart) / 7) === 0) {
-        availability.outWeekIndexes = isSelected(grid.raw[row.rowIndex]?.[layout.outColumn]) ? [0] : [];
+      const outWeekIndex = firstSheetDate ? Math.floor(dayIndexFor(firstSheetDate, weekStart) / 7) : -1;
+      if (layout.outColumn >= 0 && outWeekIndex >= 0 && outWeekIndex < 5) {
+        availability.coveredOutWeekIndexes = [...new Set([...(availability.coveredOutWeekIndexes || []), outWeekIndex])];
+        availability.outWeekIndexes = (availability.outWeekIndexes || []).filter((index) => index !== outWeekIndex);
+        if (isSelected(grid.raw[row.rowIndex]?.[layout.outColumn])) availability.outWeekIndexes.push(outWeekIndex);
       }
       for (let col = 0; col < layout.columnHours.length; col += 1) {
         const hour = layout.columnHours[col];

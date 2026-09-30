@@ -1,0 +1,40 @@
+services:
+  db:
+    image: postgres:17.11-alpine3.24
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${MEGABOT_DB_NAME:-megabot}
+      POSTGRES_USER: ${POSTGRES_ADMIN_USER:-megabot_admin}
+      POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:-megabot_admin_local_only}
+      MEGABOT_DB_USERNAME: ${MEGABOT_DB_USERNAME:-megabot_app}
+      MEGABOT_DB_PASSWORD: ${MEGABOT_DB_PASSWORD:-megabot_local_only}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - megabot-postgres-data:/var/lib/postgresql/data
+      - ./backend/docker/postgres/001-create-app-user.sh:/docker-entrypoint-initdb.d/001-create-app-user.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  app:
+    profiles: ["app"]
+    build:
+      context: ./backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      SPRING_PROFILES_ACTIVE: local
+      MEGABOT_DB_URL: jdbc:postgresql://db:5432/${MEGABOT_DB_NAME:-megabot}
+      MEGABOT_DB_USERNAME: ${MEGABOT_DB_USERNAME:-megabot_app}
+      MEGABOT_DB_PASSWORD: ${MEGABOT_DB_PASSWORD:-megabot_local_only}
+      JAVA_TOOL_OPTIONS: ${MEGABOT_JAVA_TOOL_OPTIONS:--XX:MaxRAMPercentage=70 -XX:InitialRAMPercentage=20}
+    ports:
+      - "127.0.0.1:8080:8080"
+
+volumes:
+  megabot-postgres-data:

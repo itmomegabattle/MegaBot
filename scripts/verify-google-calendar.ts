@@ -15,8 +15,10 @@ import type { Meeting, SimulationState } from '../src/types.js';
 
 const state = {
   users: [
-    { id: 'u1', realName: 'Никита', username: '@nikita' },
-    { id: 'u2', realName: 'Анна', username: '@anna' },
+    { id: 'u1', realName: 'Никита', username: '@nikita', role: 'admin' },
+    { id: 'u2', realName: 'Анна', username: '@anna', role: 'organizer' },
+    { id: 'u3', realName: 'Факультет', username: '@faculty', role: 'faculty_responsible', facultyId: 'f1' },
+    { id: 'u4', realName: 'Неактивный', username: '@inactive', role: 'organizer', active: false },
   ],
   events: [{ id: 'event-1', name: 'Фестиваль', status: 'active', createdAt: '2026-08-01T00:00:00.000Z' }],
 } as Pick<SimulationState, 'users' | 'events'>;
@@ -32,7 +34,7 @@ assert.equal(event.end.dateTime, '2026-08-06T18:30:00', 'missing or invalid dura
 assert.match(event.description, /Описание: Сверяем готовность/);
 assert.match(event.description, /Повестка: Дедлайны/);
 assert.match(event.description, /Организатор: Никита/);
-assert.match(event.description, /Участники: Анна/);
+assert.match(event.description, /Участники: Никита .*Анна/);
 assert.match(googleCalendarEventId(meeting.id), /^[a-v0-9]{5,1024}$/);
 
 const setupEvent = buildGoogleCalendarEvent({
@@ -50,6 +52,15 @@ assert.equal(setupEvent.summary, 'Монтаж сцены');
 assert.match(setupEvent.description, /Тип: монтаж площадки/);
 assert.match(setupEvent.description, /Мероприятие: Фестиваль/);
 assert.match(setupEvent.description, /Формат: монтаж, приглашена вся команда/);
+assert.match(setupEvent.description, /Участники: вся команда \(2\)/);
+assert.doesNotMatch(setupEvent.description, /Факультет|Неактивный/);
+const snapshotEvent = buildGoogleCalendarEvent({
+  ...meeting,
+  participants: 'all',
+  audiencePolicy: 'snapshot',
+  audienceUserIds: ['u1'],
+}, state);
+assert.match(snapshotEvent.description, /Участники: вся команда \(1\)/);
 const vibe: Meeting = {
   ...meeting,
   id: 'm_vibe',
@@ -62,7 +73,7 @@ const vibe: Meeting = {
 const vibeEvent = buildGoogleCalendarEvent(vibe, state);
 assert.equal(vibeEvent.summary, 'Вечер с командой');
 assert.match(vibeEvent.description, /Тип: Вайбик — неформальная встреча с командой/);
-assert.match(vibeEvent.description, /Участники: Анна/);
+assert.match(vibeEvent.description, /Участники: Никита .*Анна/);
 assert.equal(vibeEvent.start.dateTime, '2026-08-10T23:30:00');
 assert.equal(vibeEvent.end.dateTime, '2026-08-11T01:30:00', 'late vibes must cross midnight correctly');
 

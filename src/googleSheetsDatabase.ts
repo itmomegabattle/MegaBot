@@ -1,5 +1,6 @@
 import { normalizeMeetingKind } from './meetingKind.js';
-import { SimulationState, Task, WorkEvent } from './types.js';
+import { normalizedMeetingRsvps } from './meetingRsvp.js';
+import { Meeting, SimulationState, Task, WorkEvent } from './types.js';
 import { googleSheetsApiRequest } from './googleSheetsSync.js';
 
 export type GoogleSheetsDatabaseConfig = {
@@ -10,7 +11,7 @@ export type GoogleSheetsDatabaseConfig = {
 
 type SchemaSheet = { title: string; headers: string[] };
 
-export const DATABASE_SCHEMA_VERSION = 8;
+export const DATABASE_SCHEMA_VERSION = 11;
 
 const SCHEMA: SchemaSheet[] = [
   { title: 'meta', headers: ['key', 'value'] },
@@ -19,15 +20,15 @@ const SCHEMA: SchemaSheet[] = [
   { title: 'users', headers: ['id', 'telegram_id', 'username', 'real_name', 'role', 'registered', 'birthday', 'competencies_json', 'primary_competency', 'faculty_id', 'joined_at', 'last_seen_at', 'avatar_seed'] },
   { title: 'user_avatars', headers: ['user_id', 'chunk_index', 'data'] },
   { title: 'faculties', headers: ['id', 'name'] },
-  { title: 'availability_weeks', headers: ['user_id', 'week_start', 'updated_at', 'hard_unavailable_days_json', 'out_week_indexes_json'] },
+  { title: 'availability_weeks', headers: ['user_id', 'week_start', 'updated_at', 'hard_unavailable_days_json', 'out_week_indexes_json', 'week_versions_json'] },
   { title: 'availability_slots', headers: ['user_id', 'week_start', 'day_index', 'hour'] },
   { title: 'meetings', headers: ['id', 'title', 'type', 'date', 'time', 'duration_hours', 'host_id', 'participants_all', 'competency', 'topic', 'description', 'status', 'google_calendar_event_id', 'kind', 'event_id'] },
   { title: 'meeting_participants', headers: ['meeting_id', 'user_id', 'kind'] },
-  { title: 'tasks', headers: ['id', 'event_id', 'faculty_id', 'title', 'description', 'deadline', 'creator_id', 'competency', 'competencies_json', 'sow', 'status', 'priority', 'created_at', 'completed_at', 'time_spent_minutes', 'tips_json', 'cancelled_at', 'cancelled_by'] },
+  { title: 'tasks', headers: ['id', 'version', 'event_id', 'faculty_id', 'title', 'description', 'deadline', 'creator_id', 'competency', 'competencies_json', 'sow', 'status', 'priority', 'created_at', 'completed_at', 'time_spent_minutes', 'tips_json', 'cancelled_at', 'cancelled_by', 'assignment_mode', 'completed_by'] },
   { title: 'task_assignees', headers: ['task_id', 'user_id'] },
   { title: 'task_comments', headers: ['task_id', 'user_id', 'executor_comment', 'coordinator_comment', 'completion_comment', 'updated_at', 'history_json'] },
   { title: 'task_reminders', headers: ['task_id', 'id', 'type', 'value', 'unit', 'sent_at', 'last_sent_at'] },
-  { title: 'task_log', headers: ['Мероприятие', 'Блоки', 'Задача', 'Описание', 'ТЗ', 'Статус', 'Приоритет', 'Автор', 'Исполнители', 'Назначена', 'Дедлайн', 'Выполнена', 'Затрачено, мин', 'Комментарии исполнителей', 'Комментарии координатора', 'Комментарии при завершении', 'Напоминания', 'ID'] },
+  { title: 'task_log', headers: ['Мероприятие', 'Блоки', 'Задача', 'Описание', 'ТЗ', 'Статус', 'Приоритет', 'Автор', 'Исполнители', 'Назначена', 'Дедлайн', 'Выполнена', 'Завершил', 'Режим', 'Затрачено, мин', 'Комментарии исполнителей', 'Комментарии координатора', 'Комментарии при завершении', 'Напоминания', 'ID'] },
   { title: 'bot_messages', headers: ['owner_user_id', 'id', 'sender', 'text', 'timestamp', 'buttons_json'] },
   { title: 'settings', headers: ['key', 'value_json'] },
   { title: 'audit_log', headers: ['timestamp', 'revision', 'action', 'details'] },
@@ -173,7 +174,7 @@ function stateRows(state: SimulationState) {
   const availabilityWeekRows: unknown[][] = [];
   const availabilitySlotRows: unknown[][] = [];
   Object.values(state.availabilities || {}).forEach((availability) => {
-    availabilityWeekRows.push([availability.userId, availability.weekStart || '', availability.updatedAt || '', json(availability.hardUnavailableDays || []), json(availability.outWeekIndexes || [])]);
+    availabilityWeekRows.push([availability.userId, availability.weekStart || '', availability.updatedAt || '', json(availability.hardUnavailableDays || []), json(availability.outWeekIndexes || []), json(availability.weekVersions || {})]);
     Object.entries(availability.slots || {}).forEach(([dayIndex, hours]) => {
       hours.forEach((hour) => availabilitySlotRows.push([availability.userId, availability.weekStart || '', Number(dayIndex), Number(hour)]));
     });
@@ -183,14 +184,17 @@ function stateRows(state: SimulationState) {
   state.meetings.forEach((meeting) => {
     meetingRows.push([meeting.id, meeting.title, meeting.type, meeting.date, meeting.time, meeting.duration || 1, meeting.hostId, meeting.participants === 'all', meeting.competency || '', meeting.topic || '', meeting.description || '', meeting.status, meeting.googleCalendarEventId || '', meeting.kind || 'meeting', meeting.eventId || '']);
     if (Array.isArray(meeting.participants)) meeting.participants.forEach((userId) => meetingParticipantRows.push([meeting.id, userId, 'invited']));
-    (meeting.attendeeIds || []).forEach((userId) => meetingParticipantRows.push([meeting.id, userId, 'attending']));
+    (meeting.audienceUserIds || []).forEach((userId) => meetingParticipantRows.push([meeting.id, userId, 'audience']));
+    Object.entries(normalizedMeetingRsvps(meeting)).forEach(([userId, response]) => {
+      meetingParticipantRows.push([meeting.id, userId, response === 'yes' ? 'attending' : 'declined']);
+    });
   });
   const taskRows: unknown[][] = [];
   const assigneeRows: unknown[][] = [];
   const commentRows: unknown[][] = [];
   const reminderRows: unknown[][] = [];
   state.tasks.forEach((task) => {
-    taskRows.push([task.id, task.eventId || '', task.facultyId || '', task.title, task.description, task.deadline, task.creatorId || '', task.competency || '', json(task.competencies || (task.competency ? [task.competency] : [])), task.sow || '', task.status, task.priority, task.createdAt || '', task.completedAt || '', task.timeSpentMinutes || '', json(task.tips || []), task.cancelledAt || '', task.cancelledBy || '']);
+    taskRows.push([task.id, task.version || 1, task.eventId || '', task.facultyId || '', task.title, task.description, task.deadline, task.creatorId || '', task.competency || '', json(task.competencies || (task.competency ? [task.competency] : [])), task.sow || '', task.status, task.priority, task.createdAt || '', task.completedAt || '', task.timeSpentMinutes || '', json(task.tips || []), task.cancelledAt || '', task.cancelledBy || '', task.assignmentMode || 'shared', task.completedBy || '']);
     const assignees = task.assignedTo || [];
     assignees.forEach((userId) => assigneeRows.push([task.id, userId]));
     const commentUserIds = new Set([...Object.keys(task.assigneeNotes || {}), ...Object.keys(task.completionComments || {})]);
@@ -206,6 +210,7 @@ function stateRows(state: SimulationState) {
     .map((task) => {
       const event = (state.events || []).find((item) => item.id === task.eventId);
       const creator = state.users.find((user) => user.id === task.creatorId);
+      const completedBy = state.users.find((user) => user.id === task.completedBy);
       const assignees = (task.assignedTo || []).map((id) => state.users.find((user) => user.id === id)?.realName || id);
       const history = Object.values(task.assigneeNotes || {}).flatMap((note) => note.history || []);
       const commentsBySide = (side: 'executor' | 'coordinator') => history
@@ -221,7 +226,7 @@ function stateRows(state: SimulationState) {
         task.status === 'completed' ? 'Выполнено' : task.status === 'cancelled' ? 'Отменена' : task.status === 'open' ? 'Открытая' : 'В работе',
         task.priority === 'critical' ? 'Очень важная' : task.priority === 'important' ? 'Важная' : 'Обычная',
         creator?.realName || 'Не указан', assignees.join(', ') || 'Не назначены', humanDateTime(task.createdAt), task.deadline || '', humanDateTime(task.completedAt),
-        task.timeSpentMinutes || '', executorComments, coordinatorComments, completionComments, reminders, task.id,
+        completedBy?.realName || '', task.assignmentMode || 'shared', task.timeSpentMinutes || '', executorComments, coordinatorComments, completionComments, reminders, task.id,
       ];
     });
   const messageRows: unknown[][] = [];
@@ -239,11 +244,23 @@ function stateRows(state: SimulationState) {
   ]);
 }
 
-export async function exportStateToGoogleSheetsDatabase(config: GoogleSheetsDatabaseConfig, state: SimulationState, action = 'snapshot') {
-  await initializeGoogleSheetsDatabase(config);
+type GoogleSheetsDatabaseExportDependencies = {
+  initialize?: typeof initializeGoogleSheetsDatabase;
+  request?: typeof googleSheetsApiRequest;
+};
+
+export async function exportStateToGoogleSheetsDatabase(
+  config: GoogleSheetsDatabaseConfig,
+  state: SimulationState,
+  action = 'snapshot',
+  dependencies: GoogleSheetsDatabaseExportDependencies = {},
+) {
+  const initialize = dependencies.initialize || initializeGoogleSheetsDatabase;
+  const request = dependencies.request || googleSheetsApiRequest;
+  await initialize(config);
   const revision = Number(state.settings?.databaseRevision || 0);
   const rows = stateRows(state);
-  await googleSheetsApiRequest(config, '/values:batchUpdate', { method: 'POST', body: JSON.stringify({
+  await request(config, '/values:batchUpdate', { method: 'POST', body: JSON.stringify({
     valueInputOption: 'RAW',
     data: [{ range: `${quoteSheet('meta')}!A1:B7`, values: [
       ['key', 'value'],
@@ -256,7 +273,7 @@ export async function exportStateToGoogleSheetsDatabase(config: GoogleSheetsData
     ] }],
   }) });
   const clearRanges = DATA_SHEETS.map((sheet) => `${quoteSheet(sheet.title)}!A2:Z`);
-  await googleSheetsApiRequest(config, '/values:batchClear', { method: 'POST', body: JSON.stringify({ ranges: clearRanges }) });
+  await request(config, '/values:batchClear', { method: 'POST', body: JSON.stringify({ ranges: clearRanges }) });
   const data: { range: string; values: unknown[][] }[] = [];
   for (const sheet of DATA_SHEETS) {
     const values = rows.get(sheet.title) || [];
@@ -271,8 +288,8 @@ export async function exportStateToGoogleSheetsDatabase(config: GoogleSheetsData
     ['source', 'megabot'],
     ['sync_state', 'ready'],
   ] });
-  await googleSheetsApiRequest(config, '/values:batchUpdate', { method: 'POST', body: JSON.stringify({ valueInputOption: 'RAW', data }) });
-  await googleSheetsApiRequest(config, `/values/${encodeURIComponent(`${quoteSheet('audit_log')}!A:D`)}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`, {
+  await request(config, '/values:batchUpdate', { method: 'POST', body: JSON.stringify({ valueInputOption: 'RAW', data }) });
+  await request(config, `/values/${encodeURIComponent(`${quoteSheet('audit_log')}!A:D`)}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`, {
     method: 'POST',
     body: JSON.stringify({ values: [[new Date().toISOString(), revision, action, `tasks=${state.tasks.length};users=${state.users.length};events=${state.events?.length || 0}`]] }),
   });
@@ -302,7 +319,7 @@ export async function importStateFromGoogleSheetsDatabase(config: GoogleSheetsDa
   const meta = Object.fromEntries(metaRows.map((row) => [String(row.key), row.value]));
   if (!bool(meta.data_present)) return { initialized: false, revision: 0, state: null, counts: null };
   if (String(meta.sync_state || '') !== 'ready') return { initialized: false, revision: Number(meta.revision || 0), state: null, counts: null };
-  if (![1, 2, 3, 4, 5, 6, 7, DATABASE_SCHEMA_VERSION].includes(Number(meta.schema_version))) throw new Error(`Unsupported Google Sheets database schema: ${meta.schema_version}`);
+  if (![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, DATABASE_SCHEMA_VERSION].includes(Number(meta.schema_version))) throw new Error(`Unsupported Google Sheets database schema: ${meta.schema_version}`);
 
   const snapshotState = decodeGoogleSheetsDatabaseSnapshot(objects(valuesByTitle.get('snapshot')));
   if (snapshotState) {
@@ -335,7 +352,7 @@ export async function importStateFromGoogleSheetsDatabase(config: GoogleSheetsDa
   const faculties = objects(valuesByTitle.get('faculties')).map((row) => ({ id: String(row.id), name: String(row.name) }));
   const availabilities: SimulationState['availabilities'] = {};
   objects(valuesByTitle.get('availability_weeks')).forEach((row) => {
-    availabilities[String(row.user_id)] = { userId: String(row.user_id), weekStart: String(row.week_start || ''), updatedAt: String(row.updated_at || ''), hardUnavailableDays: parseJson<number[]>(row.hard_unavailable_days_json, []), outWeekIndexes: parseJson<number[]>(row.out_week_indexes_json, []), slots: {} };
+    availabilities[String(row.user_id)] = { userId: String(row.user_id), weekStart: String(row.week_start || ''), updatedAt: String(row.updated_at || ''), hardUnavailableDays: parseJson<number[]>(row.hard_unavailable_days_json, []), outWeekIndexes: parseJson<number[]>(row.out_week_indexes_json, []), weekVersions: parseJson<Record<string, number>>(row.week_versions_json, {}), slots: {} };
   });
   objects(valuesByTitle.get('availability_slots')).forEach((row) => {
     const availability = availabilities[String(row.user_id)] || { userId: String(row.user_id), weekStart: String(row.week_start || ''), updatedAt: '', hardUnavailableDays: [], outWeekIndexes: [], slots: {} };
@@ -345,14 +362,22 @@ export async function importStateFromGoogleSheetsDatabase(config: GoogleSheetsDa
     availabilities[availability.userId] = availability;
   });
   const participantRows = objects(valuesByTitle.get('meeting_participants'));
-  const meetings = objects(valuesByTitle.get('meetings')).map((row) => ({
-    id: String(row.id), title: String(row.title), kind: normalizeMeetingKind(row.kind),
-    eventId: String(row.event_id || '') || undefined, type: String(row.type) as any, date: String(row.date), time: String(row.time), duration: Number(row.duration_hours || 1), hostId: String(row.host_id),
-    participants: bool(row.participants_all) ? 'all' as const : participantRows.filter((item) => item.meeting_id === row.id && item.kind === 'invited').map((item) => String(item.user_id)),
-    attendeeIds: participantRows.filter((item) => item.meeting_id === row.id && item.kind === 'attending').map((item) => String(item.user_id)),
-    competency: String(row.competency || ''), topic: String(row.topic || ''), description: String(row.description || ''), status: String(row.status) as any,
-    googleCalendarEventId: String(row.google_calendar_event_id || '') || undefined,
-  }));
+  const meetings = objects(valuesByTitle.get('meetings')).map((row) => {
+    const responseRows = participantRows.filter((item) => item.meeting_id === row.id && (item.kind === 'attending' || item.kind === 'declined'));
+    const audienceRows = participantRows.filter((item) => item.meeting_id === row.id && item.kind === 'audience');
+    const rsvpByUser = Object.fromEntries(responseRows.map((item) => [String(item.user_id), item.kind === 'attending' ? 'yes' : 'no']));
+    return {
+      id: String(row.id), title: String(row.title), kind: normalizeMeetingKind(row.kind),
+      eventId: String(row.event_id || '') || undefined, type: String(row.type) as any, date: String(row.date), time: String(row.time), duration: Number(row.duration_hours || 1), hostId: String(row.host_id),
+      participants: bool(row.participants_all) ? 'all' as const : participantRows.filter((item) => item.meeting_id === row.id && item.kind === 'invited').map((item) => String(item.user_id)),
+      audiencePolicy: audienceRows.length ? 'snapshot' as const : undefined,
+      audienceUserIds: audienceRows.length ? audienceRows.map((item) => String(item.user_id)) : undefined,
+      attendeeIds: Object.entries(rsvpByUser).filter(([, response]) => response === 'yes').map(([userId]) => userId),
+      rsvpByUser,
+      competency: String(row.competency || ''), topic: String(row.topic || ''), description: String(row.description || ''), status: String(row.status) as any,
+      googleCalendarEventId: String(row.google_calendar_event_id || '') || undefined,
+    } as Meeting;
+  });
   const assignees = objects(valuesByTitle.get('task_assignees'));
   const comments = objects(valuesByTitle.get('task_comments'));
   const reminders = objects(valuesByTitle.get('task_reminders'));
@@ -360,9 +385,9 @@ export async function importStateFromGoogleSheetsDatabase(config: GoogleSheetsDa
     const taskComments = comments.filter((item) => item.task_id === row.id);
     const assignedTo = assignees.filter((item) => item.task_id === row.id).map((item) => String(item.user_id));
     return {
-      id: String(row.id), eventId: String(row.event_id || ''), facultyId: String(row.faculty_id || ''), title: String(row.title), description: String(row.description || ''), deadline: String(row.deadline || ''),
+      id: String(row.id), version: Math.max(1, Number(row.version) || 1), eventId: String(row.event_id || ''), facultyId: String(row.faculty_id || ''), title: String(row.title), description: String(row.description || ''), deadline: String(row.deadline || ''),
       creatorId: String(row.creator_id || ''), competency: String(row.competency || ''), competencies: parseJson<string[]>(row.competencies_json, String(row.competency || '') ? [String(row.competency)] : []), sow: String(row.sow || ''), status: String(row.status) as Task['status'], priority: String(row.priority) as Task['priority'],
-      createdAt: String(row.created_at || ''), completedAt: String(row.completed_at || ''), cancelledAt: String(row.cancelled_at || '') || undefined, cancelledBy: String(row.cancelled_by || '') || undefined, timeSpentMinutes: numberOrUndefined(row.time_spent_minutes), tips: parseJson<string[]>(row.tips_json, []),
+      createdAt: String(row.created_at || ''), completedAt: String(row.completed_at || ''), assignmentMode: 'shared' as const, completedBy: String(row.completed_by || '') || undefined, cancelledAt: String(row.cancelled_at || '') || undefined, cancelledBy: String(row.cancelled_by || '') || undefined, timeSpentMinutes: numberOrUndefined(row.time_spent_minutes), tips: parseJson<string[]>(row.tips_json, []),
       assignedTo: assignedTo.length ? assignedTo : null,
       assigneeNotes: Object.fromEntries(taskComments.map((item) => [String(item.user_id), { executor: String(item.executor_comment || ''), coordinator: String(item.coordinator_comment || ''), updatedAt: String(item.updated_at || ''), history: parseJson(item.history_json, []) }])),
       completionComments: Object.fromEntries(taskComments.filter((item) => String(item.completion_comment || '')).map((item) => [String(item.user_id), String(item.completion_comment)])),
@@ -395,7 +420,10 @@ export function compareDatabaseStateCounts(left: SimulationState, right: Simulat
     users: state.users.length,
     events: state.events?.length || 0,
     meetings: state.meetings.length,
-    meetingParticipants: state.meetings.reduce((sum, meeting) => sum + (Array.isArray(meeting.participants) ? meeting.participants.length : 0) + (meeting.attendeeIds?.length || 0), 0),
+    meetingParticipants: state.meetings.reduce((sum, meeting) => sum
+      + (Array.isArray(meeting.participants) ? meeting.participants.length : 0)
+      + (meeting.audienceUserIds || []).length
+      + Object.keys(normalizedMeetingRsvps(meeting)).length, 0),
     tasks: state.tasks.length,
     taskAssignees: state.tasks.reduce((sum, task) => sum + (task.assignedTo?.length || 0), 0),
     taskComments: state.tasks.reduce((sum, task) => sum + new Set([...Object.keys(task.assigneeNotes || {}), ...Object.keys(task.completionComments || {})]).size, 0),

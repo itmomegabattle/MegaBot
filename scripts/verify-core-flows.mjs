@@ -20,14 +20,18 @@ const appPort = await new Promise((resolve, reject) => {
   });
 });
 const botToken = 'integration-test-token';
+const telegramWebhookSecret = 'integration-webhook-secret';
+const sessionSecret = 'integration-session-secret-32-characters';
 const telegramCalls = [];
 let nextTelegramMessageId = 1000;
 let sessionCookie = '';
 let failNextTelegramEdit = false;
 let failNextTelegramSend = false;
+let rateLimitNextTelegramSend = false;
 let delayNextTelegramSendMs = 0;
 let groupBotIsAdmin = true;
 let createdEventId = '';
+let serverErrors = '';
 
 const fixture = {
   users: [
@@ -92,12 +96,8 @@ const fixture = {
   messages: {},
 };
 
-function telegramInitData(user) {
-  const params = new URLSearchParams({
-    auth_date: String(Math.floor(Date.now() / 1000)),
-    query_id: `test-${user.id}`,
-    user: JSON.stringify(user),
-  });
+function signedTelegramInitData(entries) {
+  const params = new URLSearchParams(entries);
   const dataCheckString = [...params.entries()]
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([key, value]) => `${key}=${value}`)
@@ -105,6 +105,14 @@ function telegramInitData(user) {
   const secretKey = crypto.createHmac('sha256', 'WebAppData').update(botToken).digest();
   params.set('hash', crypto.createHmac('sha256', secretKey).update(dataCheckString).digest('hex'));
   return params.toString();
+}
+
+function telegramInitData(user, options = {}) {
+  return signedTelegramInitData({
+    auth_date: String(options.authDate ?? Math.floor(Date.now() / 1000)),
+    query_id: `test-${user.id}`,
+    user: JSON.stringify(user),
+  });
 }
 
 function currentWeekStart() {
@@ -116,17 +124,42 @@ function currentWeekStart() {
   return monday.toISOString().slice(0, 10);
 }
 
-async function request(pathname, body) {
+async function request(pathname, body, options = {}) {
+  const webhookSecret = options.telegramWebhookSecret === undefined
+    ? telegramWebhookSecret
+    : options.telegramWebhookSecret;
   const response = await fetch(`http://127.0.0.1:${appPort}${pathname}`, {
     method: body === undefined ? 'GET' : 'POST',
     headers: {
-      ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
-      ...(sessionCookie ? { Cookie: sessionCookie } : {}),
+      ...(body === undefined ? {} : {
+        'Content-Type': 'application/json',
+        Origin: `http://127.0.0.1:${appPort}`,
+      }),
+      ...(pathname === '/api/telegram-webhook' && webhookSecret !== null
+        ? { 'X-Telegram-Bot-Api-Secret-Token': webhookSecret }
+        : {}),
+      ...((options.cookie === undefined ? sessionCookie : options.cookie)
+        ? { Cookie: options.cookie === undefined ? sessionCookie : options.cookie }
+        : {}),
     },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
-  const data = await response.json();
+  const responseText = await response.text();
+  let data;
+  try {
+    data = JSON.parse(responseText);
+  } catch {
+    throw new Error(`${pathname} returned non-JSON ${response.status}: ${responseText.slice(0, 160)}\n${serverErrors.slice(-2000)}`);
+  }
   return { response, data };
+}
+
+async function saveAvailabilityWeek(userId, weekIndex, days = {}, hardUnavailableDays = [], out = false, expectedVersion) {
+  const snapshot = (await request('/api/state')).data;
+  const baseWeekStart = snapshot.settings.availabilityWeekStart || currentWeekStart();
+  const weekStart = new Date(Date.parse(`${baseWeekStart}T12:00:00Z`) + weekIndex * 7 * 86400000).toISOString().slice(0, 10);
+  const version = expectedVersion ?? Number(snapshot.availabilities[userId]?.weekVersions?.[weekStart] || 0);
+  return request('/api/availability', { userId, weekStart, days, hardUnavailableDays, out, expectedVersion: version });
 }
 
 async function waitForServer() {
@@ -166,6 +199,12 @@ const fakeTelegram = http.createServer((req, res) => {
       res.end(JSON.stringify({ ok: false, error_code: 403, description: 'Forbidden: bot was blocked by the user' }));
       return;
     }
+    if (rateLimitNextTelegramSend && req.url.endsWith('/sendMessage')) {
+      rateLimitNextTelegramSend = false;
+      res.writeHead(429, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error_code: 429, description: 'Too Many Requests', parameters: { retry_after: 300 } }));
+      return;
+    }
     if (delayNextTelegramSendMs && req.url.endsWith('/sendMessage')) {
       const delayMs = delayNextTelegramSendMs;
       delayNextTelegramSendMs = 0;
@@ -194,6 +233,8 @@ try {
   const testDatabasePath = path.join(tempRoot, 'database.json');
   await writeFile(testDatabasePath, JSON.stringify(fixture, null, 2), 'utf8');
   const clockPath = path.join(tempRoot, 'clock.txt');
+  const testStartMs = Date.now();
+  await writeFile(clockPath, String(testStartMs));
   const clockPreload = path.join(tempRoot, 'clock.cjs');
   await writeFile(clockPreload, `
     const fs = require('node:fs');
@@ -218,18 +259,23 @@ try {
       TEST_CLOCK_FILE: clockPath,
       TELEGRAM_BOT_TOKEN: botToken,
       TELEGRAM_API_BASE: `http://127.0.0.1:${telegramPort}`,
+      TELEGRAM_DELIVERY_INTERVAL_MS: '0',
+      TELEGRAM_PRIVATE_CHAT_INTERVAL_MS: '0',
       WEBAPP_URL: 'https://dead-tunnel.lhr.life',
-      DISABLE_TELEGRAM_POLLING: 'true',
+      TELEGRAM_UPDATE_MODE: 'webhook',
+      TELEGRAM_INBOX_AWAIT_PROCESSING: 'true',
+      TELEGRAM_WEBHOOK_SECRET: telegramWebhookSecret,
+      SESSION_SECRET: sessionSecret,
       GOOGLE_SHEETS_DATABASE_ENABLED: 'false',
       GOOGLE_SHEETS_SPREADSHEET_ID: '',
       GOOGLE_SERVICE_ACCOUNT_FILE: '',
       GOOGLE_CALENDAR_ID: '',
       ADMIN_USERNAMES: '@admin',
+      ADMIN_TELEGRAM_IDS: '100',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 
-  let serverErrors = '';
   appProcess.stderr.on('data', (chunk) => {
     serverErrors += chunk.toString();
   });
@@ -243,13 +289,115 @@ try {
     && call.body.menu_button?.web_app?.url === 'https://megaorgiabot.ru'
   )));
 
+  const health = await request('/api/health');
+  assert.equal(health.data.telegramUpdateMode, 'webhook');
+
+  const setWebhookCallsBefore = telegramCalls.filter((call) => call.path.endsWith('/setWebhook')).length;
+  const removedSetupRoute = await request('/api/setup-webhook');
+  assert.equal(removedSetupRoute.response.status, 401);
+  assert.equal(telegramCalls.filter((call) => call.path.endsWith('/setWebhook')).length, setWebhookCallsBefore);
+
+  const forgedBindingUpdate = {
+    update_id: 999001,
+    message: {
+      message_id: 999001,
+      chat: { id: -999, type: 'supergroup' },
+      from: { id: 100, username: 'admin', first_name: 'Админ' },
+      text: '/bindteamchat',
+    },
+  };
+  const missingWebhookSecret = await request(
+    '/api/telegram-webhook',
+    forgedBindingUpdate,
+    { telegramWebhookSecret: null },
+  );
+  assert.equal(missingWebhookSecret.response.status, 401);
+  const invalidWebhookSecret = await request(
+    '/api/telegram-webhook',
+    forgedBindingUpdate,
+    { telegramWebhookSecret: 'wrong-secret' },
+  );
+  assert.equal(invalidWebhookSecret.response.status, 403);
+  const stateAfterForgedWebhook = JSON.parse(await readFile(testDatabasePath, 'utf8'));
+  assert.notEqual(stateAfterForgedWebhook.settings?.teamChatId, '-999');
+
   const protectedState = await request('/api/state');
   assert.equal(protectedState.response.status, 401);
+  const legacyPayload = Buffer.from(JSON.stringify({
+    userId: 'u_admin',
+    expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000,
+  })).toString('base64url');
+  const legacySignature = crypto.createHmac('sha256', botToken).update(legacyPayload).digest('base64url');
+  const legacySession = await request('/api/state', undefined, {
+    cookie: `megabot_session=${legacyPayload}.${legacySignature}`,
+  });
+  assert.equal(legacySession.response.status, 401);
 
   const aliceTelegram = { id: 200, username: 'alice', first_name: 'Алиса' };
+  const authNow = Math.floor(testStartMs / 1000);
+  for (const authDate of [authNow - 300, authNow + 30]) {
+    const boundaryAuth = await request('/api/user/get-or-create', {
+      initData: telegramInitData(aliceTelegram, { authDate }),
+    });
+    assert.equal(boundaryAuth.response.status, 200);
+  }
+  for (const authDate of [authNow - 301, authNow + 31, 0, `${authNow}.5`, 'not-a-date']) {
+    const rejectedAuthDate = await request('/api/user/get-or-create', {
+      initData: telegramInitData(aliceTelegram, { authDate }),
+    });
+    assert.equal(rejectedAuthDate.response.status, 403);
+  }
+  const missingAuthDate = await request('/api/user/get-or-create', {
+    initData: signedTelegramInitData({ query_id: 'missing-auth-date', user: JSON.stringify(aliceTelegram) }),
+  });
+  assert.equal(missingAuthDate.response.status, 403);
+
+  const impersonationAttempt = await request('/api/user/get-or-create', {
+    telegramId: '100',
+    username: 'admin',
+    initData: telegramInitData(aliceTelegram),
+  });
+  assert.equal(impersonationAttempt.response.status, 200);
+  assert.equal(impersonationAttempt.data.user.id, 'u_alice');
+  assert.equal(impersonationAttempt.data.user.role, 'organizer');
+
+  const usernameAdminAttempt = await request('/api/user/get-or-create', {
+    initData: telegramInitData({ id: 999, username: 'admin', first_name: 'Не админ' }),
+  });
+  assert.equal(usernameAdminAttempt.response.status, 403);
+
+  const invalidSignatureParams = new URLSearchParams(telegramInitData(aliceTelegram));
+  invalidSignatureParams.set('hash', '0'.repeat(64));
+  const invalidSignature = await request('/api/user/get-or-create', {
+    initData: invalidSignatureParams.toString(),
+  });
+  assert.equal(invalidSignature.response.status, 403);
+
+  const invalidUserType = await request('/api/user/get-or-create', {
+    initData: telegramInitData({ id: '200', username: 'alice' }),
+  });
+  assert.equal(invalidUserType.response.status, 403);
+
+  const malformedUser = await request('/api/user/get-or-create', {
+    initData: signedTelegramInitData({
+      auth_date: String(Math.floor(Date.now() / 1000)),
+      query_id: 'malformed-user',
+      user: '{not-json',
+    }),
+  });
+  assert.equal(malformedUser.response.status, 403);
+
+  const duplicateQueryKey = await request('/api/user/get-or-create', {
+    initData: signedTelegramInitData([
+      ['auth_date', String(Math.floor(Date.now() / 1000))],
+      ['query_id', 'duplicate-a'],
+      ['query_id', 'duplicate-b'],
+      ['user', JSON.stringify(aliceTelegram)],
+    ]),
+  });
+  assert.equal(duplicateQueryKey.response.status, 403);
+
   const aliceAuth = await request('/api/user/get-or-create', {
-    telegramId: '200',
-    username: 'alice',
     initData: telegramInitData(aliceTelegram),
   });
   assert.equal(aliceAuth.response.status, 200);
@@ -257,18 +405,34 @@ try {
   assert.equal(aliceAuth.data.user.realName, 'Алиса Командная');
   assert.equal(aliceAuth.data.user.registered, true);
   assert.equal(aliceAuth.data.user.birthday, '09.11.2000');
-  sessionCookie = aliceAuth.response.headers.get('set-cookie').split(';')[0];
+  const stateAfterAliceAuth = JSON.parse(await readFile(testDatabasePath, 'utf8'));
+  assert.equal(stateAfterAliceAuth.users.filter((user) => user.telegramId === '200').length, 1);
+  assert.equal(stateAfterAliceAuth.users.length, fixture.users.length);
+  const firstAliceSession = aliceAuth.response.headers.get('set-cookie').split(';')[0];
+  const rotatedAliceAuth = await request('/api/user/get-or-create', {
+    initData: telegramInitData(aliceTelegram),
+  });
+  const rotatedAliceSession = rotatedAliceAuth.response.headers.get('set-cookie').split(';')[0];
+  assert.notEqual(rotatedAliceSession, firstAliceSession);
+  assert.equal((await request('/api/state', undefined, { cookie: firstAliceSession })).response.status, 401);
+  assert.equal((await request('/api/state', undefined, { cookie: rotatedAliceSession })).response.status, 200);
+  const logout = await request('/api/auth/logout', {}, { cookie: rotatedAliceSession });
+  assert.equal(logout.response.status, 200);
+  assert.match(logout.response.headers.get('set-cookie'), /Max-Age=0/);
+  const revokedSession = await request('/api/state', undefined, { cookie: rotatedAliceSession });
+  assert.equal(revokedSession.response.status, 401);
+  assert.match(revokedSession.data.error, /Открой Mini App/);
+  const activeAliceAuth = await request('/api/user/get-or-create', {
+    initData: telegramInitData(aliceTelegram),
+  });
+  sessionCookie = activeAliceAuth.response.headers.get('set-cookie').split(';')[0];
 
   const duplicateClaim = await request('/api/user/get-or-create', {
-    telegramId: '201',
-    username: 'alice',
     initData: telegramInitData({ id: 201, username: 'alice' }),
   });
   assert.equal(duplicateClaim.response.status, 403);
 
   const unknownAuth = await request('/api/user/get-or-create', {
-    telegramId: '999',
-    username: 'unknown',
     initData: telegramInitData({ id: 999, username: 'unknown' }),
   });
   assert.equal(unknownAuth.response.status, 403);
@@ -317,8 +481,6 @@ try {
 
   const aliceSessionBeforeAdmin = sessionCookie;
   const adminAuth = await request('/api/user/get-or-create', {
-    telegramId: '100',
-    username: 'admin',
     initData: telegramInitData({ id: 100, username: 'admin', first_name: 'Админ' }),
   });
   assert.equal(adminAuth.response.status, 200);
@@ -915,18 +1077,43 @@ try {
     && call.body.text.includes('нет в списке участников')
   )));
 
-  const availability = await request('/api/availability', {
-    userId: 'u_alice',
-    weekStart: currentWeekStart(),
-    slots: { 0: [18, 19] },
-    hardUnavailableDays: [1, 2, 2, 99, 'bad'],
-    outWeekIndexes: [1, 1, 9, 'bad'],
-  });
+  await saveAvailabilityWeek('u_alice', 0, { 0: [18, 19] }, [1, 2, 2, 99, 'bad']);
+  const availability = await saveAvailabilityWeek('u_alice', 1, {}, [], true);
   assert.equal(availability.response.status, 200);
   assert.deepEqual(availability.data.availability.hardUnavailableDays, [1, 2]);
   assert.deepEqual(availability.data.availability.outWeekIndexes, [1]);
 
+  const availabilityWeekStarts = [currentWeekStart(), new Date(Date.parse(`${currentWeekStart()}T12:00:00Z`) + 7 * 86400000).toISOString().slice(0, 10)];
+  const initialWeekVersions = availability.data.availability.weekVersions;
+  const saveSecondWeek = await saveAvailabilityWeek('u_alice', 1, { 0: [20], 2: [21] }, [4], false, initialWeekVersions[availabilityWeekStarts[1]]);
+  assert.equal(saveSecondWeek.response.status, 200);
+  const saveFirstWeek = await saveAvailabilityWeek('u_alice', 0, { 0: [22] }, [3], false, initialWeekVersions[availabilityWeekStarts[0]]);
+  assert.equal(saveFirstWeek.response.status, 200);
+  assert.deepEqual(saveFirstWeek.data.availability.slots[0], [22]);
+  assert.deepEqual(saveFirstWeek.data.availability.slots[7], [20], 'saving week A must preserve week B from another client');
+  assert.deepEqual(saveFirstWeek.data.availability.slots[9], [21]);
+  const staleSecondWeek = await saveAvailabilityWeek('u_alice', 1, { 0: [17] }, [], false, initialWeekVersions[availabilityWeekStarts[1]]);
+  assert.equal(staleSecondWeek.response.status, 409, 'stale same-week writes must be rejected');
+  await saveAvailabilityWeek('u_alice', 0, { 0: [18, 19] }, [1, 2]);
+  const restoredAvailability = await saveAvailabilityWeek('u_alice', 1, {}, [], true);
+  assert.equal(restoredAvailability.response.status, 200);
+
   telegramCalls.length = 0;
+  const invalidTaskDate = await request('/api/task/create', {
+    title: 'Несуществующая дата',
+    deadline: '32.13.27',
+    assignedTo: [],
+    creatorId: 'u_admin',
+  });
+  assert.equal(invalidTaskDate.response.status, 400);
+  assert.ok(invalidTaskDate.data.fieldErrors.deadline);
+  const invalidTaskShape = await request('/api/task/create', {
+    title: 'x'.repeat(161), deadline: '2030-01-01', assignedTo: 'u_alice',
+    creatorId: 'u_admin', priority: 'urgent', reminders: [{ type: 'sometimes', unit: 'minutes', value: 'NaN' }],
+  });
+  assert.equal(invalidTaskShape.response.status, 400);
+  assert.deepEqual(Object.keys(invalidTaskShape.data.fieldErrors).sort(), ['assignedTo', 'priority', 'reminders', 'title']);
+  assert.equal(telegramCalls.length, 0, 'invalid task payloads must not notify anyone');
   const taskResult = await request('/api/task/create', {
     title: 'Проверка уведомлений',
     description: 'Интеграционный сценарий',
@@ -939,6 +1126,8 @@ try {
   });
   assert.equal(taskResult.response.status, 200);
   assert.deepEqual(taskResult.data.task.assignedTo, ['u_alice', 'u_bob']);
+  assert.equal(taskResult.data.task.assignmentMode, 'shared');
+  assert.equal(taskResult.data.task.completedBy, undefined);
   assert.equal(taskResult.data.task.priority, 'critical');
   assert.deepEqual(taskResult.data.task.competencies, ['Дизайн', 'Продакшн']);
   assert.equal(telegramCalls.filter((call) => call.path.endsWith('/sendMessage')).length, 2);
@@ -964,6 +1153,66 @@ try {
     .filter(Boolean);
   assert.ok(openTaskAppLinks.length > 0);
   assert.ok(openTaskAppLinks.every((url) => new URL(url).searchParams.get('tab') === 'tasks'));
+
+  const sessionBeforeParityChecks = sessionCookie;
+  sessionCookie = adminSessionCookie;
+  const cancelledDuringCompletion = await request('/api/task/create', {
+    title: 'Отмена во время завершения', description: '', deadline: '2030-01-06', assignedTo: ['u_alice'], creatorId: 'u_admin', priority: 'normal',
+  });
+  assert.equal(cancelledDuringCompletion.response.status, 200);
+  for (const update of [
+    { update_id: 10501, callback_query: { id: 'parity-complete-start', from: aliceTelegram, data: `task_complete:${cancelledDuringCompletion.data.task.id}`, message: { message_id: 10501, chat: { id: 200, type: 'private' } } } },
+    { update_id: 10502, message: { message_id: 10502, chat: { id: 200, type: 'private' }, from: aliceTelegram, text: 'Не указывать' } },
+  ]) await request('/api/telegram-webhook', update);
+  const cancelDuringFlow = await request('/api/task/delete', { requesterId: 'u_admin', taskId: cancelledDuringCompletion.data.task.id });
+  assert.equal(cancelDuringFlow.response.status, 200);
+  telegramCalls.length = 0;
+  await request('/api/telegram-webhook', {
+    update_id: 10503,
+    message: { message_id: 10503, chat: { id: 200, type: 'private' }, from: aliceTelegram, text: 'Без комментария' },
+  });
+  let parityState = (await request('/api/state')).data;
+  assert.equal(parityState.tasks.find((task) => task.id === cancelledDuringCompletion.data.task.id).status, 'cancelled');
+  assert.ok(telegramCalls.some((call) => String(call.body.text || '').includes('Задача отменена')));
+  await request('/api/telegram-webhook', {
+    update_id: 10504,
+    callback_query: { id: 'parity-release-stale', from: aliceTelegram, data: `task_release:${cancelledDuringCompletion.data.task.id}`, message: { message_id: 10504, chat: { id: 200, type: 'private' } } },
+  });
+  parityState = (await request('/api/state')).data;
+  assert.equal(parityState.tasks.find((task) => task.id === cancelledDuringCompletion.data.task.id).status, 'cancelled');
+
+  const navigationDuringCompletion = await request('/api/task/create', {
+    title: 'Навигация вместо комментария', description: '', deadline: '2030-01-06', assignedTo: ['u_alice'], creatorId: 'u_admin', priority: 'normal',
+  });
+  for (const update of [
+    { update_id: 10505, callback_query: { id: 'parity-menu-start', from: aliceTelegram, data: `task_complete:${navigationDuringCompletion.data.task.id}`, message: { message_id: 10505, chat: { id: 200, type: 'private' } } } },
+    { update_id: 10506, message: { message_id: 10506, chat: { id: 200, type: 'private' }, from: aliceTelegram, text: 'Не указывать' } },
+    { update_id: 10507, message: { message_id: 10507, chat: { id: 200, type: 'private' }, from: aliceTelegram, text: 'Задачи' } },
+    { update_id: 10508, message: { message_id: 10508, chat: { id: 200, type: 'private' }, from: aliceTelegram, text: 'Без комментария' } },
+  ]) await request('/api/telegram-webhook', update);
+  parityState = (await request('/api/state')).data;
+  assert.equal(parityState.tasks.find((task) => task.id === navigationDuringCompletion.data.task.id).status, 'assigned');
+  const navigationTaskCleanup = await request('/api/task/delete', {
+    taskId: navigationDuringCompletion.data.task.id,
+  });
+  assert.equal(navigationTaskCleanup.response.status, 200);
+
+  const meetingsBeforeInvalidChat = parityState.meetings.length;
+  for (const [updateId, messageText] of [
+    [10509, 'Назначить собрание'], [10510, 'Собрать всю команду'], [10511, 'Ночная встреча'],
+    [10512, 'Пропустить'], [10513, '31.12.2030'], [10514, '03:00'],
+  ]) await request('/api/telegram-webhook', {
+    update_id: updateId,
+    message: { message_id: updateId, chat: { id: 200, type: 'private' }, from: aliceTelegram, text: messageText },
+  });
+  parityState = (await request('/api/state')).data;
+  assert.equal(parityState.meetings.length, meetingsBeforeInvalidChat);
+  assert.ok(telegramCalls.some((call) => String(call.body.text || '').includes('Встреча должна полностью помещаться')));
+  await request('/api/telegram-webhook', {
+    update_id: 10515,
+    message: { message_id: 10515, chat: { id: 200, type: 'private' }, from: aliceTelegram, text: 'Меню' },
+  });
+  sessionCookie = sessionBeforeParityChecks;
 
   telegramCalls.length = 0;
   await request('/api/telegram-webhook', {
@@ -1083,12 +1332,7 @@ try {
   assert.equal(manualReminder.data.queued, 2);
   assert.ok(telegramCalls.filter((call) => call.path.endsWith('/sendMessage')).every((call) => call.body.disable_notification === true));
 
-  const completedCurrentWeekForBroadcast = await request('/api/availability', {
-    userId: 'u_alice',
-    weekStart: currentWeekStart(),
-    slots: { 0: [18], 1: [18], 2: [18], 3: [18], 4: [18] },
-    hardUnavailableDays: [],
-  });
+  const completedCurrentWeekForBroadcast = await saveAvailabilityWeek('u_alice', 0, { 0: [18], 1: [18], 2: [18], 3: [18], 4: [18] });
   assert.equal(completedCurrentWeekForBroadcast.response.status, 200);
 
   const sessionBeforeBroadcast = sessionCookie;
@@ -1117,11 +1361,11 @@ try {
     body: 'Пожалуйста, отметьте слоты на следующую неделю',
   });
   assert.equal(missingNextWeekBroadcast.response.status, 200);
-  assert.equal(missingNextWeekBroadcast.data.recipients, 3);
+  assert.equal(missingNextWeekBroadcast.data.recipients, 2, 'saving the current week must preserve the submitted next week');
   assert.equal(missingNextWeekBroadcast.data.availabilityWeekIndex, 1);
   assert.deepEqual(
     telegramCalls.filter((call) => call.path.endsWith('/sendMessage')).map((call) => String(call.body.chat_id)).sort(),
-    ['100', '200', '300'],
+    ['100', '300'],
   );
 
   telegramCalls.length = 0;
@@ -1195,11 +1439,22 @@ try {
   assert.equal(rejectedBroadcast.response.status, 502);
   assert.equal(rejectedBroadcast.data.delivered, 0);
   assert.equal(rejectedBroadcast.data.failed, 1);
+  const unlinkedAuth = await request('/api/user/get-or-create', {
+    initData: telegramInitData({ id: 555, username: 'unlinked_user', first_name: 'Неподключённый' }),
+  });
+  assert.equal(unlinkedAuth.response.status, 200);
+  const unlinkedSessionCookie = unlinkedAuth.response.headers.get('set-cookie').split(';')[0];
   const removeUnlinkedUser = await request('/api/user/delete', {
     requesterId: 'u_admin',
     userId: unlinkedUser.data.user.id,
   });
   assert.equal(removeUnlinkedUser.response.status, 200);
+  assert.equal(removeUnlinkedUser.data.user.active, false);
+  assert.ok(removeUnlinkedUser.data.user.deactivatedAt);
+  const stateAfterDeactivation = await request('/api/state');
+  assert.equal(stateAfterDeactivation.data.users.find((user) => user.id === unlinkedUser.data.user.id).active, false);
+  const deletedUserSession = await request('/api/state', undefined, { cookie: unlinkedSessionCookie });
+  assert.equal(deletedUserSession.response.status, 401);
   sessionCookie = sessionBeforeBroadcast;
 
   telegramCalls.length = 0;
@@ -1215,6 +1470,7 @@ try {
   const completionTimeMenu = telegramCalls.find((call) => call.path.endsWith('/sendMessage') && call.body.reply_markup?.keyboard);
   assert.equal(completionTimeMenu.body.disable_notification, true);
   assert.ok(completionTimeMenu.body.reply_markup.keyboard.flat().some((button) => button.text === 'Не указывать'));
+  assert.ok(String(completionTimeMenu.body.text || '').includes('завершение закроет её для всех'));
 
   telegramCalls.length = 0;
   await request('/api/telegram-webhook', {
@@ -1242,6 +1498,7 @@ try {
   const afterChatCompletion = JSON.parse(await readFile(testDatabasePath, 'utf8'));
   const completedChatTask = afterChatCompletion.tasks.find((task) => task.id === openTaskResult.data.task.id);
   assert.equal(completedChatTask.timeSpentMinutes, 30);
+  assert.equal(completedChatTask.completedBy, 'u_alice');
   assert.equal(completedChatTask.completionComments.u_alice, 'Заняло дольше из-за согласования макета');
 
   telegramCalls.length = 0;
@@ -1257,13 +1514,15 @@ try {
     topic: 'Проверка',
     description: '',
   });
-  let meetingPersistedBeforeNotification = false;
-  for (let attempt = 0; attempt < 30; attempt += 1) {
-    const stateWhileNotifying = JSON.parse(await readFile(testDatabasePath, 'utf8'));
-    meetingPersistedBeforeNotification = stateWhileNotifying.meetings.some((meeting) => meeting.title === 'Общая встреча');
-    if (meetingPersistedBeforeNotification) break;
+  let notificationStarted = false;
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    notificationStarted = telegramCalls.some((call) => call.path.endsWith('/sendMessage'));
+    if (notificationStarted) break;
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
+  assert.equal(notificationStarted, true, 'meeting notification must start');
+  const stateWhileNotifying = JSON.parse(await readFile(testDatabasePath, 'utf8'));
+  const meetingPersistedBeforeNotification = stateWhileNotifying.meetings.some((meeting) => meeting.title === 'Общая встреча');
   assert.equal(meetingPersistedBeforeNotification, true, 'meeting must be durable before Telegram delivery completes');
   const meetingResult = await meetingRequest;
   assert.equal(meetingResult.response.status, 200);
@@ -1279,6 +1538,23 @@ try {
     participants: 'all',
   });
   assert.equal(invalidMeetingDuration.response.status, 400);
+  const invalidMeetingDate = await request('/api/meeting', {
+    title: 'Несуществующая дата', type: 'general', date: '31.02.27', time: '18:00', duration: 1, hostId: 'u_admin', participants: 'all',
+  });
+  assert.equal(invalidMeetingDate.response.status, 400);
+  assert.ok(invalidMeetingDate.data.fieldErrors.date);
+  const notificationsBeforeInvalidMeetingShapes = telegramCalls.length;
+  const invalidMeetingShape = await request('/api/meeting', {
+    title: 'x'.repeat(161), kind: 'webinar', type: 'everyone', date: '2030-01-02', time: '24:60', duration: 'NaN', hostId: 'u_admin', participants: 'u_alice',
+  });
+  assert.equal(invalidMeetingShape.response.status, 400);
+  assert.deepEqual(Object.keys(invalidMeetingShape.data.fieldErrors).sort(), ['duration', 'kind', 'participants', 'time', 'title', 'type']);
+  const pastMeeting = await request('/api/meeting', {
+    title: 'Событие в прошлом', kind: 'vibe', type: 'general', date: '2020-01-01', time: '12:00', duration: 1, hostId: 'u_admin', participants: 'all',
+  });
+  assert.equal(pastMeeting.response.status, 400);
+  assert.ok(pastMeeting.data.fieldErrors.date);
+  assert.equal(telegramCalls.length, notificationsBeforeInvalidMeetingShapes, 'invalid meeting payloads must not notify anyone');
   const weekendMeeting = await request('/api/meeting', {
     title: 'Встреча в выходной', type: 'general', date: '2030-01-05', time: '18:00', duration: 1, hostId: 'u_admin', participants: 'all',
   });
@@ -1287,13 +1563,13 @@ try {
   assert.ok(!telegramCalls.some((call) => call.body.chat_id === '400'));
   assert.ok(!telegramCalls.some((call) => String(call.body.text || '').includes('Придут:')), 'meeting notifications must not embed the attendee list');
   assert.ok(telegramCalls.some((call) => String(call.body.text || '').includes('Среда, 02.01.30')), 'meeting notifications must include the weekday and date');
-  const meetingRsvpAction = `meeting_rsvp:${meetingResult.data.meeting.id}`;
+  const meetingRsvpAction = `meeting_rsvp:${meetingResult.data.meeting.id}:yes`;
   const isMeetingRsvpNotification = (call) => call.path.endsWith('/sendMessage')
     && call.body.reply_markup?.inline_keyboard?.flat().some((button) => button.callback_data === meetingRsvpAction);
   const hostMeetingNotification = telegramCalls.find((call) => isMeetingRsvpNotification(call) && String(call.body.chat_id) === '100');
   const aliceMeetingNotification = telegramCalls.find((call) => isMeetingRsvpNotification(call) && String(call.body.chat_id) === '200');
-  assert.equal(hostMeetingNotification.body.reply_markup.inline_keyboard[0][0].text, '✅ Я приду');
-  assert.equal(aliceMeetingNotification.body.reply_markup.inline_keyboard[0][0].text, '❌ Я не приду');
+  assert.match(hostMeetingNotification.body.reply_markup.inline_keyboard[0][0].text, /Приду/);
+  assert.match(aliceMeetingNotification.body.reply_markup.inline_keyboard[0][0].text, /Приду/);
 
   telegramCalls.length = 0;
   await request('/api/telegram-webhook', {
@@ -1316,17 +1592,16 @@ try {
   });
   const rsvpMarkupUpdate = telegramCalls.find((call) => call.path.endsWith('/editMessageReplyMarkup'));
   assert.ok(rsvpMarkupUpdate, 'meeting RSVP must update the pressed button');
-  assert.equal(rsvpMarkupUpdate.body.reply_markup.inline_keyboard[0][0].text, '❌ Я не приду');
-  assert.equal(rsvpMarkupUpdate.body.reply_markup.inline_keyboard[1][0].web_app.url, 'https://example.com');
+  assert.match(rsvpMarkupUpdate.body.reply_markup.inline_keyboard[0][0].text, /выбрано/);
   assert.ok(telegramCalls.some((call) => call.path.endsWith('/answerCallbackQuery') && String(call.body.text || '').length > 0));
 
   telegramCalls.length = 0;
   await request('/api/telegram-webhook', {
-    update_id: 111,
+    update_id: 159801,
     callback_query: {
       id: 'meeting-rsvp-cancel-callback',
       from: { id: 100, username: 'admin', first_name: 'Администратор' },
-      data: meetingRsvpAction,
+      data: `meeting_rsvp:${meetingResult.data.meeting.id}:unanswered`,
       message: {
         message_id: 777,
         chat: { id: 100, type: 'private' },
@@ -1340,24 +1615,25 @@ try {
     },
   });
   const rsvpCancelMarkupUpdate = telegramCalls.find((call) => call.path.endsWith('/editMessageReplyMarkup'));
-  assert.ok(rsvpCancelMarkupUpdate, 'second meeting RSVP press must cancel attendance');
-  assert.equal(rsvpCancelMarkupUpdate.body.reply_markup.inline_keyboard[0][0].text, '✅ Я приду');
+  assert.ok(rsvpCancelMarkupUpdate, 'meeting RSVP reset must update attendance');
+  assert.doesNotMatch(rsvpCancelMarkupUpdate.body.reply_markup.inline_keyboard[0][0].text, /выбрано/);
 
   telegramCalls.length = 0;
   const declineMeeting = await request('/api/meeting/rsvp', {
     requesterId: 'u_alice',
     meetingId: meetingResult.data.meeting.id,
-    attending: false,
+    response: 'no',
   });
   assert.equal(declineMeeting.response.status, 200);
-  assert.equal(declineMeeting.data.attending, false);
+  assert.equal(declineMeeting.data.response, 'no');
+  assert.equal(declineMeeting.data.meeting.rsvpByUser.u_alice, 'no');
   const attendMeeting = await request('/api/meeting/rsvp', {
     requesterId: 'u_alice',
     meetingId: meetingResult.data.meeting.id,
-    attending: true,
+    response: 'yes',
   });
   assert.equal(attendMeeting.response.status, 200);
-  assert.equal(attendMeeting.data.attending, true);
+  assert.equal(attendMeeting.data.response, 'yes');
   assert.ok(attendMeeting.data.meeting.attendeeIds.includes('u_alice'));
   assert.equal(telegramCalls.filter((call) => call.path.endsWith('/sendMessage')).length, 0, 'RSVP changes must not notify the meeting host');
 
@@ -1389,27 +1665,45 @@ try {
   assert.ok(telegramCalls.some((call) => String(call.body.text || '').includes('Среда, 02.01.30')));
 
   telegramCalls.length = 0;
+  const taskCompletionSession = sessionCookie;
+  sessionCookie = adminSessionCookie;
   const completed = await request('/api/task/status', {
-    requesterId: 'u_alice',
+    requesterId: 'u_admin',
     taskId: taskResult.data.task.id,
     status: 'completed',
     timeSpentMinutes: 95,
   });
   assert.equal(completed.response.status, 200);
   assert.equal(completed.data.task.timeSpentMinutes, 95);
-  assert.equal(telegramCalls.filter((call) => call.path.endsWith('/sendMessage')).length, 0);
+  assert.equal(completed.data.task.completedBy, 'u_admin');
+  const completionNotification = telegramCalls.find((call) => call.path.endsWith('/sendMessage'));
+  assert.ok(String(completionNotification?.body.text || '').includes('Завершил: Администратор'));
+  assert.ok(!String(completionNotification?.body.text || '').includes('Борис Командный'));
+  sessionCookie = taskCompletionSession;
   const reopened = await request('/api/task/status', {
     requesterId: 'u_alice', taskId: taskResult.data.task.id, status: 'in_progress',
   });
   assert.equal(reopened.response.status, 200);
   assert.equal(reopened.data.task.status, 'in_progress');
   assert.equal(reopened.data.task.timeSpentMinutes, undefined);
+  assert.equal(reopened.data.task.completedBy, undefined);
   const correctedCompletion = await request('/api/task/status', {
     requesterId: 'u_alice', taskId: taskResult.data.task.id, status: 'completed', timeSpentMinutes: 80, completionComment: 'Исправленный комментарий',
   });
   assert.equal(correctedCompletion.response.status, 200);
   assert.equal(correctedCompletion.data.task.timeSpentMinutes, 80);
+  assert.equal(correctedCompletion.data.task.completedBy, 'u_alice');
   assert.equal(correctedCompletion.data.task.completionComments.u_alice, 'Исправленный комментарий');
+  telegramCalls.length = 0;
+  sessionCookie = adminSessionCookie;
+  const editedCompletion = await request('/api/task/status', {
+    requesterId: 'u_admin', taskId: taskResult.data.task.id, status: 'completed', timeSpentMinutes: 80,
+  });
+  assert.equal(editedCompletion.response.status, 200);
+  assert.equal(editedCompletion.data.task.completedBy, 'u_alice');
+  assert.equal(editedCompletion.data.alreadyApplied, true);
+  assert.equal(telegramCalls.some((call) => call.path.endsWith('/sendMessage')), false, 'unchanged completion retry must not notify twice');
+  sessionCookie = taskCompletionSession;
   const commentAfterCompletion = await request('/api/task/comment', {
     requesterId: 'u_alice', taskId: taskResult.data.task.id, assigneeId: 'u_alice', side: 'executor', text: 'Поздний комментарий',
   });
@@ -1424,8 +1718,6 @@ try {
 
   const aliceSessionCookie = sessionCookie;
   const facultyAuth = await request('/api/user/get-or-create', {
-    telegramId: '400',
-    username: 'faculty',
     initData: telegramInitData({ id: 400, username: 'faculty' }),
   });
   assert.equal(facultyAuth.response.status, 200);
@@ -1542,8 +1834,29 @@ try {
     call.path.endsWith('/sendMessage')
     && call.body.chat_id === '-100500'
     && call.body.message_thread_id === 321
-  )).length, 2, 'a failed IMPORTANT topic notification must be retried before personal notifications');
+  )).length, 1, 'a terminal 403 must not be retried blindly');
+  const failedImportantDeliveries = await request('/api/notification-deliveries?status=failed', undefined, { cookie: adminSessionCookie });
+  assert.equal(failedImportantDeliveries.response.status, 200);
+  assert.ok(failedImportantDeliveries.data.deliveries.some((delivery) => (
+    delivery.category === 'important' && delivery.lastErrorCode === '403'
+  )));
+  const failedImportantDelivery = failedImportantDeliveries.data.deliveries.find((delivery) => delivery.category === 'important');
+  const retriedImportantDelivery = await request('/api/notification-deliveries/retry', {
+    requesterId: 'u_admin', ids: [failedImportantDelivery.id],
+  }, { cookie: adminSessionCookie });
+  assert.equal(retriedImportantDelivery.response.status, 200);
+  assert.equal(retriedImportantDelivery.data.retried, 1);
+  const recoveredDeliveries = await request('/api/notification-deliveries', undefined, { cookie: adminSessionCookie });
+  assert.ok(recoveredDeliveries.data.deliveries.some((delivery) => delivery.id === failedImportantDelivery.id && delivery.status === 'sent'));
   assert.ok(!String(importantTopicNotification.body.text || '').includes('Придут:'));
+
+  rateLimitNextTelegramSend = true;
+  const rateLimitedTaskReminder = await request('/api/task/notify', {
+    requesterId: 'u_admin', taskId: openTaskResult.data.task.id,
+  }, { cookie: adminSessionCookie });
+  assert.equal(rateLimitedTaskReminder.response.status, 200);
+  const retryDeliveries = await request('/api/notification-deliveries?status=retry', undefined, { cookie: adminSessionCookie });
+  assert.ok(retryDeliveries.data.deliveries.some((delivery) => delivery.lastErrorCode === '429'));
 
   telegramCalls.length = 0;
   const setupMeeting = await request('/api/meeting', {
@@ -1616,12 +1929,7 @@ try {
   assert.ok(telegramCalls.some((call) => String(call.body.text || '').includes('Вайбик отменён.')));
   sessionCookie = beforeVibeSession;
 
-  const oneDayAvailability = await request('/api/availability', {
-    userId: 'u_alice',
-    weekStart: currentWeekStart(),
-    slots: { 2: [18] },
-    hardUnavailableDays: [],
-  });
+  const oneDayAvailability = await saveAvailabilityWeek('u_alice', 0, { 2: [18] });
   assert.equal(oneDayAvailability.response.status, 200);
 
   const sessionBeforeSuggestionSetup = sessionCookie;
@@ -1633,28 +1941,15 @@ try {
     role: 'organizer',
   });
   assert.equal(unmarkedSuggestionUser.response.status, 200);
-  const unavailableAdmin = await request('/api/availability', {
-    userId: 'u_admin',
-    weekStart: currentWeekStart(),
-    slots: {},
-    hardUnavailableDays: [2],
-  });
+  const unavailableAdmin = await saveAvailabilityWeek('u_admin', 0, {}, [2]);
   assert.equal(unavailableAdmin.response.status, 200);
   const bobAuth = await request('/api/user/get-or-create', {
-    telegramId: '300',
-    username: 'bob',
     initData: telegramInitData({ id: 300, username: 'bob', first_name: 'Борис' }),
   });
   assert.equal(bobAuth.response.status, 200);
   const bobSessionCookie = bobAuth.response.headers.get('set-cookie').split(';')[0];
   sessionCookie = bobSessionCookie;
-  const outBob = await request('/api/availability', {
-    userId: 'u_bob',
-    weekStart: currentWeekStart(),
-    slots: {},
-    hardUnavailableDays: [],
-    outWeekIndexes: [0],
-  });
+  const outBob = await saveAvailabilityWeek('u_bob', 0, {}, [], true);
   assert.equal(outBob.response.status, 200);
   sessionCookie = sessionBeforeSuggestionSetup;
   const filteredSuggestions = await request('/api/meeting/suggest', {
@@ -1674,9 +1969,7 @@ try {
   const invalidSuggestionDays = await request('/api/meeting/suggest', { days: [], duration: 1 });
   assert.equal(invalidSuggestionDays.response.status, 400);
   sessionCookie = bobSessionCookie;
-  const restoreBobAvailability = await request('/api/availability', {
-    userId: 'u_bob', weekStart: currentWeekStart(), slots: {}, hardUnavailableDays: [], outWeekIndexes: [],
-  });
+  const restoreBobAvailability = await saveAvailabilityWeek('u_bob', 0);
   assert.equal(restoreBobAvailability.response.status, 200);
   sessionCookie = adminSessionCookie;
   const removeSuggestionUser = await request('/api/user/delete', {
@@ -1703,12 +1996,7 @@ try {
   assert.ok(String(missingSlotsMessage.body.text || '').includes('@alice'));
   assert.ok(String(missingSlotsMessage.body.text || '').includes('@admin'));
 
-  const completedAvailability = await request('/api/availability', {
-    userId: 'u_alice',
-    weekStart: currentWeekStart(),
-    slots: { 2: [18] },
-    hardUnavailableDays: [0, 1, 2, 3, 4],
-  });
+  const completedAvailability = await saveAvailabilityWeek('u_alice', 0, { 2: [18] }, [0, 1, 2, 3, 4]);
   assert.equal(completedAvailability.response.status, 200);
   assert.deepEqual(completedAvailability.data.availability.hardUnavailableDays, [0, 1, 3, 4]);
 
@@ -1918,13 +2206,32 @@ try {
   assert.ok(telegramCalls.some((call) => call.path.endsWith('/editMessageText')));
 
   const activeSessionCookie = sessionCookie;
-  const forbiddenWeekMetadata = await request('/api/availability/week-name', {
-    requesterId: 'u_alice',
-    weekIndex: 0,
-    name: 'Чужое название',
-    description: 'Участник не должен менять общие данные недели',
-  });
-  assert.equal(forbiddenWeekMetadata.response.status, 403);
+  sessionCookie = aliceSessionBeforeAdmin;
+  const adminOnlySpoofCases = [
+    ['/api/integrations/google-sheets/mapping?requesterId=u_admin', undefined],
+    ['/api/integrations/google-sheets/template', { requesterId: 'u_admin' }],
+    ['/api/user/add', { requesterId: 'u_admin', realName: 'Подмена администратора', username: '@spoofed_admin' }],
+    ['/api/user/delete', { requesterId: 'u_admin', userId: 'u_bob' }],
+    ['/api/user/update', { requesterId: 'u_admin', userId: 'u_bob', realName: 'Подмена администратора' }],
+    ['/api/competency/add', { requesterId: 'u_admin', name: 'Подмена' }],
+    ['/api/competency/delete', { requesterId: 'u_admin', name: 'Дизайн' }],
+    ['/api/faculty/competency/add', { requesterId: 'u_admin', name: 'Подмена' }],
+    ['/api/faculty/competency/delete', { requesterId: 'u_admin', name: 'Дизайн' }],
+    ['/api/faculty/user/add', { requesterId: 'u_admin', realName: 'Подмена', username: '@faculty_spoof' }],
+    ['/api/faculty/user/update', { requesterId: 'u_admin', userId: 'u_faculty', realName: 'Подмена' }],
+    ['/api/faculty/user/delete', { requesterId: 'u_admin', userId: 'u_faculty' }],
+    ['/api/availability/weeks', { requesterId: 'u_admin', weeks: 3 }],
+    ['/api/availability/week-name', {
+      requesterId: 'u_admin', weekIndex: 0, weekStart: currentWeekStart(), name: 'Чужое название',
+    }],
+    ['/api/event/create', { requesterId: 'u_admin', name: 'Подмена' }],
+    ['/api/event/update', { requesterId: 'u_admin', eventId: 'event_missing', name: 'Подмена' }],
+    ['/api/task/log/clear', { requesterId: 'u_admin' }],
+  ];
+  for (const [pathname, body] of adminOnlySpoofCases) {
+    const forbidden = await request(pathname, body);
+    assert.equal(forbidden.response.status, 403, `${pathname} must reject a spoofed admin actor`);
+  }
 
   sessionCookie = adminSessionCookie;
   const weekMetadata = await request('/api/availability/week-name', {
@@ -1959,7 +2266,11 @@ try {
   assert.equal(sharedWeekMetadata.data.settings.availabilityWeekMetadata[currentWeekStart()].description, 'Закрываем последние задачи перед мероприятием.');
 
   const database = JSON.parse(await readFile(testDatabasePath, 'utf8'));
-  assert.equal(database.users.length, fixture.users.length);
+  assert.equal(database.users.length, fixture.users.length + 2, 'deactivated profiles must remain for historical references');
+  assert.deepEqual(
+    database.users.filter((user) => user.active === false).map((user) => user.username).sort(),
+    ['@not_marked_suggestion', '@unlinked_user'],
+  );
   assert.equal(database.users.find((user) => user.id === 'u_alice').telegramId, '200');
   assert.equal(database.users.some((user) => user.telegramId === '999'), false);
   assert.equal(database.settings.teamChatId, '-100500');
@@ -1992,9 +2303,9 @@ try {
     });
     assert.equal(renamed.response.status, 200);
   }
-  const rolloverSave = await request('/api/availability', {
-    userId: 'u_admin', weekStart: oldWeekStart, slots: { 0: [18], 7: [19], 14: [20] }, hardUnavailableDays: [2, 9, 16], outWeekIndexes: [],
-  });
+  await saveAvailabilityWeek('u_admin', 0, { 0: [18] }, [2]);
+  await saveAvailabilityWeek('u_admin', 1, { 0: [19] }, [2]);
+  const rolloverSave = await saveAvailabilityWeek('u_admin', 2, { 0: [20] }, [2]);
   assert.equal(rolloverSave.response.status, 200);
   await writeFile(clockPath, String(Date.parse(`${weekAt(1)}T00:00:00+03:00`)));
   const rolled = (await request('/api/state')).data;
@@ -2005,7 +2316,7 @@ try {
   assert.deepEqual(rolled.availabilities.u_admin.hardUnavailableDays, [2, 9]);
   assert.equal(rolled.availabilities.u_admin.weekStart, weekAt(1));
   for (const staleWeekStart of [oldWeekStart, '', 'invalid', weekAt(2)]) {
-    const rejected = await request('/api/availability', { userId: 'u_admin', weekStart: staleWeekStart, slots: { 0: [21] } });
+    const rejected = await request('/api/availability', { userId: 'u_admin', weekStart: staleWeekStart, days: { 0: [21] }, hardUnavailableDays: [], out: false, expectedVersion: 0 });
     assert.equal(rejected.response.status, 409);
   }
   const rejectedName = await request('/api/availability/week-name', {
@@ -2016,7 +2327,30 @@ try {
   const persistedRollover = JSON.parse(await readFile(testDatabasePath, 'utf8'));
   assert.deepEqual(persistedRollover.availabilities.u_admin, rolled.availabilities.u_admin);
 
-  console.log('Core flow verification passed: chat buttons, resilient slot editing, registration, access binding, task notifications, meeting notifications, and task completion.');
+  const legacyClear = await request('/api/task/log/clear', { requesterId: 'u_admin' });
+  assert.equal(legacyClear.response.status, 410, 'legacy full-log deletion must stay disabled');
+  const archivePreview = await request('/api/task/archive/preview', { requesterId: 'u_admin' });
+  assert.equal(archivePreview.response.status, 200);
+  const stateBeforeArchiveClear = (await request('/api/state')).data;
+  const activeTaskIds = stateBeforeArchiveClear.tasks.filter((task) => !['completed', 'cancelled'].includes(task.status)).map((task) => task.id).sort();
+  assert.deepEqual(archivePreview.data.taskIds, stateBeforeArchiveClear.tasks.filter((task) => ['completed', 'cancelled'].includes(task.status)).map((task) => task.id).sort());
+  const staleArchiveClear = await request('/api/task/archive/clear', { requesterId: 'u_admin', taskIds: ['stale-id'] });
+  assert.equal(staleArchiveClear.response.status, 409);
+  const archiveClear = await request('/api/task/archive/clear', { requesterId: 'u_admin', taskIds: archivePreview.data.taskIds });
+  assert.equal(archiveClear.response.status, 200);
+  assert.ok(archiveClear.data.backupId);
+  assert.deepEqual((await request('/api/state')).data.tasks.map((task) => task.id).sort(), activeTaskIds, 'archive clear must preserve all active tasks');
+
+  const seasonPreview = await request('/api/task/season-reset/preview', { requesterId: 'u_admin' });
+  assert.equal(seasonPreview.response.status, 200);
+  const rejectedSeasonReset = await request('/api/task/season-reset', { requesterId: 'u_admin', taskIds: seasonPreview.data.taskIds, confirmation: 'да' });
+  assert.equal(rejectedSeasonReset.response.status, 400);
+  const seasonReset = await request('/api/task/season-reset', { requesterId: 'u_admin', taskIds: seasonPreview.data.taskIds, confirmation: 'СБРОСИТЬ СЕЗОН' });
+  assert.equal(seasonReset.response.status, 200);
+  assert.ok(seasonReset.data.backupId);
+  assert.equal((await request('/api/state')).data.tasks.length, 0);
+
+  console.log('Core flow verification passed: chat buttons, resilient slot editing, registration, access binding, task notifications, meeting RSVP, archive cleanup, season reset, and task completion.');
 } finally {
   if (appProcess && !appProcess.killed) appProcess.kill();
   await new Promise((resolve) => fakeTelegram.close(resolve));

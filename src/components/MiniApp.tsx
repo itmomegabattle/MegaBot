@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import {
   CalendarDots,
   UsersThree,
@@ -28,8 +28,22 @@ import {
 } from '@phosphor-icons/react';
 import { Meeting, MeetingKind, SimulationState, Task, User, WorkEvent } from '../types';
 import { alignAvailabilityToWeek, currentAvailabilityWeekStart, normalizeAvailabilityConfig } from '../availabilityConfig';
+import { mergeAvailabilityDraft } from '../availabilityWeekMutation';
 import { meetingKindText, normalizeMeetingKind } from '../meetingKind';
+import { meetingEndTimestamp, meetingPhase, meetingStartTimestamp } from '../meetingLifecycle';
+import { meetingRsvpFor, normalizedMeetingRsvps } from '../meetingRsvp';
+import { readFormDraft, readLatestFormDraft, removeFormDraft, writeFormDraft } from '../formDrafts';
 import { drawAvatarCrop } from '../avatarCrop';
+import { projectDateDeadlineInstant } from '../projectTime';
+import { idempotentPost } from '../idempotentRequest';
+import {
+  TASK_EVENT_SCOPE_ALL,
+  TASK_EVENT_SCOPE_ARCHIVED,
+  TASK_EVENT_SCOPE_NONE,
+  filterTasksByEventScope,
+  newTaskEventIdForScope,
+} from '../taskEventScope';
+import { Badge, Button, DialogSheet, Field, InlineNotice, SegmentedControl as Segmented } from './ui';
 
 /*
 THESIS: MegaBattle is a compact operations surface, not a generic blue card dashboard.
@@ -45,7 +59,7 @@ interface MiniAppProps {
   currentUser: User;
   activeTab: string;
   setActiveTab: (tab: string) => void;
-  onSaveAvailability: (slots: Record<number, number[]>, weekStart: string, hardUnavailableDays?: number[], outWeekIndexes?: number[]) => Promise<boolean>;
+  onSaveAvailability: (weekStart: string, days: Record<number, number[]>, hardUnavailableDays: number[], out: boolean, expectedVersion: number) => Promise<boolean>;
   onScheduleMeeting: (meetingData: any) => Promise<boolean>;
   onCreateTask: (taskData: any) => Promise<boolean>;
   onClaimTask: (taskId: string) => Promise<boolean>;
@@ -104,9 +118,19 @@ const taskAssigneeIds = (task: Task) => {
   return task.assignedTo || [];
 };
 const taskCompetencyNames = (task: Task) => task.competencies?.length ? task.competencies : task.competency ? [task.competency] : [];
-const workEventStatusClass = (status: WorkEvent['status']) => status === 'active'
-  ? 'bg-emerald-50 text-emerald-700'
-  : 'bg-slate-100 text-slate-500';
+const meetingDraftFingerprint = (meeting?: Meeting) => meeting ? JSON.stringify({
+  title: meeting.title,
+  kind: normalizeMeetingKind(meeting.kind),
+  eventId: meeting.eventId || '',
+  type: meeting.type,
+  date: formatDateShort(meeting.date),
+  time: meeting.time,
+  duration: String(meeting.duration || 1),
+  topic: meeting.topic || '',
+  description: meeting.description || '',
+  competency: meeting.competency || '',
+  participants: meeting.participants === 'all' ? 'all' : [...meeting.participants].sort(),
+}) : '';
 const meetingAudienceOptionClass = (selected: boolean) => selected
   ? 'border-[#0069E0] bg-blue-50 text-[#005BC4]'
   : 'border-slate-200 bg-white text-slate-700 hover:border-blue-200 hover:text-[#005BC4]';
@@ -131,10 +155,89 @@ const shortDateToInputDate = (value?: string) => {
 };
 
 const deadlineTimestamp = (value?: string) => {
-  const normalized = shortDateToInputDate(value);
-  if (!normalized) return null;
-  const timestamp = new Date(`${normalized}T23:59:59`).getTime();
-  return Number.isNaN(timestamp) ? null : timestamp;
+  return projectDateDeadlineInstant(value)?.getTime() ?? null;
+};
+
+type TaskFormDraft = {
+  editingTaskId: string | null;
+  baseline: string;
+  baseVersion: number | null;
+  title: string;
+  description: string;
+  competencies: string[];
+  deadline: string;
+  assignedTo: string[];
+  assignmentMode: 'blocks' | 'people' | 'open';
+  sow: string;
+  priority: Task['priority'];
+  reminders: any[];
+  eventId: string;
+};
+
+type MeetingFormDraft = {
+  editingMeetingId: string | null;
+  baseline: string;
+  baseFingerprint: string;
+  kind: MeetingKind;
+  eventId: string;
+  title: string;
+  date: string;
+  time: string;
+  duration: string;
+  topic: string;
+  description: string;
+  type: 'general' | 'custom' | 'competency';
+  competency: string;
+  participants: string[];
+};
+
+type BroadcastFormDraft = {
+  mode: 'all' | 'blocks' | 'people' | 'missing_slots';
+  weekIndex: number;
+  title: string;
+  body: string;
+  blocks: string[];
+  recipients: string[];
+};
+
+type DeliveryIssue = {
+  id: string;
+  category: string;
+  recipientName?: string;
+  status: 'failed' | 'unknown';
+  attempts: number;
+  updatedAt: string;
+  lastErrorCode?: string;
+  lastErrorMessage?: string;
+  textPreview: string;
+};
+
+type OperationalDiagnostics = {
+  generatedAt: string;
+  requestId?: string;
+  status: 'healthy' | 'degraded' | 'unavailable';
+  warnings: string[];
+  service: { revision: string; uptimeSeconds: number; updateMode: string; timeZone: string };
+  persistence: {
+    status: 'healthy' | 'degraded' | 'unavailable'; mode: string; durableRevision: number;
+    replicatedRevision: number; pendingReplication: boolean; lastSuccessAt?: string; lastErrorAt?: string;
+    lastError?: string; lastReplicationSuccessAt?: string; lastReplicationErrorAt?: string; lastReplicationError?: string;
+  };
+  queues: {
+    notificationDelivery: { total: number; pending: number; attention: number; oldestPendingAgeSeconds: number };
+    telegramInbox: { total: number; pending: number; failed: number; oldestPendingAgeSeconds: number };
+    calendar: { pending: number };
+    availabilitySheets: { pending: number };
+  };
+  integrations: Record<string, { configured: boolean; lastSuccessAt?: string; lastErrorAt?: string; lastError?: string }>;
+  workers: Record<string, string>;
+};
+
+type SlotsFormDraft = {
+  slots: Record<number, number[]>;
+  hardUnavailableDays: number[];
+  outWeekIndexes: number[];
+  dirtyWeekBaselines: Record<string, number>;
 };
 
 const inputDateToShortDate = (value: string, withYear = true, fullYear = false) => {
@@ -187,6 +290,13 @@ const taskDurationText = (minutes?: number) => {
 
 const currentWeekStart = currentAvailabilityWeekStart;
 const toIsoDate = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+const formatDiagnosticTime = (value?: string) => {
+  if (!value) return 'ещё нет данных';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat('ru-RU', {
+    timeZone: 'Europe/Moscow', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit',
+  }).format(date);
+};
 
 const dateForWeekDay = (absoluteDayIndex: number, weekStart: string) => {
   const [year, month, day] = weekStart.split('-').map(Number);
@@ -222,23 +332,6 @@ const hasSubmittedAvailabilityWeek = (
   return activeDays.every((dayOffset) => (
     (slots[firstDay + dayOffset] || []).length > 0 || unavailableDays.has(firstDay + dayOffset)
   ));
-};
-
-const meetingDateTime = (meeting: Pick<Meeting, 'date' | 'time'>) => {
-  const normalized = formatDateShort(meeting.date);
-  const dateMatch = normalized.match(/^(\d{2})\.(\d{2})(?:\.(\d{2}|\d{4}))?$/);
-  const timeMatch = String(meeting.time || '').match(/^(\d{1,2}):(\d{2})$/);
-  if (!dateMatch) return Number.POSITIVE_INFINITY;
-  const year = dateMatch[3]
-    ? Number(dateMatch[3].length === 4 ? dateMatch[3] : `20${dateMatch[3]}`)
-    : new Date().getFullYear();
-  return new Date(
-    year,
-    Number(dateMatch[2]) - 1,
-    Number(dateMatch[1]),
-    Number(timeMatch?.[1] || 0),
-    Number(timeMatch?.[2] || 0),
-  ).getTime();
 };
 
 export default function MiniApp({
@@ -277,12 +370,14 @@ export default function MiniApp({
   const [savingWeekInfoIndex, setSavingWeekInfoIndex] = useState<number | null>(null);
   const [suggestionError, setSuggestionError] = useState('');
   const [savingWeekIndex, setSavingWeekIndex] = useState<number | null>(null);
-  const [savedWeekIndexes, setSavedWeekIndexes] = useState<number[]>([]);
-  const [dirtyWeekIndexes, setDirtyWeekIndexes] = useState<number[]>([]);
+  const [dirtyWeekBaselines, setDirtyWeekBaselines] = useState<Record<string, number>>({});
   const [slotError, setSlotError] = useState('');
   const [slotNotice, setSlotNotice] = useState('');
   const [taskError, setTaskError] = useState('');
   const [taskNotice, setTaskNotice] = useState('');
+  const [taskDraftNotice, setTaskDraftNotice] = useState('');
+  const [taskDraftBaseline, setTaskDraftBaseline] = useState('');
+  const [taskDraftBaseVersion, setTaskDraftBaseVersion] = useState<number | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [refreshNotice, setRefreshNotice] = useState('');
 
@@ -298,13 +393,19 @@ export default function MiniApp({
   const [meetingDuration, setMeetingDuration] = useState('1');
   const [meetingTopic, setMeetingTopic] = useState('');
   const [meetingDescription, setMeetingDescription] = useState('');
+  const [showMeetingExtras, setShowMeetingExtras] = useState(false);
   const [meetingType, setMeetingType] = useState<'general' | 'custom' | 'competency'>('general');
   const [meetingCompetency, setMeetingCompetency] = useState('');
   const [participants, setParticipants] = useState<string[]>([]);
   const [editingMeetingId, setEditingMeetingId] = useState<string | null>(null);
   const [meetingError, setMeetingError] = useState('');
+  const [meetingDraftNotice, setMeetingDraftNotice] = useState('');
+  const [meetingDraftBaseline, setMeetingDraftBaseline] = useState('');
+  const [meetingDraftBaseFingerprint, setMeetingDraftBaseFingerprint] = useState('');
   const [rsvpMeetingId, setRsvpMeetingId] = useState<string | null>(null);
   const meetingFormRef = useRef<HTMLFormElement | null>(null);
+  const restoredDraftUserRef = useRef('');
+  const restoredSlotsDraftKeyRef = useRef('');
 
   const [showTaskForm, setShowTaskForm] = useState(false);
   const [savingTask, setSavingTask] = useState(false);
@@ -320,20 +421,22 @@ export default function MiniApp({
   const [taskSow, setTaskSow] = useState('');
   const [taskPriority, setTaskPriority] = useState<Task['priority']>('normal');
   const [taskReminders, setTaskReminders] = useState<any[]>([]);
+  const [taskEventId, setTaskEventId] = useState('');
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
   const [completingTaskId, setCompletingTaskId] = useState<string | null>(null);
   const [completionHours, setCompletionHours] = useState('');
   const [completionMinutes, setCompletionMinutes] = useState('');
   const [completionComment, setCompletionComment] = useState('');
+  const [completionBaseline, setCompletionBaseline] = useState('');
   const [savingCompletion, setSavingCompletion] = useState(false);
-  const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
-  const [showCompletedTasks, setShowCompletedTasks] = useState(false);
+  const [taskListView, setTaskListView] = useState<'mine' | 'open' | 'assigned' | 'completed'>('mine');
   const [showTaskLog, setShowTaskLog] = useState(false);
   const [showFullCalendar, setShowFullCalendar] = useState(false);
   const [expandedAvailabilityDay, setExpandedAvailabilityDay] = useState<number | null>(null);
   const [expandedAvailabilityGroup, setExpandedAvailabilityGroup] = useState<'available' | 'missing' | 'unavailable' | null>(null);
   const [showAllMeetingParticipants, setShowAllMeetingParticipants] = useState(false);
   const [showAllMeetings, setShowAllMeetings] = useState(false);
+  const [showMeetingHistory, setShowMeetingHistory] = useState(false);
   const [darkTheme, setDarkTheme] = useState(() => {
     const savedTheme = window.localStorage.getItem('megabattle-theme');
     if (savedTheme) return savedTheme === 'dark';
@@ -341,6 +444,9 @@ export default function MiniApp({
     if (telegramTheme) return telegramTheme === 'dark';
     return window.matchMedia('(prefers-color-scheme: dark)').matches;
   });
+  const [calmBackground, setCalmBackground] = useState(() => (
+    window.localStorage.getItem('megabattle-calm-background') === 'true'
+  ));
   const [adminSection, setAdminSection] = useState<'team' | 'events' | 'slots' | 'meetings' | 'tasks' | 'faculties'>('team');
   const [showEventForm, setShowEventForm] = useState(false);
   const [editingEventId, setEditingEventId] = useState<string | null>(null);
@@ -351,7 +457,7 @@ export default function MiniApp({
   const [eventSaving, setEventSaving] = useState(false);
   const [eventError, setEventError] = useState('');
   const [eventNotice, setEventNotice] = useState('');
-  const [selectedTaskEventId, setSelectedTaskEventId] = useState('');
+  const [selectedTaskEventId, setSelectedTaskEventId] = useState(TASK_EVENT_SCOPE_ALL);
   const [avatarEditorSource, setAvatarEditorSource] = useState<string | null>(null);
   const [avatarSaving, setAvatarSaving] = useState(false);
 
@@ -361,7 +467,6 @@ export default function MiniApp({
   const [newUserBirthday, setNewUserBirthday] = useState('');
   const [showAddUserForm, setShowAddUserForm] = useState(false);
   const [showAllTeamUsers, setShowAllTeamUsers] = useState(false);
-  const [teamSearchOpen, setTeamSearchOpen] = useState(false);
   const [teamSearch, setTeamSearch] = useState('');
   const [expandedUserId, setExpandedUserId] = useState<string | null>(null);
   const [editingUserId, setEditingUserId] = useState<string | null>(null);
@@ -383,6 +488,17 @@ export default function MiniApp({
   const [showBroadcastPeople, setShowBroadcastPeople] = useState(false);
   const [broadcastSaving, setBroadcastSaving] = useState(false);
   const [broadcastNotice, setBroadcastNotice] = useState('');
+  const [broadcastError, setBroadcastError] = useState('');
+  const [broadcastDraftNotice, setBroadcastDraftNotice] = useState('');
+  const [deliveryJournalOpen, setDeliveryJournalOpen] = useState(false);
+  const [deliveryIssues, setDeliveryIssues] = useState<DeliveryIssue[]>([]);
+  const [selectedDeliveryIds, setSelectedDeliveryIds] = useState<string[]>([]);
+  const [deliveryJournalBusy, setDeliveryJournalBusy] = useState(false);
+  const [deliveryJournalError, setDeliveryJournalError] = useState('');
+  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
+  const [diagnostics, setDiagnostics] = useState<OperationalDiagnostics | null>(null);
+  const [diagnosticsBusy, setDiagnosticsBusy] = useState(false);
+  const [diagnosticsError, setDiagnosticsError] = useState('');
   const [savingUserId, setSavingUserId] = useState<string | null>(null);
   const [facultyUserDraft, setFacultyUserDraft] = useState({ realName: '', username: '', role: 'faculty_responsible' as User['role'], facultyId: '', competencies: [] as string[] });
   const [facultyTaskDraft, setFacultyTaskDraft] = useState({ facultyId: '', competency: '', eventId: '', title: '', description: '', deadline: '', assignedTo: [] as string[], reminders: [] as any[] });
@@ -397,6 +513,42 @@ export default function MiniApp({
   const [collapsedFacultyReminders, setCollapsedFacultyReminders] = useState<number[]>([]);
   const [editingFacultyUserId, setEditingFacultyUserId] = useState<string | null>(null);
   const [facultyEditDraft, setFacultyEditDraft] = useState({ realName: '', username: '', role: 'faculty_responsible' as User['role'], facultyId: '', competencies: [] as string[] });
+  const tabScrollPositionsRef = useRef<Record<string, number>>({});
+  const tabHistoryRef = useRef<string[]>([]);
+  const editorReturnScrollRef = useRef<Record<string, number>>({});
+
+  const restoreTabScroll = useCallback((tab: string) => {
+    window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
+      window.scrollTo({ top: tabScrollPositionsRef.current[tab] || 0, behavior: 'auto' });
+    }));
+  }, []);
+
+  const navigateToTab = useCallback((tab: string) => {
+    if (tab === activeTab) return;
+    tabScrollPositionsRef.current[activeTab] = window.scrollY;
+    tabHistoryRef.current.push(activeTab);
+    setActiveTab(tab);
+    restoreTabScroll(tab);
+  }, [activeTab, restoreTabScroll, setActiveTab]);
+
+  const navigateBack = useCallback(() => {
+    tabScrollPositionsRef.current[activeTab] = window.scrollY;
+    let target = tabHistoryRef.current.pop() || 'slots';
+    while (target === activeTab && tabHistoryRef.current.length) target = tabHistoryRef.current.pop() || 'slots';
+    setActiveTab(target);
+    restoreTabScroll(target);
+  }, [activeTab, restoreTabScroll, setActiveTab]);
+
+  const rememberEditorScroll = useCallback((editor: string) => {
+    if (editorReturnScrollRef.current[editor] === undefined) editorReturnScrollRef.current[editor] = window.scrollY;
+  }, []);
+
+  const restoreEditorScroll = useCallback((editor: string) => {
+    const top = editorReturnScrollRef.current[editor];
+    delete editorReturnScrollRef.current[editor];
+    if (top === undefined) return;
+    window.requestAnimationFrame(() => window.requestAnimationFrame(() => window.scrollTo({ top, behavior: 'auto' })));
+  }, []);
 
   useEffect(() => {
     setFacultyTaskErrors((current) => ({
@@ -418,20 +570,23 @@ export default function MiniApp({
     }
     if (activeTab === 'admin') return;
 
-    // Admin edit state is intentionally scoped to the panel. Clearing it here
-    // keeps every ordinary section identical to the participant experience.
-    setShowAddUserForm(false);
-    setEditingUserId(null);
-    setEditingFacultyUserId(null);
-    setEditingFacultyTaskId(null);
-    setShowTaskLog(false);
-    setShowFullCalendar(false);
-    setEditingMeetingId(null);
-    setShowMeetingForm(false);
+    // Editor state remains mounted across tabs so returning to the panel does
+    // not destroy a partially completed form.
   }, [activeTab, isAdmin, setActiveTab]);
 
   const availabilityConfig = useMemo(() => normalizeAvailabilityConfig(state.settings, slotWeekStart), [state.settings, slotWeekStart]);
   const { activeDays, hours } = availabilityConfig;
+  const dirtyWeekIndexes = useMemo(() => Object.keys(dirtyWeekBaselines)
+    .map((weekStart) => availabilityConfig.weekStarts.indexOf(weekStart))
+    .filter((weekIndex) => weekIndex >= 0), [availabilityConfig.weekStarts, dirtyWeekBaselines]);
+  const markWeekDirty = (weekIndex: number) => {
+    const weekStart = availabilityConfig.weekStarts[weekIndex];
+    if (!weekStart) return;
+    setDirtyWeekBaselines((current) => current[weekStart] !== undefined ? current : {
+      ...current,
+      [weekStart]: Number(state.availabilities[currentUser.id]?.weekVersions?.[weekStart] || 0),
+    });
+  };
   const activeDayLabels = activeDays.map((dayIndex) => ({ ...dayLabels[dayIndex], dayIndex }));
   const configuredWeekCount = Math.min(maxSlotWeeks, Math.max(2, Number(state.settings?.availabilityWeekCount || 2)));
   useEffect(() => {
@@ -449,8 +604,8 @@ export default function MiniApp({
         setSlots((value) => align({ slots: value }).slots);
         setHardUnavailableDays((value) => align({ hardUnavailableDays: value }).hardUnavailableDays);
         setOutWeekIndexes((value) => align({ outWeekIndexes: value }).outWeekIndexes);
-        setSavedWeekIndexes((value) => align({ outWeekIndexes: value }).outWeekIndexes);
-        setDirtyWeekIndexes((value) => align({ outWeekIndexes: value }).outWeekIndexes);
+        const nextWeekStarts = new Set(normalizeAvailabilityConfig(state.settings, nextWeekStart).weekStarts);
+        setDirtyWeekBaselines((value) => Object.fromEntries(Object.entries(value).filter(([weekStart]) => nextWeekStarts.has(weekStart))));
         setExpandedWeekInfoIndex(null);
         setWeekNameDraft('');
         setWeekDescriptionDraft('');
@@ -473,7 +628,7 @@ export default function MiniApp({
   useEffect(() => {
     if (broadcastWeekIndex >= configuredWeekCount) setBroadcastWeekIndex(0);
   }, [broadcastWeekIndex, configuredWeekCount]);
-  const coreTeamUsers = state.users.filter((user) => user.role === 'admin' || user.role === 'organizer');
+  const coreTeamUsers = state.users.filter((user) => user.active !== false && (user.role === 'admin' || user.role === 'organizer'));
   const activeEvents = (state.events || [])
     .filter((item) => item.status === 'active')
     .slice()
@@ -484,9 +639,11 @@ export default function MiniApp({
   ));
   const activeEventIds = activeEvents.map((item) => item.id).join('|');
   useEffect(() => {
-    if (!activeEvents.some((item) => item.id === selectedTaskEventId)) setSelectedTaskEventId(activeEvents[0]?.id || '');
+    const isNamedScope = [TASK_EVENT_SCOPE_ALL, TASK_EVENT_SCOPE_NONE, TASK_EVENT_SCOPE_ARCHIVED].includes(selectedTaskEventId);
+    if (!isNamedScope && !activeEvents.some((item) => item.id === selectedTaskEventId)) {
+      setSelectedTaskEventId(TASK_EVENT_SCOPE_ALL);
+    }
   }, [activeEventIds, selectedTaskEventId]);
-  const selectedTaskEvent = activeEvents.find((item) => item.id === selectedTaskEventId);
   const eligibleTaskAssignees = coreTeamUsers;
   const normalizedTaskAssigneeSearch = taskAssigneeSearch.trim().toLowerCase();
   const matchedTaskAssignees = normalizedTaskAssigneeSearch
@@ -502,7 +659,19 @@ export default function MiniApp({
   const missingSlotBroadcastUsers = coreTeamUsers.filter((user) => (
     !hasSubmittedAvailabilityWeek(state.availabilities[user.id], activeDays, broadcastWeekIndex)
   ));
-  const filterTasksBySelectedEvent = (tasks: Task[]) => selectedTaskEventId ? tasks.filter((task) => task.eventId === selectedTaskEventId) : [];
+  const broadcastAudienceUsers = broadcastMode === 'all'
+    ? coreTeamUsers
+    : broadcastMode === 'missing_slots'
+      ? missingSlotBroadcastUsers
+      : coreTeamUsers.filter((user) => broadcastRecipients.includes(user.id));
+  const broadcastAvailableUsers = broadcastAudienceUsers.filter((user) => user.registered);
+  const broadcastUnavailableUsers = broadcastAudienceUsers.filter((user) => !user.registered);
+  const broadcastDraftDirty = broadcastOpen && (
+    broadcastMode !== 'all'
+    || broadcastWeekIndex !== 0
+    || Boolean(broadcastTitle.trim() || broadcastBody.trim() || broadcastBlocks.length || broadcastRecipients.length)
+  );
+  const filterTasksBySelectedEvent = (tasks: Task[]) => filterTasksByEventScope(tasks, allEvents, selectedTaskEventId);
   const votedUsers = useMemo(
     () => state.users.filter((user) => {
       if (user.role !== 'admin' && user.role !== 'organizer') return false;
@@ -525,20 +694,144 @@ export default function MiniApp({
     task.creatorId === currentUser.id && !['completed', 'cancelled'].includes(task.status) && taskAssigneeIds(task).length > 0
   )));
   const latestCompletedTasks = completedTasks.slice(0, 10);
-  const editingCompletedTask = Boolean(completingTaskId && state.tasks.find((task) => task.id === completingTaskId)?.status === 'completed');
-  const todayKey = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Moscow', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
-  const meetingIsoDate = (meeting: Meeting) => {
-    const normalized = formatDateShort(meeting.date);
-    const match = normalized.match(/^(\d{2})\.(\d{2})(?:\.(\d{2}|\d{4}))?$/);
-    if (!match) return '9999-12-31';
-    const year = match[3] ? (match[3].length === 2 ? `20${match[3]}` : match[3]) : String(new Date().getFullYear());
-    return `${year}-${match[2]}-${match[1]}`;
-  };
+  const completionTask = completingTaskId ? state.tasks.find((task) => task.id === completingTaskId) : undefined;
+  const editingCompletedTask = completionTask?.status === 'completed';
+  const sharedCompletionAssigneeCount = completionTask ? taskAssigneeIds(completionTask).length : 0;
+  const projectNow = new Date(state.serverNow || Date.now());
   const scheduledMeetings = state.meetings
-    .filter((meeting) => meeting.status === 'scheduled' && meetingIsoDate(meeting) >= todayKey)
+    .filter((meeting) => meeting.status === 'scheduled' && meetingPhase(meeting, projectNow) !== 'past')
     .slice()
-    .sort((a, b) => meetingDateTime(a) - meetingDateTime(b));
+    .sort((a, b) => {
+      const phaseOrder = Number(meetingPhase(a, projectNow) !== 'ongoing') - Number(meetingPhase(b, projectNow) !== 'ongoing');
+      return phaseOrder || meetingStartTimestamp(a, projectNow) - meetingStartTimestamp(b, projectNow);
+    });
   const visibleScheduledMeetings = showAllMeetings ? scheduledMeetings : scheduledMeetings.slice(0, 3);
+  const meetingHistory = state.meetings
+    .filter((meeting) => meeting.status !== 'scheduled' || meetingPhase(meeting, projectNow) === 'past')
+    .slice()
+    .sort((a, b) => meetingEndTimestamp(b, projectNow) - meetingEndTimestamp(a, projectNow));
+  const taskFormSnapshot = JSON.stringify({
+    editingTaskId, title: taskTitle, description: taskDesc, competencies: taskCompetencies,
+    deadline: taskDeadline, assignedTo: taskAssignedTo, assignmentMode: taskAssignmentMode,
+    sow: taskSow, priority: taskPriority, reminders: taskReminders, eventId: taskEventId,
+  });
+  const meetingFormSnapshot = JSON.stringify({
+    editingMeetingId, kind: meetingKind, eventId: meetingEventId, title: meetingTitle,
+    date: meetingDate, time: meetingTime, duration: meetingDuration, topic: meetingTopic,
+    description: meetingDescription, type: meetingType, competency: meetingCompetency,
+    participants,
+  });
+  const taskDraftDirty = showTaskForm && Boolean(taskDraftBaseline) && taskFormSnapshot !== taskDraftBaseline;
+  const meetingDraftDirty = showMeetingForm && Boolean(meetingDraftBaseline) && meetingFormSnapshot !== meetingDraftBaseline;
+  const editingTaskSource = editingTaskId ? state.tasks.find((task) => task.id === editingTaskId) : undefined;
+  const editingMeetingSource = editingMeetingId ? state.meetings.find((meeting) => meeting.id === editingMeetingId) : undefined;
+  const taskDraftConflict = Boolean(editingTaskId && taskDraftBaseVersion !== null && Number(editingTaskSource?.version) !== taskDraftBaseVersion);
+  const meetingDraftConflict = Boolean(editingMeetingId && meetingDraftBaseFingerprint && meetingDraftFingerprint(editingMeetingSource) !== meetingDraftBaseFingerprint);
+
+  useEffect(() => {
+    if (restoredDraftUserRef.current === currentUser.id) return;
+    restoredDraftUserRef.current = currentUser.id;
+    const taskDraft = readLatestFormDraft<TaskFormDraft>(window.sessionStorage, currentUser.id, 'task');
+    if (taskDraft) {
+      const draft = taskDraft.payload;
+      setEditingTaskId(draft.editingTaskId);
+      setTaskTitle(draft.title);
+      setTaskDesc(draft.description);
+      setTaskCompetencies(draft.competencies);
+      setTaskDeadline(draft.deadline);
+      setTaskAssignedTo(draft.assignedTo);
+      setTaskAssignmentMode(draft.assignmentMode);
+      setTaskSow(draft.sow);
+      setTaskPriority(draft.priority);
+      setTaskReminders(draft.reminders);
+      setTaskEventId(draft.eventId);
+      setTaskDraftBaseline(draft.baseline);
+      setTaskDraftBaseVersion(draft.baseVersion);
+      setTaskDraftNotice('Восстановлен несохранённый черновик задачи.');
+      setShowTaskForm(true);
+    }
+    const meetingDraft = readLatestFormDraft<MeetingFormDraft>(window.sessionStorage, currentUser.id, 'meeting');
+    if (meetingDraft) {
+      const draft = meetingDraft.payload;
+      setEditingMeetingId(draft.editingMeetingId);
+      setMeetingKind(draft.kind);
+      setMeetingEventId(draft.eventId);
+      setMeetingTitle(draft.title);
+      setMeetingDate(draft.date);
+      setMeetingTime(draft.time);
+      setMeetingDuration(draft.duration);
+      setMeetingTopic(draft.topic);
+      setMeetingDescription(draft.description);
+      setShowMeetingExtras(Boolean(draft.topic || draft.description));
+      setMeetingType(draft.type);
+      setMeetingCompetency(draft.competency);
+      setParticipants(draft.participants);
+      setMeetingDraftBaseline(draft.baseline);
+      setMeetingDraftBaseFingerprint(draft.baseFingerprint);
+      setMeetingDraftNotice('Восстановлен несохранённый черновик встречи.');
+      setShowMeetingForm(true);
+    }
+    const broadcastDraft = readFormDraft<BroadcastFormDraft>(window.sessionStorage, currentUser.id, 'broadcast');
+    if (broadcastDraft) {
+      const draft = broadcastDraft.payload;
+      setBroadcastMode(draft.mode);
+      setBroadcastWeekIndex(draft.weekIndex);
+      setBroadcastTitle(draft.title);
+      setBroadcastBody(draft.body);
+      setBroadcastBlocks(draft.blocks);
+      setBroadcastRecipients(draft.recipients);
+      setBroadcastDraftNotice('Восстановлен несохранённый черновик рассылки.');
+      setBroadcastOpen(true);
+    }
+  }, [currentUser.id]);
+
+  useEffect(() => {
+    if (!showTaskForm || !taskDraftDirty) return;
+    writeFormDraft(window.sessionStorage, {
+      userId: currentUser.id, kind: 'task', entityId: editingTaskId || 'new', context: '',
+      payload: {
+        editingTaskId, baseline: taskDraftBaseline, baseVersion: taskDraftBaseVersion,
+        title: taskTitle, description: taskDesc, competencies: taskCompetencies,
+        deadline: taskDeadline, assignedTo: taskAssignedTo, assignmentMode: taskAssignmentMode,
+        sow: taskSow, priority: taskPriority, reminders: taskReminders, eventId: taskEventId,
+      },
+    });
+  }, [currentUser.id, editingTaskId, showTaskForm, taskDraftDirty, taskDraftBaseline, taskDraftBaseVersion, taskTitle, taskDesc, taskCompetencies, taskDeadline, taskAssignedTo, taskAssignmentMode, taskSow, taskPriority, taskReminders, taskEventId]);
+
+  useEffect(() => {
+    if (!showMeetingForm || !meetingDraftDirty) return;
+    writeFormDraft(window.sessionStorage, {
+      userId: currentUser.id, kind: 'meeting', entityId: editingMeetingId || 'new', context: '',
+      payload: {
+        editingMeetingId, baseline: meetingDraftBaseline, baseFingerprint: meetingDraftBaseFingerprint,
+        kind: meetingKind, eventId: meetingEventId, title: meetingTitle, date: meetingDate,
+        time: meetingTime, duration: meetingDuration, topic: meetingTopic,
+        description: meetingDescription, type: meetingType, competency: meetingCompetency, participants,
+      },
+    });
+  }, [currentUser.id, editingMeetingId, showMeetingForm, meetingDraftDirty, meetingDraftBaseline, meetingDraftBaseFingerprint, meetingKind, meetingEventId, meetingTitle, meetingDate, meetingTime, meetingDuration, meetingTopic, meetingDescription, meetingType, meetingCompetency, participants]);
+
+  useEffect(() => {
+    if (!broadcastOpen) return;
+    if (!broadcastDraftDirty) {
+      removeFormDraft(window.sessionStorage, currentUser.id, 'broadcast');
+      return;
+    }
+    writeFormDraft(window.sessionStorage, {
+      userId: currentUser.id,
+      kind: 'broadcast',
+      entityId: 'new',
+      context: '',
+      payload: {
+        mode: broadcastMode,
+        weekIndex: broadcastWeekIndex,
+        title: broadcastTitle,
+        body: broadcastBody,
+        blocks: broadcastBlocks,
+        recipients: broadcastRecipients,
+      } satisfies BroadcastFormDraft,
+    });
+  }, [broadcastBlocks, broadcastBody, broadcastDraftDirty, broadcastMode, broadcastOpen, broadcastRecipients, broadcastTitle, broadcastWeekIndex, currentUser.id]);
   const profileAssignedTasks = state.tasks.filter((task) => taskAssigneeIds(task).includes(currentUser.id));
   const profileCompletedTasks = allCompletedTasks.filter((task) => taskAssigneeIds(task).includes(currentUser.id));
   const profileDatedCompletedTasks = profileCompletedTasks.filter((task) => (
@@ -575,6 +868,7 @@ export default function MiniApp({
   const profileSlotsCompleted = activeDays.every((dayIndex) => (
     (profileAvailability[dayIndex] || []).length > 0 || profileUnavailableDays.has(dayIndex)
   ));
+  const profileHasTaskHistory = profileAssignedTasks.length > 0 || profileCreatedTasks.length > 0;
   const profileAge = ageFromBirthday(currentUser.birthday);
   const facultyTasks = state.tasks.filter((task) => task.facultyId && task.status !== 'cancelled');
   const visibleFacultyTasks = showAllFacultyTasks ? facultyTasks : facultyTasks.slice(0, 3);
@@ -611,7 +905,7 @@ export default function MiniApp({
   const faculties = state.faculties || [];
   const facultyCompetencies = state.facultyCompetencies || [];
   const visibleFacultyCompetencies = showAllFacultyCompetencies ? facultyCompetencies : facultyCompetencies.slice(0, 3);
-  const facultyUsers = state.users.filter((user) => user.role === 'faculty_responsible' || user.role === 'faculty_helper');
+  const facultyUsers = state.users.filter((user) => user.active !== false && (user.role === 'faculty_responsible' || user.role === 'faculty_helper'));
   const visibleFacultyUserIds = new Set((showFacultyPeople ? facultyUsers : facultyUsers.slice(0, 3)).map((user) => user.id));
   const facultyTaskUsers = facultyUsers.filter((user) => facultyTaskDraft.facultyId === 'all' || user.facultyId === facultyTaskDraft.facultyId);
   const visibleFacultyTaskUsers = showAllFacultyTaskUsers ? facultyTaskUsers : facultyTaskUsers.slice(0, 3);
@@ -658,14 +952,18 @@ export default function MiniApp({
       if (hour === prev + 1) {
         prev = hour;
       } else {
-        ranges.push(start === prev ? `${start}:00` : `${start}:00-${prev + 1}:00`);
+        ranges.push(`${String(start).padStart(2, '0')}:00–${String((prev + 1) % 24).padStart(2, '0')}:00`);
         start = hour;
         prev = hour;
       }
     }
-    ranges.push(start === prev ? `${start}:00` : `${start}:00-${prev + 1}:00`);
+    ranges.push(`${String(start).padStart(2, '0')}:00–${String((prev + 1) % 24).padStart(2, '0')}:00`);
     return ranges.join(', ');
   };
+
+  const formatHourRange = (hour: number) => (
+    `${String(hour).padStart(2, '0')}:00–${String((hour + 1) % 24).padStart(2, '0')}:00`
+  );
 
   useEffect(() => {
     const availability = state.availabilities[currentUser.id];
@@ -675,11 +973,41 @@ export default function MiniApp({
     Array.from({ length: configuredWeekCount * 7 }, (_, index) => {
       nextSlots[index] = [...(saved?.[index] || [])];
     });
+    const dirtyWeekStarts = Object.keys(dirtyWeekBaselines);
+    const savedDraft = {
+      slots: nextSlots,
+      hardUnavailableDays: aligned.hardUnavailableDays,
+      outWeekIndexes: aligned.outWeekIndexes,
+    };
     setVisibleWeeks(configuredWeekCount);
-    setSlots(nextSlots);
-    setHardUnavailableDays(aligned.hardUnavailableDays);
-    setOutWeekIndexes(aligned.outWeekIndexes);
-  }, [configuredWeekCount, currentUser.id, state.availabilities]);
+    setSlots((current) => mergeAvailabilityDraft(savedDraft, { slots: current, hardUnavailableDays: [], outWeekIndexes: [] }, dirtyWeekStarts, availabilityConfig.weekStarts).slots);
+    setHardUnavailableDays((current) => mergeAvailabilityDraft(savedDraft, { slots: {}, hardUnavailableDays: current, outWeekIndexes: [] }, dirtyWeekStarts, availabilityConfig.weekStarts).hardUnavailableDays);
+    setOutWeekIndexes((current) => mergeAvailabilityDraft(savedDraft, { slots: {}, hardUnavailableDays: [], outWeekIndexes: current }, dirtyWeekStarts, availabilityConfig.weekStarts).outWeekIndexes);
+  }, [availabilityConfig.weekStarts, configuredWeekCount, currentUser.id, dirtyWeekBaselines, slotWeekStart, state.availabilities]);
+
+  useEffect(() => {
+    const restoreKey = `${currentUser.id}:${slotWeekStart}`;
+    if (restoredSlotsDraftKeyRef.current === restoreKey) return;
+    restoredSlotsDraftKeyRef.current = restoreKey;
+    const draft = readFormDraft<SlotsFormDraft>(window.sessionStorage, currentUser.id, 'slots', 'availability', slotWeekStart);
+    if (!draft?.payload.dirtyWeekBaselines || !Object.keys(draft.payload.dirtyWeekBaselines).length) return;
+    setSlots(draft.payload.slots);
+    setHardUnavailableDays(draft.payload.hardUnavailableDays);
+    setOutWeekIndexes(draft.payload.outWeekIndexes);
+    setDirtyWeekBaselines(draft.payload.dirtyWeekBaselines);
+    setSlotNotice('Восстановлены несохранённые слоты. Проверь их и сохрани нужные недели.');
+  }, [currentUser.id, slotWeekStart]);
+
+  useEffect(() => {
+    if (!dirtyWeekIndexes.length) {
+      removeFormDraft(window.sessionStorage, currentUser.id, 'slots', 'availability', slotWeekStart);
+      return;
+    }
+    writeFormDraft(window.sessionStorage, {
+      userId: currentUser.id, kind: 'slots', entityId: 'availability', context: slotWeekStart,
+      payload: { slots, hardUnavailableDays, outWeekIndexes, dirtyWeekBaselines },
+    });
+  }, [currentUser.id, dirtyWeekBaselines, dirtyWeekIndexes, hardUnavailableDays, outWeekIndexes, slotWeekStart, slots]);
 
   useEffect(() => {
     setSlotSettingsWeeks(configuredWeekCount);
@@ -728,10 +1056,10 @@ export default function MiniApp({
 
   const toggleSlot = (day: number, hour: number) => {
     setSlotError('');
+    setSlotNotice('');
     const weekIndex = Math.floor(day / 7);
     setOutWeekIndexes((current) => current.filter((item) => item !== weekIndex));
-    setSavedWeekIndexes((current) => current.filter((item) => item !== weekIndex));
-    setDirtyWeekIndexes((current) => current.includes(weekIndex) ? current : [...current, weekIndex]);
+    markWeekDirty(weekIndex);
     setHardUnavailableDays((current) => current.filter((item) => item !== day));
     setSlots((prev) => {
       const daySlots = prev[day] || [];
@@ -744,10 +1072,10 @@ export default function MiniApp({
 
   const selectWholeDay = (day: number) => {
     setSlotError('');
+    setSlotNotice('');
     const weekIndex = Math.floor(day / 7);
     setOutWeekIndexes((current) => current.filter((item) => item !== weekIndex));
-    setSavedWeekIndexes((current) => current.filter((item) => item !== weekIndex));
-    setDirtyWeekIndexes((current) => current.includes(weekIndex) ? current : [...current, weekIndex]);
+    markWeekDirty(weekIndex);
     setHardUnavailableDays((current) => current.filter((item) => item !== day));
     setSlots((prev) => {
       const full = (prev[day] || []).length === hours.length;
@@ -757,11 +1085,11 @@ export default function MiniApp({
 
   const toggleUnavailableDay = (day: number) => {
     setSlotError('');
+    setSlotNotice('');
     const weekIndex = Math.floor(day / 7);
     setOutWeekIndexes((current) => current.filter((item) => item !== weekIndex));
     const unavailable = hardUnavailableDays.includes(day);
-    setSavedWeekIndexes((current) => current.filter((item) => item !== weekIndex));
-    setDirtyWeekIndexes((current) => current.includes(weekIndex) ? current : [...current, weekIndex]);
+    markWeekDirty(weekIndex);
     setHardUnavailableDays((current) => unavailable
       ? current.filter((item) => item !== day)
       : [...current.filter((item) => item !== day), day].sort((a, b) => a - b));
@@ -770,9 +1098,9 @@ export default function MiniApp({
 
   const toggleOutWeek = (weekIndex: number) => {
     setSlotError('');
+    setSlotNotice('');
     const wasOut = outWeekIndexes.includes(weekIndex);
-    setSavedWeekIndexes((current) => current.filter((item) => item !== weekIndex));
-    setDirtyWeekIndexes((current) => current.includes(weekIndex) ? current : [...current, weekIndex]);
+    markWeekDirty(weekIndex);
     setOutWeekIndexes((current) => wasOut
       ? current.filter((item) => item !== weekIndex)
       : [...current.filter((item) => item !== weekIndex), weekIndex].sort((a, b) => a - b));
@@ -863,16 +1191,26 @@ export default function MiniApp({
     }
     setSlotError('');
     setSavingWeekIndex(weekIndex);
-    const ok = await onSaveAvailability(slots, slotWeekStart, hardUnavailableDays, outWeekIndexes);
+    const targetWeekStart = availabilityConfig.weekStarts[weekIndex];
+    const firstDay = weekIndex * 7;
+    const weekDays = Object.fromEntries(
+      Array.from({ length: 7 }, (_, relativeDay) => [relativeDay, [...(slots[firstDay + relativeDay] || [])]]),
+    );
+    const weekUnavailableDays = hardUnavailableDays
+      .filter((day) => Math.floor(day / 7) === weekIndex)
+      .map((day) => day - firstDay);
+    const expectedVersion = dirtyWeekBaselines[targetWeekStart]
+      ?? Number(state.availabilities[currentUser.id]?.weekVersions?.[targetWeekStart] || 0);
+    const ok = await onSaveAvailability(targetWeekStart, weekDays, weekUnavailableDays, outWeekIndexes.includes(weekIndex), expectedVersion);
     setSavingWeekIndex(null);
     if (ok && slotWeekStart === currentWeekStart()) {
-      setSavedWeekIndexes((current) => current.includes(weekIndex) ? current : [...current, weekIndex]);
-      setDirtyWeekIndexes((current) => current.filter((item) => item !== weekIndex));
+      setDirtyWeekBaselines((current) => Object.fromEntries(Object.entries(current).filter(([weekStart]) => weekStart !== targetWeekStart)));
       setSlotNotice(`Неделя ${weekIndex + 1} сохранена независимо от остальных.`);
     }
   };
 
   const resetMeetingForm = () => {
+    removeFormDraft(window.sessionStorage, currentUser.id, 'meeting', editingMeetingId || 'new');
     setEditingMeetingId(null);
     setShowMeetingForm(false);
     setMeetingKind('meeting');
@@ -883,14 +1221,26 @@ export default function MiniApp({
     setMeetingDuration('1');
     setMeetingTopic('');
     setMeetingDescription('');
+    setShowMeetingExtras(false);
     setMeetingType('general');
     setMeetingCompetency('');
     setParticipants([]);
     setShowAllMeetingParticipants(false);
     setMeetingError('');
+    setMeetingDraftNotice('');
+    setMeetingDraftBaseline('');
+    setMeetingDraftBaseFingerprint('');
+  };
+
+  const discardMeetingForm = () => {
+    if (meetingDraftDirty && !window.confirm('Закрыть форму и удалить несохранённый черновик встречи?')) return false;
+    resetMeetingForm();
+    restoreEditorScroll('meeting');
+    return true;
   };
 
   const startMeetingEdit = (meeting: Meeting) => {
+    rememberEditorScroll('meeting');
     setMeetingError('');
     setEditingMeetingId(meeting.id);
     setShowMeetingForm(true);
@@ -902,11 +1252,24 @@ export default function MiniApp({
     setMeetingDuration(String(meeting.duration || 1));
     setMeetingTopic(meeting.topic || '');
     setMeetingDescription(meeting.description || '');
+    setShowMeetingExtras(Boolean(meeting.topic || meeting.description));
     setMeetingType(meeting.competency ? 'competency' : meeting.type);
     setMeetingCompetency(meeting.competency || '');
     setParticipants(Array.isArray(meeting.participants) ? meeting.participants : []);
     setShowAllMeetingParticipants(false);
+    setMeetingDraftNotice('');
+    setMeetingDraftBaseFingerprint(meetingDraftFingerprint(meeting));
+    setMeetingDraftBaseline(JSON.stringify({
+      editingMeetingId: meeting.id, kind: normalizeMeetingKind(meeting.kind), eventId: meeting.eventId || '', title: meeting.title,
+      date: formatDateShort(meeting.date), time: meeting.time, duration: String(meeting.duration || 1), topic: meeting.topic || '',
+      description: meeting.description || '', type: meeting.competency ? 'competency' : meeting.type,
+      competency: meeting.competency || '', participants: Array.isArray(meeting.participants) ? meeting.participants : [],
+    }));
   };
+
+  useEffect(() => {
+    if (showMeetingForm && !meetingDraftBaseline) setMeetingDraftBaseline(meetingFormSnapshot);
+  }, [meetingDraftBaseline, meetingFormSnapshot, showMeetingForm]);
 
   useEffect(() => {
     if (!showMeetingForm || !editingMeetingId) return;
@@ -921,6 +1284,10 @@ export default function MiniApp({
   const submitMeeting = async (event: React.FormEvent) => {
     event.preventDefault();
     setMeetingError('');
+    if (meetingDraftConflict) {
+      setMeetingError('Встреча изменилась после открытия черновика. Закрой форму, обнови данные и внеси изменения заново.');
+      return;
+    }
     if (!meetingTitle.trim()) {
       setMeetingError(`Укажи название ${meetingKindText(meetingKind).genitive}.`);
       return;
@@ -953,27 +1320,28 @@ export default function MiniApp({
       competency: meetingKind !== 'setup' && meetingType === 'competency' ? meetingCompetency : '',
     };
 
-    if (editingMeetingId) {
-      const res = await fetch('/api/meeting/update', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ meetingId: editingMeetingId, requesterId: currentUser.id, ...payload }),
-      });
-      const body = await res.json();
-      if (res.ok) {
+    try {
+      if (editingMeetingId) {
+        const res = await fetch('/api/meeting/update', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ meetingId: editingMeetingId, requesterId: currentUser.id, ...payload }),
+        });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(body.error || 'Не удалось сохранить встречу.');
         resetMeetingForm();
         await onRefreshState();
-      } else {
-        setMeetingError(body.error || 'Не удалось сохранить встречу.');
+        return;
       }
-      setSavingMeeting(false);
-      return;
-    }
 
-    const ok = await onScheduleMeeting(payload);
-    setSavingMeeting(false);
-    if (ok) resetMeetingForm();
-    else setMeetingError('Не удалось назначить встречу. Проверь поля и соединение.');
+      const ok = await onScheduleMeeting(payload);
+      if (ok) resetMeetingForm();
+      else setMeetingError('Не удалось назначить встречу. Проверь поля и соединение.');
+    } catch (error: any) {
+      setMeetingError(error.message || 'Не удалось сохранить встречу. Проверь соединение и попробуй ещё раз — черновик сохранён.');
+    } finally {
+      setSavingMeeting(false);
+    }
   };
 
   const setMeetingAudience = (nextType: 'general' | 'custom' | 'competency') => {
@@ -1003,13 +1371,14 @@ export default function MiniApp({
       setParticipants([]);
       setMeetingTopic('');
       setMeetingDescription('');
+      setShowMeetingExtras(false);
       setMeetingDuration('1');
       return;
     }
     setMeetingEventId('');
   };
 
-  const setMeetingAttendance = async (meeting: Meeting, attending: boolean) => {
+  const setMeetingAttendance = async (meeting: Meeting, responseValue: 'yes' | 'no' | 'unanswered') => {
     if (rsvpMeetingId) return;
     setRsvpMeetingId(meeting.id);
     setMeetingError('');
@@ -1017,7 +1386,7 @@ export default function MiniApp({
       const response = await fetch('/api/meeting/rsvp', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ requesterId: currentUser.id, meetingId: meeting.id, attending }),
+        body: JSON.stringify({ requesterId: currentUser.id, meetingId: meeting.id, response: responseValue }),
       });
       const body = await response.json();
       if (!response.ok) throw new Error(body.error || 'Не удалось обновить участие');
@@ -1041,6 +1410,7 @@ export default function MiniApp({
   };
 
   const resetTaskForm = () => {
+    removeFormDraft(window.sessionStorage, currentUser.id, 'task', editingTaskId || 'new');
     setTaskTitle('');
     setTaskDesc('');
     setTaskCompetencies([]);
@@ -1053,20 +1423,33 @@ export default function MiniApp({
     setTaskSow('');
     setTaskPriority('normal');
     setTaskReminders([]);
+    setTaskEventId('');
     setEditingTaskId(null);
+    setTaskDraftNotice('');
+    setTaskDraftBaseline('');
+    setTaskDraftBaseVersion(null);
+  };
+
+  const discardTaskForm = () => {
+    if (taskDraftDirty && !window.confirm('Закрыть форму и удалить несохранённый черновик задачи?')) return false;
+    resetTaskForm();
+    setShowTaskForm(false);
+    restoreEditorScroll('task');
+    return true;
   };
 
   const openTaskForm = () => {
-    if (!showTaskForm && !selectedTaskEventId) {
-      setTaskError('Сначала добавь активное мероприятие в админской панели.');
-      return;
+    if (!showTaskForm) {
+      rememberEditorScroll('task');
+      setTaskError('');
+      setTaskEventId(newTaskEventIdForScope(allEvents, selectedTaskEventId));
     }
-    if (!showTaskForm) setTaskError('');
-    if (showTaskForm) resetTaskForm();
+    if (showTaskForm) return discardTaskForm();
     setShowTaskForm((value) => !value);
   };
 
   const startTaskEdit = (task: Task) => {
+    rememberEditorScroll('task');
     setEditingTaskId(task.id);
     setTaskTitle(task.title);
     setTaskDesc(task.description);
@@ -1079,17 +1462,30 @@ export default function MiniApp({
     setTaskSow(task.sow || '');
     setTaskPriority(task.priority || 'normal');
     setTaskReminders(task.reminders?.map((reminder) => ({ ...reminder })) || []);
+    setTaskEventId(task.eventId || '');
     setTaskError('');
     setShowTaskForm(true);
+    setTaskDraftNotice('');
+    setTaskDraftBaseVersion(Number(task.version || 1));
+    setTaskDraftBaseline(JSON.stringify({
+      editingTaskId: task.id, title: task.title, description: task.description,
+      competencies: taskCompetencyNames(task), deadline: formatDateShort(task.deadline), assignedTo: taskAssigneeIds(task),
+      assignmentMode: taskAssigneeIds(task).length === 0 ? 'open' : taskCompetencyNames(task).length ? 'blocks' : 'people',
+      sow: task.sow || '', priority: task.priority || 'normal', reminders: task.reminders?.map((reminder) => ({ ...reminder })) || [], eventId: task.eventId || '',
+    }));
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
+
+  useEffect(() => {
+    if (showTaskForm && !taskDraftBaseline) setTaskDraftBaseline(taskFormSnapshot);
+  }, [showTaskForm, taskDraftBaseline, taskFormSnapshot]);
 
   const submitTask = async (event: React.FormEvent) => {
     event.preventDefault();
     setTaskError('');
     setTaskNotice('');
-    if (!selectedTaskEventId) {
-      setTaskError('Выбери мероприятие в верхней части страницы.');
+    if (taskDraftConflict) {
+      setTaskError('Задача изменилась после открытия черновика. Закрой форму, обнови данные и внеси изменения заново.');
       return;
     }
     if (taskAssignmentMode === 'blocks' && !taskCompetencies.length) {
@@ -1106,7 +1502,7 @@ export default function MiniApp({
       description: taskDesc.trim(),
       competency: taskCompetencies[0] || '',
       competencies: taskCompetencies,
-      eventId: selectedTaskEventId,
+      eventId: taskEventId,
       deadline: taskDeadline,
       assignedTo: taskAssignmentMode === 'open' ? [] : taskAssignedTo,
       sow: taskSow,
@@ -1121,7 +1517,12 @@ export default function MiniApp({
         const response = await fetch('/api/task/update', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ requesterId: currentUser.id, taskId: editingTaskId, ...payload }),
+          body: JSON.stringify({
+            requesterId: currentUser.id,
+            taskId: editingTaskId,
+            version: state.tasks.find((task) => task.id === editingTaskId)?.version,
+            ...payload,
+          }),
         });
         const body = await response.json();
         if (!response.ok) throw new Error(body.error || 'Не удалось сохранить задачу');
@@ -1133,6 +1534,7 @@ export default function MiniApp({
       }
     } else {
       ok = await onCreateTask(payload);
+      if (!ok) setTaskError('Не удалось создать задачу. Проверь соединение и попробуй ещё раз — черновик сохранён.');
     }
     setSavingTask(false);
     if (ok) {
@@ -1142,20 +1544,29 @@ export default function MiniApp({
   };
 
   const openCompletionPrompt = (taskId: string) => {
+    rememberEditorScroll('completion');
     const task = state.tasks.find((item) => item.id === taskId);
     const totalMinutes = Number(task?.timeSpentMinutes || 0);
+    const hours = totalMinutes ? String(Math.floor(totalMinutes / 60)) : '';
+    const minutes = totalMinutes ? String(totalMinutes % 60) : '';
+    const comment = task?.completionComments?.[currentUser.id] || '';
     setCompletingTaskId(taskId);
-    setCompletionHours(totalMinutes ? String(Math.floor(totalMinutes / 60)) : '');
-    setCompletionMinutes(totalMinutes ? String(totalMinutes % 60) : '');
-    setCompletionComment(task?.completionComments?.[currentUser.id] || '');
+    setCompletionHours(hours);
+    setCompletionMinutes(minutes);
+    setCompletionComment(comment);
+    setCompletionBaseline(JSON.stringify({ hours, minutes, comment }));
   };
 
-  const closeCompletionPrompt = () => {
+  const closeCompletionPrompt = (force = false) => {
     if (savingCompletion) return;
+    const dirty = JSON.stringify({ hours: completionHours, minutes: completionMinutes, comment: completionComment }) !== completionBaseline;
+    if (!force && dirty && !window.confirm('Закрыть окно и удалить несохранённые данные о выполнении?')) return;
     setCompletingTaskId(null);
     setCompletionHours('');
     setCompletionMinutes('');
     setCompletionComment('');
+    setCompletionBaseline('');
+    restoreEditorScroll('completion');
   };
 
   const completeTaskWithTime = async (includeTime: boolean) => {
@@ -1170,7 +1581,7 @@ export default function MiniApp({
       completionComment.trim() || undefined,
     );
     setSavingCompletion(false);
-    if (ok) closeCompletionPrompt();
+    if (ok) closeCompletionPrompt(true);
   };
 
   const reopenCompletedTask = async () => {
@@ -1181,14 +1592,19 @@ export default function MiniApp({
       const response = await fetch('/api/task/status', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ taskId: completingTaskId, status: 'in_progress', requesterId: currentUser.id }),
+        body: JSON.stringify({
+          taskId: completingTaskId,
+          version: state.tasks.find((task) => task.id === completingTaskId)?.version,
+          status: 'in_progress',
+          requesterId: currentUser.id,
+        }),
       });
       const body = await response.json();
       if (!response.ok) throw new Error(body.error || 'Не удалось вернуть задачу в работу');
       await onRefreshState();
       setTaskNotice('Задача снова в работе. Комментарий можно исправить при следующем завершении.');
       setSavingCompletion(false);
-      closeCompletionPrompt();
+      closeCompletionPrompt(true);
     } catch (error: any) {
       setTaskError(error.message || 'Не удалось вернуть задачу в работу.');
     } finally {
@@ -1244,7 +1660,7 @@ export default function MiniApp({
 
   const deleteTask = async (taskId: string) => {
     const task = state.tasks.find((item) => item.id === taskId);
-    if (!task || !window.confirm(`Удалить задачу «${task.title}»? Исполнители получат уведомление, а запись останется в логе.`)) return;
+    if (!task || !window.confirm(`Отменить задачу «${task.title}»? Она исчезнет из активных списков, исполнители получат уведомление, а запись останется в журнале.`)) return;
     setTaskError('');
     setTaskNotice('');
     try {
@@ -1254,11 +1670,11 @@ export default function MiniApp({
         body: JSON.stringify({ requesterId: currentUser.id, taskId }),
       });
       const body = await response.json();
-      if (!response.ok) throw new Error(body.error || 'Не удалось удалить задачу');
+      if (!response.ok) throw new Error(body.error || 'Не удалось отменить задачу');
       await onRefreshState();
       setTaskNotice('Задача отменена и убрана из активных списков.');
     } catch (error: any) {
-      setTaskError(error.message || 'Не удалось удалить задачу.');
+      setTaskError(error.message || 'Не удалось отменить задачу.');
     }
   };
 
@@ -1298,30 +1714,31 @@ export default function MiniApp({
   const submitBroadcast = async (event: React.FormEvent) => {
     event.preventDefault();
     if (broadcastSaving) return;
-    setTeamError('');
+    setBroadcastError('');
     setBroadcastNotice('');
     if (!broadcastBody.trim()) {
-      setTeamError('Напиши текст рассылки.');
+      setBroadcastError('Напиши текст рассылки. Черновик уже сохранён.');
       return;
     }
     if (broadcastMode === 'blocks' && !broadcastBlocks.length) {
-      setTeamError('Выбери хотя бы один блок получателей.');
+      setBroadcastError('Выбери хотя бы один блок получателей.');
       return;
     }
     if (broadcastMode === 'people' && !broadcastRecipients.length) {
-      setTeamError('Выбери хотя бы одного получателя.');
+      setBroadcastError('Выбери хотя бы одного получателя.');
       return;
     }
     if (broadcastMode === 'missing_slots' && !missingSlotBroadcastUsers.length) {
-      setTeamError('Все участники уже отметили слоты на выбранную неделю.');
+      setBroadcastError('Все участники уже отметили слоты на выбранную неделю.');
+      return;
+    }
+    if (!broadcastAvailableUsers.length) {
+      setBroadcastError('Среди выбранных людей нет доступных адресатов. Им нужно открыть MegaBot и отправить /start.');
       return;
     }
     setBroadcastSaving(true);
     try {
-      const response = await fetch('/api/team/broadcast', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const response = await idempotentPost('/api/team/broadcast', {
           requesterId: currentUser.id,
           recipientMode: broadcastMode,
           availabilityWeekIndex: broadcastWeekIndex,
@@ -1329,14 +1746,15 @@ export default function MiniApp({
           recipientIds: broadcastRecipients,
           title: broadcastTitle,
           body: broadcastBody,
-        }),
-      });
+        });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || 'Не удалось отправить рассылку');
       setBroadcastNotice([
-        `Доставлено в личку: ${result.delivered || 0} из ${result.recipients || 0}.`,
-        result.unavailable ? `Не запускали бота: ${result.unavailable}.` : '',
-        result.failed ? `Ошибка Telegram: ${result.failed}.` : '',
+        `Telegram подтвердил отправку: ${result.delivered || 0} из ${result.recipients || 0}. Это не означает прочтение.`,
+        result.unavailable ? `Недоступно без /start: ${result.unavailable}.` : '',
+        result.pending ? `Ожидают автоматического повтора: ${result.pending}.` : '',
+        result.attention ? `Нужно решение администратора: ${result.attention}.` : '',
+        result.failed ? `Не подтверждено Telegram: ${result.failed}.` : '',
       ].filter(Boolean).join(' '));
       setBroadcastTitle('');
       setBroadcastBody('');
@@ -1345,9 +1763,14 @@ export default function MiniApp({
       setBroadcastSearch('');
       setShowBroadcastBlocks(false);
       setShowBroadcastPeople(false);
+      setBroadcastDraftNotice('');
+      removeFormDraft(window.sessionStorage, currentUser.id, 'broadcast');
       await onRefreshState();
     } catch (error: any) {
-      setTeamError(error.message || 'Не удалось отправить рассылку. Проверь соединение и повтори.');
+      const message = error instanceof TypeError || /failed to fetch|network/i.test(String(error?.message || ''))
+        ? 'Нет соединения с сервером. Проверь интернет и повтори отправку — черновик сохранён.'
+        : error.message || 'Не удалось отправить рассылку. Проверь соединение и повтори — черновик сохранён.';
+      setBroadcastError(message);
     } finally {
       setBroadcastSaving(false);
     }
@@ -1435,34 +1858,125 @@ export default function MiniApp({
     }
   };
 
-  const clearTaskLog = async () => {
+  const clearArchivedTasks = async () => {
     if (!isAdmin) return;
-    const confirmed = window.confirm('Удалить весь бэклог задач из базы? Это безвозвратное действие: исчезнут все открытые, активные и выполненные задачи, а также история для экспорта.');
-    if (!confirmed) return;
-    const secondConfirm = window.confirm('Точно удалить ВСЕ задачи? Отменить это действие нельзя.');
-    if (!secondConfirm) return;
-    const res = await fetch('/api/task/log/clear', {
+    const previewResponse = await fetch('/api/task/archive/preview', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ requesterId: currentUser.id }),
     });
-    if (res.ok) onRefreshState();
+    const preview = await previewResponse.json();
+    if (!previewResponse.ok) return setTaskError(preview.error || 'Не удалось проверить архив');
+    if (!preview.count) return setTaskNotice('Архив уже пуст. Активные задачи не затронуты.');
+    const confirmed = window.confirm(`Удалить ${preview.count} архивных задач: выполнено — ${preview.completedCount}, отменено — ${preview.cancelledCount}? Открытые и активные задачи останутся.`);
+    if (!confirmed) return;
+    const response = await fetch('/api/task/archive/clear', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ requesterId: currentUser.id, taskIds: preview.taskIds }),
+    });
+    const body = await response.json();
+    if (!response.ok) return setTaskError(body.error || 'Не удалось очистить архив');
+    setTaskNotice(`Удалено архивных задач: ${body.removedCount}. Резервная копия: ${body.backupId}.`);
+    await onRefreshState();
+  };
+
+  const loadDeliveryIssues = async () => {
+    if (!isAdmin) return;
+    setDeliveryJournalBusy(true);
+    setDeliveryJournalError('');
+    try {
+      const response = await fetch('/api/notification-deliveries');
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || 'Не удалось загрузить журнал доставки');
+      const issues = (result.deliveries || []).filter((item: DeliveryIssue) => item.status === 'failed' || item.status === 'unknown');
+      setDeliveryIssues(issues);
+      setSelectedDeliveryIds((current) => current.filter((id) => issues.some((item: DeliveryIssue) => item.id === id)));
+    } catch (error: any) {
+      setDeliveryJournalError(error.message || 'Не удалось загрузить журнал доставки');
+    } finally {
+      setDeliveryJournalBusy(false);
+    }
+  };
+
+  const toggleDeliveryJournal = async () => {
+    const next = !deliveryJournalOpen;
+    setDeliveryJournalOpen(next);
+    if (next) await loadDeliveryIssues();
+  };
+
+  const loadDiagnostics = async () => {
+    if (!isAdmin || diagnosticsBusy) return;
+    setDiagnosticsBusy(true);
+    setDiagnosticsError('');
+    try {
+      const response = await fetch('/api/admin/diagnostics');
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.error || 'Не удалось получить состояние сервиса');
+      setDiagnostics(result as OperationalDiagnostics);
+    } catch (error: any) {
+      setDiagnosticsError(error.message || 'Не удалось получить состояние сервиса');
+    } finally {
+      setDiagnosticsBusy(false);
+    }
+  };
+
+  const toggleDiagnostics = async () => {
+    const next = !diagnosticsOpen;
+    setDiagnosticsOpen(next);
+    if (next && !diagnostics) await loadDiagnostics();
+  };
+
+  const retrySelectedDeliveries = async () => {
+    if (!selectedDeliveryIds.length || deliveryJournalBusy) return;
+    setDeliveryJournalBusy(true);
+    setDeliveryJournalError('');
+    try {
+      const response = await fetch('/api/notification-deliveries/retry', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ requesterId: currentUser.id, ids: selectedDeliveryIds }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || 'Не удалось повторить доставку');
+      setSelectedDeliveryIds([]);
+      await onRefreshState();
+      await loadDeliveryIssues();
+    } catch (error: any) {
+      setDeliveryJournalError(error.message || 'Не удалось повторить доставку');
+      setDeliveryJournalBusy(false);
+    }
+  };
+
+  const resetTaskSeason = async () => {
+    if (!isAdmin) return;
+    const previewResponse = await fetch('/api/task/season-reset/preview', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ requesterId: currentUser.id }),
+    });
+    const preview = await previewResponse.json();
+    if (!previewResponse.ok) return setTaskError(preview.error || 'Не удалось проверить задачи');
+    if (!preview.count) return setTaskNotice('Задач для сезонного сброса нет.');
+    const confirmation = window.prompt(`Сезонный сброс удалит все задачи (${preview.count}), включая активные. Перед удалением будет создана резервная копия. Введите: СБРОСИТЬ СЕЗОН`);
+    if (confirmation === null) return;
+    const response = await fetch('/api/task/season-reset', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ requesterId: currentUser.id, taskIds: preview.taskIds, confirmation }),
+    });
+    const body = await response.json();
+    if (!response.ok) return setTaskError(body.error || 'Не удалось выполнить сезонный сброс');
+    setTaskNotice(`Сезон сброшен: удалено задач — ${body.removedCount}. Резервная копия: ${body.backupId}.`);
+    await onRefreshState();
   };
 
   const addUser = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!isAdmin) return;
-    const res = await fetch('/api/user/add', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+    const res = await idempotentPost('/api/user/add', {
         requesterId: currentUser.id,
         realName: newUserRealName,
         username: newUserUsername,
         role: newUserRole,
         birthday: newUserBirthday,
-      }),
-    });
+      });
     if (res.ok) {
       setNewUserRealName('');
       setNewUserUsername('');
@@ -1598,11 +2112,7 @@ export default function MiniApp({
   const addFacultyUser = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!isAdmin) return;
-    const res = await fetch('/api/faculty/user/add', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ requesterId: currentUser.id, ...facultyUserDraft }),
-    });
+    const res = await idempotentPost('/api/faculty/user/add', { requesterId: currentUser.id, ...facultyUserDraft });
     if (res.ok) {
       setFacultyUserDraft({ realName: '', username: '', role: 'faculty_responsible', facultyId: faculties[0]?.id || '', competencies: [] });
       onRefreshState();
@@ -1611,13 +2121,23 @@ export default function MiniApp({
 
   const deleteFacultyUser = async (userId: string) => {
     if (!isAdmin) return;
-    const confirmed = window.confirm('Удалить ответственного факультета? Его активные задачи останутся в бэклоге без этого исполнителя.');
+    const confirmed = window.confirm('Деактивировать ответственного факультета? История сохранится, вход и новые назначения будут отключены.');
     if (!confirmed) return;
-    const res = await fetch('/api/faculty/user/delete', {
+    let res = await fetch('/api/faculty/user/delete', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ requesterId: currentUser.id, userId }),
     });
+    if (res.status === 409) {
+      const conflict = await res.json();
+      if (conflict.code === 'active_tasks_require_confirmation'
+        && window.confirm(`${conflict.error}\nЗадач: ${conflict.impact?.activeTaskIds?.length || 0}. Продолжить?`)) {
+        res = await fetch('/api/faculty/user/delete', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ requesterId: currentUser.id, userId, confirmTaskRelease: true }),
+        });
+      } else if (conflict.error) window.alert(conflict.error);
+    }
     if (res.ok) onRefreshState();
   };
 
@@ -1631,11 +2151,17 @@ export default function MiniApp({
     };
     setFacultyTaskErrors(nextErrors);
     if (Object.values(nextErrors).some(Boolean)) return;
-    const res = await fetch(editingFacultyTaskId ? '/api/faculty/task/update' : '/api/faculty/task/create', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ requesterId: currentUser.id, taskId: editingFacultyTaskId, ...facultyTaskDraft }),
-    });
+    const facultyTaskBody = {
+        requesterId: currentUser.id,
+        taskId: editingFacultyTaskId,
+        version: editingFacultyTaskId
+          ? state.tasks.find((task) => task.id === editingFacultyTaskId)?.version
+          : undefined,
+        ...facultyTaskDraft,
+      };
+    const res = editingFacultyTaskId
+      ? await fetch('/api/faculty/task/update', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(facultyTaskBody) })
+      : await idempotentPost('/api/faculty/task/create', facultyTaskBody);
     if (res.ok) {
       setFacultyTaskDraft({ facultyId: faculties[0]?.id || '', competency: '', eventId: '', title: '', description: '', deadline: '', assignedTo: [], reminders: [] });
       setFacultyTaskErrors({});
@@ -1713,13 +2239,23 @@ export default function MiniApp({
 
   const deleteUser = async (userId: string) => {
     if (userId === currentUser.id) return;
-    const confirmed = window.confirm('Удалить человека из команды? Это безвозвратное действие: профиль, слоты и сообщения будут удалены.');
+    const confirmed = window.confirm('Деактивировать человека? История сохранится, но вход, рассылки и новые назначения будут отключены.');
     if (!confirmed) return;
-    const res = await fetch('/api/user/delete', {
+    let res = await fetch('/api/user/delete', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ requesterId: currentUser.id, userId }),
     });
+    if (res.status === 409) {
+      const conflict = await res.json();
+      if (conflict.code === 'active_tasks_require_confirmation'
+        && window.confirm(`${conflict.error}\nЗадач: ${conflict.impact?.activeTaskIds?.length || 0}. Продолжить?`)) {
+        res = await fetch('/api/user/delete', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ requesterId: currentUser.id, userId, confirmTaskRelease: true }),
+        });
+      } else if (conflict.error) window.alert(conflict.error);
+    }
     if (res.ok) onRefreshState();
   };
 
@@ -1739,22 +2275,88 @@ export default function MiniApp({
     return () => document.documentElement.classList.remove('dark-theme');
   }, [darkTheme]);
 
+  useEffect(() => {
+    document.documentElement.classList.toggle('mega-calm-background', calmBackground);
+    window.localStorage.setItem('megabattle-calm-background', String(calmBackground));
+    return () => document.documentElement.classList.remove('mega-calm-background');
+  }, [calmBackground]);
+
+  useEffect(() => {
+    const viewport = window.visualViewport;
+    const syncViewport = () => {
+      const viewportHeight = viewport?.height || window.innerHeight;
+      document.documentElement.style.setProperty('--mega-visual-viewport-height', `${Math.round(viewportHeight)}px`);
+      const keyboardOpen = Boolean(viewport && window.innerHeight - viewport.height > 120);
+      document.documentElement.classList.toggle('mega-keyboard-open', keyboardOpen);
+    };
+    syncViewport();
+    viewport?.addEventListener('resize', syncViewport);
+    viewport?.addEventListener('scroll', syncViewport);
+    window.addEventListener('resize', syncViewport);
+    return () => {
+      viewport?.removeEventListener('resize', syncViewport);
+      viewport?.removeEventListener('scroll', syncViewport);
+      window.removeEventListener('resize', syncViewport);
+      document.documentElement.classList.remove('mega-keyboard-open');
+      document.documentElement.style.removeProperty('--mega-visual-viewport-height');
+    };
+  }, []);
+
+  const hasUnsavedDraft = taskDraftDirty || meetingDraftDirty || broadcastDraftDirty || dirtyWeekIndexes.length > 0;
+  const hasOpenEditor = showTaskForm || showMeetingForm || completingTaskId !== null || avatarEditorSource !== null
+    || showEventForm || broadcastOpen || showAddUserForm || editingUserId !== null || editingFacultyTaskId !== null || editingFacultyUserId !== null;
+
+  useEffect(() => {
+    if (!hasUnsavedDraft) return;
+    const warnBeforeClose = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', warnBeforeClose);
+    return () => window.removeEventListener('beforeunload', warnBeforeClose);
+  }, [hasUnsavedDraft]);
+
+  useEffect(() => {
+    const webApp = (window as any).Telegram?.WebApp;
+    if (typeof webApp?.isVersionAtLeast === 'function' && !webApp.isVersionAtLeast('6.1')) return;
+    const backButton = webApp?.BackButton;
+    if (!backButton?.show || !backButton?.hide || !backButton?.onClick || !backButton?.offClick) return;
+    const shouldShow = hasOpenEditor || activeTab === 'profile' || activeTab === 'admin';
+    const goBack = () => {
+      if (avatarEditorSource) return setAvatarEditorSource(null);
+      if (completingTaskId) return closeCompletionPrompt();
+      if (showTaskForm) return discardTaskForm();
+      if (showMeetingForm) return discardMeetingForm();
+      if (showEventForm) return closeWorkEventForm();
+      if (broadcastOpen) return setBroadcastOpen(false);
+      if (showAddUserForm) return setShowAddUserForm(false);
+      if (editingUserId) return setEditingUserId(null);
+      if (editingFacultyTaskId) return setEditingFacultyTaskId(null);
+      if (editingFacultyUserId) return setEditingFacultyUserId(null);
+      if (activeTab === 'admin' || activeTab === 'profile') return navigateBack();
+    };
+    if (shouldShow) {
+      backButton.show();
+      backButton.onClick(goBack);
+    } else {
+      backButton.hide();
+    }
+    return () => {
+      backButton.offClick(goBack);
+      if (shouldShow) backButton.hide();
+    };
+  }, [activeTab, avatarEditorSource, broadcastOpen, completingTaskId, editingFacultyTaskId, editingFacultyUserId, editingUserId, hasOpenEditor, navigateBack, showAddUserForm, showEventForm, showMeetingForm, showTaskForm]);
+
   return (
     <div className="mega-shell min-h-screen text-slate-950">
       <header className="mega-header sticky top-0 z-30 overflow-hidden text-white">
-        <div className="relative px-4 pb-3 pt-[calc(env(safe-area-inset-top)+10px)]">
+        <div className="mega-header-inner relative px-4 pb-3">
           <div className="flex items-center justify-between gap-3">
             <img className="mega-logo" src="/brand/megabattle-logo.svg" alt="ITMO MegaBattle" />
-            <button
-              type="button"
-              onClick={() => setActiveTab('profile')}
-              aria-label="Открыть профиль"
-              aria-current={activeTab === 'profile' ? 'page' : undefined}
-              className="mega-profile-trigger min-w-0 flex-1 text-left"
-            >
+            <div className="mega-profile-trigger min-w-0 flex-1 text-left">
               <p className="mega-context truncate">{currentUser.realName} · {isAdmin ? 'администратор' : 'организатор'}</p>
-              <h1 className="mega-page-title truncate">{pageTitle}</h1>
-            </button>
+              <h1 className="mega-page-title line-clamp-2">{pageTitle}</h1>
+            </div>
             <div className="mega-header-actions flex shrink-0 items-center gap-2">
               <button
                 type="button"
@@ -1772,7 +2374,7 @@ export default function MiniApp({
               </button>
               <button
                 type="button"
-                onClick={() => setActiveTab('profile')}
+                onClick={() => navigateToTab('profile')}
                 aria-current={activeTab === 'profile' ? 'page' : undefined}
                 className={`${iconButtonClass} h-11 w-11`}
                 title="Профиль"
@@ -1794,12 +2396,12 @@ export default function MiniApp({
         {activeTab === 'profile' && (
           <section className="space-y-4">
             <div className="rounded-3xl border border-blue-100 bg-white p-5 shadow-sm">
-              <div className="mb-4 flex min-w-0 items-center justify-between gap-3">
+              <div className="mega-heading-action-row mb-4 flex min-w-0 flex-col items-stretch justify-between gap-3 min-[360px]:flex-row min-[360px]:items-center">
                 <h2 className="min-w-0 text-lg font-black text-slate-950">Профиль</h2>
                 <button
                   type="button"
                   onClick={() => editingUserId === currentUser.id ? setEditingUserId(null) : startUserEdit(currentUser)}
-                  className={`${miniButtonClass} min-h-11 shrink-0 px-3`}
+                  className={`${miniButtonClass} min-h-11 w-full shrink-0 px-3 min-[360px]:w-auto`}
                   aria-expanded={editingUserId === currentUser.id}
                 >
                   <PencilSimple className="h-4 w-4" weight="bold" />
@@ -1813,7 +2415,7 @@ export default function MiniApp({
                   <input type="file" accept="image/*" className="sr-only" onChange={(event) => { chooseAvatarFile(event.target.files?.[0]); event.currentTarget.value = ''; }} />
                 </label>
                 <div className="min-w-0">
-                  <h2 className="truncate text-lg font-black">{currentUser.realName}</h2>
+                  <h2 className="break-words text-lg font-black">{currentUser.realName}</h2>
                   <a href={telegramLink(currentUser.username)} onClick={(event) => openTelegramProfile(event, telegramLink(currentUser.username))} className="text-sm font-bold text-[#0069E0]">
                     {currentUser.username}
                   </a>
@@ -1830,6 +2432,21 @@ export default function MiniApp({
                 </div>
               )}
 
+              <button
+                type="button"
+                className="mt-4 flex min-h-11 w-full items-center justify-between gap-3 rounded-2xl border border-blue-100 bg-slate-50 px-3 py-2 text-left"
+                aria-pressed={calmBackground}
+                onClick={() => setCalmBackground((enabled) => !enabled)}
+              >
+                <span className="min-w-0">
+                  <span className="block text-sm font-black">Спокойный фон</span>
+                  <span className="block text-xs font-semibold text-slate-500">Остановить движение линий</span>
+                </span>
+                <span className={`relative h-6 w-11 shrink-0 rounded-full transition ${calmBackground ? 'bg-[#0069E0]' : 'bg-slate-200'}`} aria-hidden="true">
+                  <span className={`absolute top-1 h-4 w-4 rounded-full bg-white transition-transform ${calmBackground ? 'translate-x-6' : 'translate-x-1'}`} />
+                </span>
+              </button>
+
               {editingUserId === currentUser.id && (
                 <div className="mt-4 space-y-3 rounded-2xl border border-blue-100 bg-slate-50 p-3">
                   <div className="grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-2">
@@ -1841,7 +2458,7 @@ export default function MiniApp({
                     </Field>
                   </div>
                   <Field label="Дата рождения">
-                    <DatePickerField value={userDraft.birthday} onChange={(value) => setUserDraft((prev) => ({ ...prev, birthday: value }))} placeholder="Выбери дату" fullYear />
+                    <DatePickerField label="Дата рождения" value={userDraft.birthday} onChange={(value) => setUserDraft((prev) => ({ ...prev, birthday: value }))} placeholder="Выбери дату" fullYear />
                   </Field>
                   <ProfileBlockSelectors
                     competencies={competencies}
@@ -1860,31 +2477,35 @@ export default function MiniApp({
                   />
                   {teamError && <p role="alert" className="text-sm font-bold text-rose-600">{teamError}</p>}
                   <div className="grid grid-cols-2 gap-2">
-                    <button type="button" onClick={() => setEditingUserId(null)} className={secondaryButtonClass}>Отмена</button>
-                    <button type="button" onClick={() => void updateUser(currentUser.id)} disabled={savingUserId === currentUser.id} className={`${primaryButtonClass} disabled:opacity-60`}>
+                    <Button type="button" variant="secondary" onClick={() => setEditingUserId(null)}>Отмена</Button>
+                    <Button type="button" onClick={() => void updateUser(currentUser.id)} pending={savingUserId === currentUser.id}>
                       {savingUserId === currentUser.id ? 'Сохраняю…' : 'Сохранить'}
-                    </button>
+                    </Button>
                   </div>
                 </div>
               )}
 
-              <div className="mt-5 grid grid-cols-2 overflow-hidden rounded-2xl border border-blue-100 bg-slate-50 sm:grid-cols-4">
-                {[
-                  ['Завершено из назначенных', `${profileCompletedTasks.length} из ${profileAssignedTasks.length}`],
-                  ['Сейчас в работе', myTasks.length],
-                  ['В срок среди задач с дедлайном', profileDatedCompletedTasks.length ? `${profileOnTimeTasks.length} из ${profileDatedCompletedTasks.length}` : '—'],
-                  ['Учтено времени', taskDurationText(profileTrackedMinutes) || '—'],
-                ].map(([label, value], index) => (
-                  <div key={String(label)} className={`p-3 ${index % 2 ? 'border-l border-blue-100' : ''} ${index > 1 ? 'border-t border-blue-100 sm:border-t-0 sm:border-l' : ''}`}>
-                    <div className="text-xl font-black text-[#0069E0]">{value}</div>
-                    <div className="mt-1 text-xs font-bold text-slate-500">{label}</div>
-                  </div>
-                ))}
-              </div>
+              {profileHasTaskHistory ? (
+                <div className="mt-5 grid grid-cols-2 overflow-hidden rounded-2xl border border-blue-100 bg-slate-50 sm:grid-cols-4">
+                  {[
+                    ['Завершено из назначенных', `${profileCompletedTasks.length} из ${profileAssignedTasks.length}`],
+                    ['Сейчас в работе', myTasks.length],
+                    ['В срок среди задач с дедлайном', profileDatedCompletedTasks.length ? `${profileOnTimeTasks.length} из ${profileDatedCompletedTasks.length}` : 'Нет задач с дедлайном'],
+                    ['Учтено времени', taskDurationText(profileTrackedMinutes) || 'Время пока не указано'],
+                  ].map(([label, value], index) => (
+                    <div key={String(label)} className={`min-w-0 p-3 ${index % 2 ? 'border-l border-blue-100' : ''} ${index > 1 ? 'border-t border-blue-100 sm:border-t-0 sm:border-l' : ''}`}>
+                      <div className="break-words text-lg font-black text-[#0069E0]">{value}</div>
+                      <div className="mt-1 text-xs font-bold text-slate-500">{label}</div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <InlineNotice className="mt-5">Статистика появится после первой назначенной или созданной задачи.</InlineNotice>
+              )}
 
               <div className="mt-4 space-y-2 text-sm text-slate-600">
                 <InfoRow label="Главный блок" value={currentUser.primaryCompetency || 'не выбран'} />
-                <InfoRow label="Другие блоки" value={(currentUser.competencies || []).filter((item) => item !== currentUser.primaryCompetency).join(', ') || '—'} />
+                <InfoRow label="Другие блоки" value={(currentUser.competencies || []).filter((item) => item !== currentUser.primaryCompetency).join(', ') || 'не выбраны'} />
                 <InfoRow label="Статус слотов" value={profileSlotsCompleted ? 'неделя сохранена' : 'нужно отметить'} />
               </div>
             </div>
@@ -1892,7 +2513,7 @@ export default function MiniApp({
             {isAdmin && (
               <button
                 type="button"
-                onClick={() => setActiveTab('admin')}
+                onClick={() => navigateToTab('admin')}
                 className={`${primaryButtonClass} py-4 text-base`}
               >
                 <Shield className="h-5 w-5" weight="fill" />
@@ -1900,20 +2521,22 @@ export default function MiniApp({
               </button>
             )}
 
-            <div className="rounded-3xl border border-blue-100 bg-white p-5 shadow-sm">
-              <h3 className="text-lg font-black">Статистика задач</h3>
-              <p className="mt-1 text-sm font-semibold text-slate-500">Только задачи, которые были назначены тебе или созданы тобой</p>
-              <div className="mt-4 space-y-3 text-sm text-slate-600">
-                <InfoRow label="Создано задач" value={String(profileCreatedTasks.length)} />
-                <InfoRow label="Завершено из созданных" value={String(profileCreatedCompletedTasks.length)} />
-                <InfoRow label="Важных сейчас в работе" value={String(profileImportantTasks.length)} />
-                <InfoRow label="Блок завершённых задач" value={profileTopCompetency} />
-                <InfoRow
-                  label="Время указано"
-                  value={`${profileTimedTasks.length} из ${profileCompletedTasks.length} выполненных`}
-                />
+            {profileHasTaskHistory && (
+              <div className="rounded-3xl border border-blue-100 bg-white p-5 shadow-sm">
+                <h3 className="text-lg font-black">Статистика задач</h3>
+                <p className="mt-1 text-sm font-semibold text-slate-500">Только задачи, которые были назначены тебе или созданы тобой</p>
+                <div className="mt-4 space-y-3 text-sm text-slate-600">
+                  <InfoRow label="Создано задач" value={String(profileCreatedTasks.length)} />
+                  <InfoRow label="Завершено из созданных" value={String(profileCreatedCompletedTasks.length)} />
+                  <InfoRow label="Важных сейчас в работе" value={String(profileImportantTasks.length)} />
+                  <InfoRow label="Блок завершённых задач" value={profileTopCompetency} />
+                  <InfoRow
+                    label="Время указано"
+                    value={`${profileTimedTasks.length} из ${profileCompletedTasks.length} выполненных`}
+                  />
+                </div>
               </div>
-            </div>
+            )}
 
             <div className="rounded-3xl border border-blue-100 bg-white p-5 shadow-sm">
               <h3 className="text-lg font-black">Ритм недели</h3>
@@ -1922,8 +2545,8 @@ export default function MiniApp({
                 {[
                   ['Дней со слотами', `${profileAvailableDays} из ${activeDays.length}`],
                   ['Свободных часов', profileAvailableHours],
-                  ['Самый свободный день', profileBestAvailability?.hours ? profileBestAvailability.day : '—'],
-                  ['Среднее время задачи', profileAverageMinutes ? taskDurationText(profileAverageMinutes) : '—'],
+                  ['Самый свободный день', profileBestAvailability?.hours ? profileBestAvailability.day : 'Пока не отмечен'],
+                  ['Среднее время задачи', profileAverageMinutes ? taskDurationText(profileAverageMinutes) : 'Пока нет данных'],
                 ].map(([label, value]) => (
                   <div key={String(label)} className="min-w-0 bg-slate-50 p-3">
                     <div className="break-words text-base font-black text-[#0069E0]">{value}</div>
@@ -1943,14 +2566,14 @@ export default function MiniApp({
         {isAdminPanel && (
           <section className="space-y-4">
             <div className="rounded-2xl border border-blue-100 bg-white p-1.5 shadow-sm" role="tablist" aria-label="Разделы админской панели">
-              <div className="grid grid-cols-3 gap-1 sm:grid-cols-6">
+              <div className="grid grid-cols-2 gap-1 min-[480px]:grid-cols-3 sm:grid-cols-6">
                 {([
                   ['team', 'Команда'],
-                  ['events', 'Меро'],
+                  ['events', 'Мероприятия'],
                   ['slots', 'Слоты'],
                   ['meetings', 'Встречи'],
                   ['tasks', 'Задачи'],
-                  ['faculties', 'МФ'],
+                  ['faculties', 'Факультеты'],
                 ] as const).map(([section, label]) => (
                   <button
                     key={section}
@@ -1958,7 +2581,7 @@ export default function MiniApp({
                     role="tab"
                     aria-selected={adminSection === section}
                     onClick={() => setAdminSection(section)}
-                    className={`min-h-11 min-w-0 rounded-xl px-1 text-xs font-black transition sm:px-4 ${adminSection === section ? 'bg-[#0069E0] text-white shadow-[0_8px_20px_rgba(0,105,224,0.2)]' : 'text-[#4D647A] hover:bg-blue-50 hover:text-[#005BC4] active:bg-blue-100'}`}
+                    className={`min-h-11 min-w-0 break-words rounded-xl px-1.5 py-2 text-[11px] font-black leading-tight transition sm:px-2 ${adminSection === section ? 'bg-[#0069E0] text-white shadow-[0_8px_20px_rgba(0,105,224,0.2)]' : 'text-[#4D647A] hover:bg-blue-50 hover:text-[#005BC4] active:bg-blue-100'}`}
                   >
                     {label}
                   </button>
@@ -1989,10 +2612,10 @@ export default function MiniApp({
                     <Field label="Название"><input value={eventName} onChange={(event) => setEventName(event.target.value)} className={inputClass} placeholder="Например, MegaBattle 2027" /></Field>
                     <Field label="Описание"><textarea value={eventDescription} onChange={(event) => setEventDescription(event.target.value)} className={inputClass} rows={3} placeholder="Коротко: что проводим и для кого" /></Field>
                     <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                      <Field label="Начало"><DatePickerField value={eventStartsAt} onChange={setEventStartsAt} placeholder="Не указано" /></Field>
-                      <Field label="Завершение"><DatePickerField value={eventEndsAt} onChange={setEventEndsAt} placeholder="Не указано" /></Field>
+                      <Field label="Начало"><DatePickerField label="Дата начала мероприятия" value={eventStartsAt} onChange={setEventStartsAt} placeholder="Не указано" /></Field>
+                      <Field label="Завершение"><DatePickerField label="Дата завершения мероприятия" value={eventEndsAt} onChange={setEventEndsAt} placeholder="Не указано" /></Field>
                     </div>
-                    <button disabled={eventSaving} className={`${primaryButtonClass} disabled:opacity-60`}>{eventSaving ? 'Сохраняю...' : editingEventId ? 'Сохранить изменения' : 'Создать мероприятие'}</button>
+                    <Button pending={eventSaving}>{eventSaving ? 'Сохраняю...' : editingEventId ? 'Сохранить изменения' : 'Создать мероприятие'}</Button>
                   </form>
                 )}
 
@@ -2005,7 +2628,7 @@ export default function MiniApp({
                           <div className="min-w-0">
                             <div className="flex flex-wrap items-center gap-2">
                               <h3 className="break-words font-black">{workEvent.name}</h3>
-                              <span className={`rounded-full px-2.5 py-1 text-xs font-black ${workEventStatusClass(workEvent.status)}`}>{workEvent.status === 'active' ? 'В работе' : 'Завершено'}</span>
+                              <Badge variant={workEvent.status === 'active' ? 'success' : 'neutral'}>{workEvent.status === 'active' ? 'В работе' : 'Завершено'}</Badge>
                             </div>
                             {workEvent.description && <p className="mt-2 break-words text-sm text-slate-500">{workEvent.description}</p>}
                             <p className="mt-2 text-xs font-bold text-slate-500">Задач: {eventTaskCount}{workEvent.startsAt || workEvent.endsAt ? ` · ${workEvent.startsAt || '…'} — ${workEvent.endsAt || '…'}` : ''}</p>
@@ -2084,8 +2707,8 @@ export default function MiniApp({
                     Сохранить и уведомить
                   </button>
                 </div>
-                {slotNotice && <p role="status" className="mt-3 rounded-2xl bg-emerald-50 px-3 py-2 text-sm font-bold text-emerald-800">{slotNotice}</p>}
-                {slotError && <p role="alert" className="mt-3 rounded-2xl bg-amber-50 px-3 py-2 text-sm font-bold text-amber-800">{slotError}</p>}
+                {slotNotice && <InlineNotice variant="success" className="mt-3">{slotNotice}</InlineNotice>}
+                {slotError && <InlineNotice variant="warning" className="mt-3">{slotError}</InlineNotice>}
               </div>
             )}
 
@@ -2095,11 +2718,13 @@ export default function MiniApp({
                   <form ref={meetingFormRef} onSubmit={submitMeeting} className="scroll-mt-24 space-y-3 rounded-3xl border border-blue-100 bg-white p-4 shadow-sm animate-in fade-in slide-in-from-top-2 duration-200">
                     <div className="flex items-center justify-between gap-2">
                       <h2 className="font-black">{`Редактировать ${meetingKindText(meetingKind).accusative}`}</h2>
-                      <button type="button" onClick={resetMeetingForm} className={miniButtonClass}><X className="h-4 w-4" /> Отмена</button>
+                      <button type="button" onClick={discardMeetingForm} className={miniButtonClass}><X className="h-4 w-4" /> Закрыть</button>
                     </div>
-                    {meetingError && <div role="alert" className="rounded-2xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-bold text-rose-800">{meetingError}</div>}
+                    {meetingDraftNotice && <InlineNotice>{meetingDraftNotice}</InlineNotice>}
+                    {meetingDraftConflict && <InlineNotice variant="warning">Сохранение приостановлено: встреча была изменена в другом окне.</InlineNotice>}
+                    {meetingError && <InlineNotice variant="error" focusOnMount>{meetingError}</InlineNotice>}
                     <MeetingKindPicker value={meetingKind} onChange={selectMeetingKind} />
-                    {meetingKind !== 'setup' && <MeetingAudiencePicker value={meetingType} onChange={setMeetingAudience} />}
+                    <Field label="Название"><input value={meetingTitle} onChange={(event) => setMeetingTitle(event.target.value)} className={inputClass} /></Field>
                     {meetingKind === 'setup' && (
                       <Field label="Мероприятие">
                         <select value={meetingEventId} onChange={(event) => setMeetingEventId(event.target.value)} className={selectClass} required>
@@ -2108,9 +2733,8 @@ export default function MiniApp({
                         </select>
                       </Field>
                     )}
-                    <Field label="Название"><input value={meetingTitle} onChange={(event) => setMeetingTitle(event.target.value)} className={inputClass} /></Field>
                     <div className={`grid min-w-0 grid-cols-1 gap-3 ${meetingKind === 'setup' ? 'min-[520px]:grid-cols-2' : 'min-[720px]:grid-cols-3'}`}>
-                      <Field label="Дата"><DatePickerField value={meetingDate} onChange={setMeetingDate} placeholder="Выбери дату" /></Field>
+                      <Field label="Дата"><DatePickerField label="Дата встречи" value={meetingDate} onChange={setMeetingDate} placeholder="Выбери дату" /></Field>
                       <Field label="Время"><input type="time" min={meetingKind === 'vibe' ? undefined : `${String(availabilityConfig.startHour).padStart(2, '0')}:00`} max={meetingKind === 'vibe' ? undefined : `${String(availabilityConfig.endHour).padStart(2, '0')}:00`} value={meetingTime} onChange={(event) => setMeetingTime(event.target.value)} className={inputClass} /></Field>
                       {meetingKind !== 'setup' && <Field label="Длительность">
                         <select value={meetingDuration} onChange={(event) => setMeetingDuration(event.target.value)} className={selectClass}>
@@ -2118,7 +2742,7 @@ export default function MiniApp({
                         </select>
                       </Field>}
                     </div>
-                    {meetingKind !== 'setup' && <Field label="Тема"><textarea value={meetingTopic} onChange={(event) => setMeetingTopic(event.target.value)} className={inputClass} rows={3} /></Field>}
+                    {meetingKind !== 'setup' && <MeetingAudiencePicker value={meetingType} onChange={setMeetingAudience} />}
                     {meetingKind !== 'setup' && meetingType === 'competency' && (
                       <Field label="Блок">
                         <select value={meetingCompetency} onChange={(event) => selectMeetingCompetency(event.target.value)} className={selectClass}>
@@ -2138,7 +2762,21 @@ export default function MiniApp({
                         ))}
                       </div>
                     )}
-                    <button disabled={savingMeeting} className={`${primaryButtonClass} disabled:opacity-70`}>{savingMeeting ? 'Сохраняю...' : meetingKind === 'setup' ? 'Сохранить монтаж' : 'Сохранить встречу'}</button>
+                    {meetingKind !== 'setup' && (
+                      <div className="border-t border-slate-100 pt-3">
+                        <button type="button" aria-expanded={showMeetingExtras} aria-controls="meeting-extra-fields" onClick={() => setShowMeetingExtras((value) => !value)} className={`${secondaryButtonClass} w-full justify-between`}>
+                          <span>Дополнительно</span>
+                          {showMeetingExtras ? <CaretUp className="h-4 w-4" /> : <CaretDown className="h-4 w-4" />}
+                        </button>
+                        {showMeetingExtras && (
+                          <div id="meeting-extra-fields" className="mt-3 space-y-3">
+                            <Field label="Тема"><input value={meetingTopic} onChange={(event) => setMeetingTopic(event.target.value)} className={inputClass} /></Field>
+                            <Field label="Описание"><textarea value={meetingDescription} onChange={(event) => setMeetingDescription(event.target.value)} className={inputClass} rows={3} /></Field>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    <Button pending={savingMeeting} disabled={meetingDraftConflict}>{savingMeeting ? 'Сохраняю...' : meetingKind === 'setup' ? 'Сохранить монтаж' : 'Сохранить встречу'}</Button>
                   </form>
                 )}
 
@@ -2177,15 +2815,18 @@ export default function MiniApp({
               <div className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                   <div>
-                    <h2 className="font-black">Управление журналом задач</h2>
-                    <p className="mt-1 text-xs font-semibold text-slate-500">Экспортируй историю или полностью очисти журнал задач.</p>
+                    <h2 className="font-black">Архив задач</h2>
+                    <p className="mt-1 text-xs font-semibold text-slate-500">Очистка архива удаляет только выполненные и отменённые задачи. Активные задачи остаются.</p>
                   </div>
                   <div className="flex flex-wrap gap-2">
                     <a href="https://docs.google.com/spreadsheets/d/1R1MtYJfEuGNw0JI_laNmRk_Un7wIQwxt0xRYTp3mih4/edit?gid=326388773#gid=326388773" target="_blank" rel="noreferrer" className={miniButtonClass}>
                       <ArrowSquareOut className="h-4 w-4" /> Таблица лога
                     </a>
-                    <button onClick={clearTaskLog} className={`${miniButtonClass} border-rose-100 bg-rose-50 text-rose-600 hover:bg-rose-100 active:bg-rose-200`}>
-                      <Trash className="h-4 w-4" /> Удалить лог
+                    <button onClick={clearArchivedTasks} className={`${miniButtonClass} border-amber-200 bg-amber-50 text-amber-800 hover:bg-amber-100 active:bg-amber-200`}>
+                      <Trash className="h-4 w-4" /> Удалить архив · {state.tasks.filter((task) => task.status === 'completed' || task.status === 'cancelled').length}
+                    </button>
+                    <button onClick={resetTaskSeason} className={`${miniButtonClass} border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100 active:bg-rose-200`}>
+                      <Trash className="h-4 w-4" /> Сезонный сброс · {state.tasks.length}
                     </button>
                     <button onClick={() => setShowTaskLog((value) => !value)} className={miniButtonClass}>
                       {showTaskLog ? 'Свернуть' : 'Открыть лог'}
@@ -2201,50 +2842,69 @@ export default function MiniApp({
         {activeTab === 'slots' && (
           <section className="space-y-4">
             {slotError && <div role="alert" className="rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm font-bold text-amber-800">{slotError}</div>}
+            {slotNotice && <InlineNotice variant="success">{slotNotice}</InlineNotice>}
 
             <div className="space-y-4">
-              {Array.from({ length: visibleWeeks }, (_, weekIndex) => (
-                <div key={weekIndex} className="space-y-3">
+              {Array.from({ length: visibleWeeks }, (_, weekIndex) => {
+                const weekRange = `${formatDayMonth(dateForSlotDay(weekIndex * 7 + activeDays[0]))}–${formatDayMonth(dateForSlotDay(weekIndex * 7 + activeDays[activeDays.length - 1]))}`;
+                const weekDirty = dirtyWeekIndexes.includes(weekIndex);
+                const weekOut = outWeekIndexes.includes(weekIndex);
+                return (
+                <div key={availabilityConfig.weekStarts[weekIndex]} className="space-y-3">
                   <div className="flex min-w-0 items-start gap-2 px-1">
                     <div className="min-w-0 flex-1">
-                      <button
-                        type="button"
-                        aria-expanded={expandedWeekInfoIndex === weekIndex}
-                        aria-controls={`week-info-${weekIndex}`}
-                        onClick={() => {
-                          const opening = expandedWeekInfoIndex !== weekIndex;
-                          setExpandedWeekInfoIndex(opening ? weekIndex : null);
-                          if (opening) {
-                            setWeekNameDraft(availabilityConfig.weekNames[weekIndex]);
-                            setWeekDescriptionDraft(availabilityConfig.weekDescriptions[weekIndex]);
-                          }
-                        }}
-                        className="mega-week-title flex max-w-full items-center gap-2 rounded-xl border border-slate-300 bg-white/70 px-3 py-2 text-left text-slate-950 shadow-sm"
-                      >
-                        <span className="min-w-0 flex-1 break-words">{availabilityConfig.weekNames[weekIndex]}</span>
-                        <CaretDown className={`h-4 w-4 shrink-0 transition-transform ${expandedWeekInfoIndex === weekIndex ? 'rotate-180' : ''}`} aria-hidden="true" />
-                      </button>
+                      {isAdmin ? (
+                        <button
+                          type="button"
+                          aria-expanded={expandedWeekInfoIndex === weekIndex}
+                          aria-controls={`week-info-${weekIndex}`}
+                          onClick={() => {
+                            const opening = expandedWeekInfoIndex !== weekIndex;
+                            setExpandedWeekInfoIndex(opening ? weekIndex : null);
+                            if (opening) {
+                              setWeekNameDraft(availabilityConfig.weekNames[weekIndex]);
+                              setWeekDescriptionDraft(availabilityConfig.weekDescriptions[weekIndex]);
+                            }
+                          }}
+                          className="mega-week-title flex max-w-full items-center gap-2 rounded-xl border border-slate-300 bg-white/70 px-3 py-2 text-left text-slate-950 shadow-sm"
+                        >
+                          <span className="min-w-0 flex-1 break-words">{availabilityConfig.weekNames[weekIndex]}</span>
+                          <CaretDown className={`h-4 w-4 shrink-0 transition-transform ${expandedWeekInfoIndex === weekIndex ? 'rotate-180' : ''}`} aria-hidden="true" />
+                        </button>
+                      ) : (
+                        <div className="mega-week-title max-w-full rounded-xl border border-slate-300 bg-white/70 px-3 py-2 text-slate-950">
+                          <span className="break-words">{availabilityConfig.weekNames[weekIndex]}</span>
+                        </div>
+                      )}
                       <p className="mt-1 text-xs font-semibold text-slate-500">
-                        {formatDayMonth(dateForSlotDay(weekIndex * 7 + activeDays[0]))} – {formatDayMonth(dateForSlotDay(weekIndex * 7 + activeDays[activeDays.length - 1]))}
+                        {weekRange}
                       </p>
+                      {availabilityConfig.weekDescriptions[weekIndex] && (
+                        <p className="mt-1 whitespace-pre-wrap break-words text-xs font-semibold leading-relaxed text-slate-600">{availabilityConfig.weekDescriptions[weekIndex]}</p>
+                      )}
+                      {weekDirty && <p className="mt-1 text-xs font-black text-[#005BC4]">● Есть несохранённые изменения</p>}
                     </div>
                     <button
-                    type="button"
-                    aria-pressed={outWeekIndexes.includes(weekIndex)}
-                    onClick={() => toggleOutWeek(weekIndex)}
-                    className={`shrink-0 whitespace-nowrap rounded-full border px-3 py-2 text-xs font-black ${pressClass} ${
-                      outWeekIndexes.includes(weekIndex)
-                        ? 'border-rose-300 bg-rose-50 text-rose-800'
-                        : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50 active:bg-slate-100'
-                    }`}
-                  >
-                    {outWeekIndexes.includes(weekIndex) ? '✅ Я в ауте' : 'Я в ауте'}
-                  </button>
+                      type="button"
+                      aria-pressed={weekOut}
+                      aria-describedby={`week-out-help-${weekIndex}`}
+                      onClick={() => toggleOutWeek(weekIndex)}
+                      className={`shrink-0 whitespace-nowrap rounded-full border px-3 py-2 text-xs font-black ${pressClass} ${
+                        weekOut
+                          ? 'border-rose-300 bg-rose-50 text-rose-800'
+                          : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50 active:bg-slate-100'
+                      }`}
+                    >
+                      {weekOut ? '✓ Я в ауте' : 'Я в ауте'}
+                    </button>
                   </div>
 
-                  {expandedWeekInfoIndex === weekIndex && (
+                  <p id={`week-out-help-${weekIndex}`} className={`mx-1 text-xs font-semibold ${weekOut ? 'text-rose-700' : 'text-slate-500'}`}>
+                    {weekOut ? 'Недоступен всю неделю. Отдельные дни и часы не отправятся.' : '«Я в ауте» означает: недоступен всю неделю.'}
+                  </p>
+
+                  {isAdmin && expandedWeekInfoIndex === weekIndex && (
                     <div id={`week-info-${weekIndex}`} className="mx-1 rounded-2xl border border-blue-100 bg-white p-3 shadow-sm">
-                      {isAdmin ? (
                         <form className="space-y-3" onSubmit={async (event) => {
                           event.preventDefault();
                           if (!weekNameDraft.trim()) {
@@ -2266,15 +2926,10 @@ export default function MiniApp({
                             {savingWeekInfoIndex === weekIndex ? 'Сохраняю…' : 'Сохранить неделю'}
                           </button>
                         </form>
-                      ) : (
-                        <p className="whitespace-pre-wrap break-words text-sm leading-relaxed text-slate-600">
-                          {availabilityConfig.weekDescriptions[weekIndex] || 'Описание недели пока не добавлено.'}
-                        </p>
-                      )}
                     </div>
                   )}
 
-                  {!outWeekIndexes.includes(weekIndex) && activeDayLabels.map((day) => {
+                  {!weekOut && activeDayLabels.map((day) => {
                     const absoluteDayIndex = weekIndex * 7 + day.dayIndex;
                     const selected = slots[absoluteDayIndex] || [];
                     const unavailable = hardUnavailableDays.includes(absoluteDayIndex);
@@ -2283,12 +2938,12 @@ export default function MiniApp({
                       <div key={`${weekIndex}-${day.full}`} className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
                         <div className="mb-3 min-w-0">
                           <h2 className="whitespace-nowrap text-sm font-black leading-tight sm:text-base"><span className="sm:hidden">{day.short},</span><span className="hidden sm:inline">{day.full},</span> {formatDayMonth(date)}</h2>
-                          <p className="text-xs text-slate-500">
-                            {unavailable ? 'Отмечено: не смогу' : selected.length ? `${selected.length} ч. свободно` : 'День ещё не отмечен'}
+                          <p className={`text-xs font-semibold ${unavailable ? 'text-slate-700' : selected.length ? 'text-[#005BC4]' : 'text-slate-500'}`} role="status">
+                            {unavailable ? '✓ Не смогу' : selected.length ? `✓ Выбрано: ${formatHours(selected)}` : '○ Не заполнено'}
                           </p>
                         </div>
                         <div className="mb-3 grid grid-cols-2 gap-2">
-                          <button onClick={() => selectWholeDay(absoluteDayIndex)} className={`${secondaryButtonClass} min-h-11 min-w-0 !rounded-2xl px-2.5`}>
+                          <button type="button" aria-pressed={selected.length === hours.length} onClick={() => selectWholeDay(absoluteDayIndex)} className={`${secondaryButtonClass} min-h-11 min-w-0 !rounded-2xl px-2.5`}>
                             {selected.length === hours.length ? 'Очистить' : 'Весь день'}
                           </button>
                           <button
@@ -2304,20 +2959,24 @@ export default function MiniApp({
                             {unavailable ? '✓ Не смогу' : 'Не смогу'}
                           </button>
                         </div>
-                        <div className="grid gap-2" style={{ gridTemplateColumns: `repeat(${Math.max(1, Math.ceil(hours.length / 2))}, minmax(0, 1fr))` }}>
+                        <div className="grid grid-cols-2 gap-2 min-[560px]:grid-cols-4">
                           {hours.map((hour) => {
                             const active = selected.includes(hour);
                             return (
                               <button
                                 key={hour}
+                                type="button"
+                                aria-pressed={active}
+                                aria-label={`${active ? 'Выбрано' : 'Выбрать'}: ${formatHourRange(hour)}`}
                                 onClick={() => toggleSlot(absoluteDayIndex, hour)}
-                                className={`h-11 rounded-2xl border text-sm font-black ${pressClass} ${
+                                className={`min-h-11 rounded-2xl border px-2 text-xs font-black sm:text-sm ${pressClass} ${
                                   active
                                     ? 'border-[#0069E0] bg-[#0069E0] text-white shadow-[0_8px_20px_rgba(0,105,224,0.2)] hover:bg-[#1677E8] active:bg-[#0058BD]'
                                     : 'border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100 active:bg-slate-100'
                                 }`}
                               >
-                                {hour}:00
+                                {active && <Check className="mr-1 inline h-4 w-4" aria-hidden="true" />}
+                                {formatHourRange(hour)}
                               </button>
                             );
                           })}
@@ -2325,20 +2984,27 @@ export default function MiniApp({
                       </div>
                     );
                   })}
-                  <button
-                    type="button"
-                    onClick={() => void saveWeek(weekIndex)}
-                    disabled={savingWeekIndex !== null || (!dirtyWeekIndexes.includes(weekIndex) && savedWeekIndexes.includes(weekIndex))}
-                    aria-busy={savingWeekIndex === weekIndex}
-                    className={`${primaryButtonClass} py-3 disabled:opacity-70`}
-                  >
-                    <Check className="h-5 w-5" />
-                    <span aria-live="polite">
-                      {savingWeekIndex === weekIndex ? 'Сохраняю...' : savedWeekIndexes.includes(weekIndex) ? 'Неделя сохранена' : `Сохранить неделю ${weekIndex + 1}`}
-                    </span>
-                  </button>
+                  {weekDirty && (
+                    <div className="flex flex-col gap-2 rounded-2xl border border-blue-100 bg-white p-2 min-[480px]:flex-row min-[480px]:items-center">
+                      <div className="min-w-0 flex-1 px-2 py-1">
+                        <p className="text-xs font-black text-[#005BC4]">Есть несохранённые изменения</p>
+                        <p className="mt-0.5 break-words text-xs font-semibold text-slate-600">{availabilityConfig.weekNames[weekIndex]} · {weekRange}</p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => void saveWeek(weekIndex)}
+                        disabled={savingWeekIndex !== null}
+                        aria-busy={savingWeekIndex === weekIndex}
+                        className={`${primaryCompactButtonClass} min-h-11 w-full px-4 min-[480px]:w-auto disabled:opacity-70`}
+                      >
+                        <Check className="h-5 w-5" />
+                        <span aria-live="polite">{savingWeekIndex === weekIndex ? 'Сохраняю…' : 'Сохранить неделю'}</span>
+                      </button>
+                    </div>
+                  )}
                 </div>
-              ))}
+                );
+              })}
             </div>
           </section>
         )}
@@ -2511,7 +3177,7 @@ export default function MiniApp({
                         className={`min-h-11 min-w-0 rounded-xl border px-2 text-xs font-black ${pressClass} ${
                           suggestionWeekIndex === weekIndex
                             ? 'border-[#0069E0] bg-[#0069E0] text-white'
-                            : 'border-slate-200 bg-white text-slate-600 hover:bg-blue-50'
+                            : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
                         }`}
                       >
                         <span className="block break-words">{availabilityConfig.weekNames[weekIndex]}</span>
@@ -2536,7 +3202,7 @@ export default function MiniApp({
                           className={`min-h-11 min-w-0 rounded-xl border px-1 text-xs font-black ${pressClass} ${
                             selected
                               ? 'border-[#0069E0] bg-[#0069E0] text-white'
-                              : 'border-slate-200 bg-white text-slate-600 hover:bg-blue-50'
+                              : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
                           }`}
                         >
                           {dayLabels[dayIndex].short}
@@ -2594,33 +3260,21 @@ export default function MiniApp({
               </div>
             </div>
 
-            {!showMeetingForm && (
-              <button
-                onClick={() => {
-                  resetMeetingForm();
-                  setShowMeetingForm(true);
-                }}
-                className={primaryButtonClass}
-              >
-                <Plus className="h-4 w-4" />
-                Назначить событие
-              </button>
-            )}
-
             {showMeetingForm && (
-            <form ref={meetingFormRef} onSubmit={submitMeeting} className={`${editingMeetingId ? 'order-first' : ''} scroll-mt-24 space-y-3 rounded-3xl border border-blue-100 bg-white p-4 shadow-sm animate-in fade-in slide-in-from-top-2 duration-200`}>
+            <form ref={meetingFormRef} onSubmit={submitMeeting} className="order-first scroll-mt-24 space-y-3 rounded-3xl border border-blue-100 bg-white p-4 shadow-sm animate-in fade-in slide-in-from-top-2 duration-200">
               <div className="flex min-w-0 items-start justify-between gap-2">
                 <h2 className="min-w-0 flex-1 break-words font-black">{editingMeetingId ? `Редактировать ${meetingKindText(meetingKind).accusative}` : 'Назначить событие'}</h2>
-                {editingMeetingId && (
-                  <button type="button" onClick={resetMeetingForm} className={`${miniButtonClass} shrink-0 whitespace-nowrap`}>
-                    <span aria-hidden="true">❌</span>
-                    Отмена
-                  </button>
-                )}
+                <button type="button" onClick={discardMeetingForm} className={`${miniButtonClass} shrink-0 whitespace-nowrap`}>
+                  <X className="h-4 w-4" /> Закрыть
+                </button>
               </div>
-              {meetingError && <div role="alert" className="rounded-2xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-bold text-rose-800">{meetingError}</div>}
+              {meetingDraftNotice && <InlineNotice>{meetingDraftNotice}</InlineNotice>}
+              {meetingDraftConflict && <InlineNotice variant="warning">Сохранение приостановлено: встреча была изменена в другом окне.</InlineNotice>}
+              {meetingError && <InlineNotice variant="error" focusOnMount>{meetingError}</InlineNotice>}
               <MeetingKindPicker value={meetingKind} onChange={selectMeetingKind} />
-              {meetingKind !== 'setup' && <MeetingAudiencePicker value={meetingType} onChange={setMeetingAudience} />}
+              <Field label="Название">
+                <input value={meetingTitle} onChange={(e) => setMeetingTitle(e.target.value)} className={inputClass} />
+              </Field>
               {meetingKind === 'setup' && (
                 <Field label="Мероприятие">
                   <select value={meetingEventId} onChange={(event) => setMeetingEventId(event.target.value)} className={selectClass} required>
@@ -2629,12 +3283,9 @@ export default function MiniApp({
                   </select>
                 </Field>
               )}
-              <Field label="Название">
-                <input value={meetingTitle} onChange={(e) => setMeetingTitle(e.target.value)} className={inputClass} />
-              </Field>
               <div className={`grid min-w-0 grid-cols-1 gap-3 min-[520px]:grid-cols-2 [&>*]:min-w-0 ${meetingKind !== 'setup' ? 'min-[820px]:grid-cols-3' : ''}`}>
                 <Field label="Дата">
-                  <DatePickerField value={meetingDate} onChange={setMeetingDate} placeholder="Выбери дату" />
+                  <DatePickerField label="Дата встречи" value={meetingDate} onChange={setMeetingDate} placeholder="Выбери дату" />
                 </Field>
                 <Field label="Время">
                   <input type="time" min={meetingKind === 'vibe' ? undefined : `${String(availabilityConfig.startHour).padStart(2, '0')}:00`} max={meetingKind === 'vibe' ? undefined : `${String(availabilityConfig.endHour).padStart(2, '0')}:00`} value={meetingTime} onChange={(e) => setMeetingTime(e.target.value)} className={inputClass} />
@@ -2645,9 +3296,7 @@ export default function MiniApp({
                   </select>
                 </Field>}
               </div>
-              {meetingKind !== 'setup' && <Field label="Тема">
-                <textarea value={meetingTopic} onChange={(e) => setMeetingTopic(e.target.value)} className={inputClass} rows={3} />
-              </Field>}
+              {meetingKind !== 'setup' && <MeetingAudiencePicker value={meetingType} onChange={setMeetingAudience} />}
               {meetingKind !== 'setup' && meetingType === 'competency' && (
                 <Field label="Блок">
                   <select value={meetingCompetency} onChange={(e) => selectMeetingCompetency(e.target.value)} className={selectClass}>
@@ -2675,21 +3324,62 @@ export default function MiniApp({
                   ))}
                 </div>
               )}
-              <button disabled={savingMeeting} className={`${primaryButtonClass} disabled:opacity-70`}>
+              {meetingKind !== 'setup' && (
+                <div className="border-t border-slate-100 pt-3">
+                  <button
+                    type="button"
+                    aria-expanded={showMeetingExtras}
+                    aria-controls="meeting-extra-fields"
+                    onClick={() => setShowMeetingExtras((value) => !value)}
+                    className={`${secondaryButtonClass} w-full justify-between`}
+                  >
+                    <span>Дополнительно</span>
+                    {showMeetingExtras ? <CaretUp className="h-4 w-4" /> : <CaretDown className="h-4 w-4" />}
+                  </button>
+                  {showMeetingExtras && (
+                    <div id="meeting-extra-fields" className="mt-3 space-y-3">
+                      <Field label="Тема">
+                        <input value={meetingTopic} onChange={(event) => setMeetingTopic(event.target.value)} className={inputClass} />
+                      </Field>
+                      <Field label="Описание">
+                        <textarea value={meetingDescription} onChange={(event) => setMeetingDescription(event.target.value)} className={inputClass} rows={3} />
+                      </Field>
+                    </div>
+                  )}
+                </div>
+              )}
+              <Button pending={savingMeeting} disabled={meetingDraftConflict}>
                 {savingMeeting ? 'Сохраняю...' : editingMeetingId ? meetingKind === 'setup' ? 'Сохранить монтаж' : 'Сохранить встречу' : `Запланировать ${meetingKindText(meetingKind).accusative}`}
-              </button>
+              </Button>
             </form>
             )}
 
             <div className="order-first space-y-3">
-              <div className="flex items-center justify-between gap-3 px-1">
-                <h2 className="font-black">Ближайшие встречи</h2>
-                {scheduledMeetings.length > 3 && (
-                  <ListDisclosure
-                    expanded={showAllMeetings}
-                    onToggle={() => setShowAllMeetings((value) => !value)}
-                    total={scheduledMeetings.length}
-                  />
+              <div className="flex min-w-0 flex-col items-stretch gap-3 px-1 min-[420px]:flex-row min-[420px]:items-center min-[420px]:justify-between">
+                <div className="min-w-0">
+                  <h2 className="font-black">Ближайшие и текущие встречи</h2>
+                  {scheduledMeetings.length > 3 && (
+                    <ListDisclosure
+                      expanded={showAllMeetings}
+                      onToggle={() => setShowAllMeetings((value) => !value)}
+                      total={scheduledMeetings.length}
+                      className="mt-2"
+                    />
+                  )}
+                </div>
+                {!showMeetingForm && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      rememberEditorScroll('meeting');
+                      resetMeetingForm();
+                      setShowMeetingForm(true);
+                    }}
+                    className={`${primaryCompactButtonClass} w-full shrink-0 min-[420px]:w-auto`}
+                  >
+                    <Plus className="h-4 w-4" />
+                    Назначить событие
+                  </button>
                 )}
               </div>
               {scheduledMeetings.length === 0 ? (
@@ -2701,51 +3391,73 @@ export default function MiniApp({
                   const attendingUsers = (meeting.attendeeIds || [])
                     .map((userId) => state.users.find((user) => user.id === userId))
                     .filter(Boolean) as User[];
+                  const rsvps = normalizedMeetingRsvps(meeting);
+                  const declinedUsers = Object.entries(rsvps).filter(([, response]) => response === 'no')
+                    .map(([userId]) => state.users.find((user) => user.id === userId)).filter(Boolean) as User[];
+                  const invitedIds = meeting.audiencePolicy === 'snapshot'
+                    ? meeting.audienceUserIds || []
+                    : meeting.participants === 'all'
+                      ? coreTeamUsers.map((user) => user.id)
+                      : [...new Set([...meeting.participants, meeting.hostId])];
+                  const unansweredCount = invitedIds.filter((userId) => !rsvps[userId]).length;
                   const canManage = meeting.hostId === currentUser.id;
                   const expanded = expandedMeetingId === meeting.id;
                   const attendeesExpanded = expandedMeetingAttendeeIds.includes(meeting.id);
-                  const invited = meeting.participants === 'all' || meeting.participants.includes(currentUser.id) || meeting.hostId === currentUser.id;
-                  const attending = (meeting.attendeeIds || []).includes(currentUser.id);
+                  const invited = invitedIds.includes(currentUser.id);
+                  const currentResponse = meetingRsvpFor(meeting, currentUser.id);
+                  const phase = meetingPhase(meeting, projectNow);
+                  const durationLabel = taskDurationText(Math.round(Number(meeting.duration || 1) * 60));
+                  const audienceLabel = meeting.kind === 'setup' || meeting.type === 'general'
+                    ? 'Вся команда'
+                    : meeting.competency
+                      ? `Блок: ${meeting.competency}`
+                      : `${meeting.participants.length} участников`;
+                  const detailsId = `meeting-details-${meeting.id}`;
                   return (
                     <div
                       key={meeting.id}
-                      className={`overflow-hidden rounded-3xl border border-blue-100 bg-white p-4 shadow-sm ${pressClass}`}
-                      onClick={() => setExpandedMeetingId(expanded ? null : meeting.id)}
+                      className="overflow-hidden rounded-3xl border border-blue-100 bg-white p-4"
                     >
-                      <div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-3">
-                        <div className="min-w-0">
-                          <div className="flex min-w-0 flex-wrap items-center gap-2">
-                            <h3 className="max-w-full min-w-0 break-words font-black [overflow-wrap:anywhere]">{meeting.title}</h3>
-                            {normalizeMeetingKind(meeting.kind) !== 'meeting' && <span className="rounded-full bg-blue-100 px-2 py-0.5 text-xs font-black uppercase tracking-wide text-[#005BC4]">{meetingKindText(meeting.kind).label}</span>}
-                          </div>
-                          <p className="mt-1 min-w-0 break-words text-sm text-slate-500 [overflow-wrap:anywhere]">{meeting.kind === 'setup' ? workEvent?.name || 'Мероприятие не найдено' : meeting.topic || 'Нажми, чтобы посмотреть детали'}</p>
+                      <div className="min-w-0">
+                        <div className="flex min-w-0 flex-wrap items-start gap-2">
+                          <h3 className="min-w-0 flex-1 break-words font-black [overflow-wrap:anywhere]">{meeting.title}</h3>
+                          {phase === 'ongoing' && <span className="shrink-0 rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-black uppercase tracking-wide text-emerald-700">Идёт сейчас</span>}
                         </div>
                         <time
                           dateTime={`${formatDateShort(meeting.date).split('.').reverse().map((part, index) => index === 0 && part.length === 2 ? `20${part}` : part).join('-')}T${meeting.time}`}
-                          className="box-border grid w-[clamp(4.75rem,18vw,5.25rem)] shrink-0 place-items-center self-start overflow-hidden rounded-2xl bg-blue-50 px-2 py-2 text-center text-[clamp(0.68rem,3vw,0.75rem)] font-black leading-5 tabular-nums text-[#0069E0]"
+                          className="mt-1 block break-words text-sm font-bold tabular-nums text-slate-600"
                         >
-                          <span className="block whitespace-nowrap">{weekdayShortByDate(meeting.date)}</span>
-                          <span className="block whitespace-nowrap">{formatDateShort(meeting.date)}</span>
-                          <span className="block whitespace-nowrap">{meeting.time}</span>
+                          {weekdayShortByDate(meeting.date)}, {formatDateShort(meeting.date)} · {meeting.time} МСК · {durationLabel}
                         </time>
+                        <div className="mt-2 flex flex-wrap gap-2 text-xs font-black">
+                          <span className="rounded-full bg-blue-100 px-2.5 py-1 text-[#005BC4]">{meetingKindText(meeting.kind).label}</span>
+                          <span className="rounded-full bg-slate-100 px-2.5 py-1 text-slate-700">{audienceLabel}</span>
+                          {meeting.kind === 'setup' && <span className="max-w-full break-words rounded-full bg-slate-100 px-2.5 py-1 text-slate-700">{workEvent?.name || 'Мероприятие не найдено'}</span>}
+                        </div>
+                      </div>
+
+                      <div className="mt-3 border-t border-slate-100 pt-3">
+                        <p className="text-sm font-bold text-slate-700">Ваш ответ: {currentResponse === 'yes' ? 'приду' : currentResponse === 'no' ? 'не приду' : 'не выбран'}</p>
+                        <div className="mt-2 grid grid-cols-2 gap-2">
+                          <button type="button" disabled={rsvpMeetingId === meeting.id} onClick={() => void setMeetingAttendance(meeting, 'yes')} aria-pressed={currentResponse === 'yes'} className={`${miniButtonClass} min-w-0 disabled:opacity-60 ${currentResponse === 'yes' ? 'mega-rsvp-yes border-emerald-200 bg-emerald-100' : ''}`}>{currentResponse === 'yes' && <Check className="h-4 w-4" aria-hidden="true" />}Приду</button>
+                          <button type="button" disabled={rsvpMeetingId === meeting.id} onClick={() => void setMeetingAttendance(meeting, 'no')} aria-pressed={currentResponse === 'no'} className={`${miniButtonClass} min-w-0 disabled:opacity-60 ${currentResponse === 'no' ? 'mega-rsvp-no border-rose-200 bg-rose-100' : ''}`}>{currentResponse === 'no' && <Check className="h-4 w-4" aria-hidden="true" />}Не приду</button>
+                        </div>
+                        {currentResponse !== 'unanswered' && <button type="button" disabled={rsvpMeetingId === meeting.id} onClick={() => void setMeetingAttendance(meeting, 'unanswered')} className="mt-2 text-xs font-bold text-slate-500 underline decoration-slate-300 underline-offset-4 disabled:opacity-60">Сбросить ответ</button>}
                       </div>
 
                       <button
                         type="button"
-                        disabled={rsvpMeetingId === meeting.id}
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          void setMeetingAttendance(meeting, !attending);
-                        }}
-                        aria-pressed={attending}
-                        className={`${miniButtonClass} mt-3 w-full disabled:opacity-60 ${attending ? 'border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100' : 'border-blue-100 bg-blue-50 text-[#005BC4] hover:bg-blue-100'}`}
+                        aria-expanded={expanded}
+                        aria-controls={detailsId}
+                        onClick={() => setExpandedMeetingId(expanded ? null : meeting.id)}
+                        className={`${secondaryButtonClass} mt-3 w-full justify-between`}
                       >
-                        <span aria-hidden="true">{attending ? '❌' : '✅'}</span>
-                        {rsvpMeetingId === meeting.id ? 'Сохраняю...' : attending ? 'Я не приду' : 'Я приду'}
+                        <span>{expanded ? 'Скрыть подробности' : 'Подробнее'}</span>
+                        {expanded ? <CaretUp className="h-4 w-4" /> : <CaretDown className="h-4 w-4" />}
                       </button>
 
                       {expanded && (
-                        <div className="mt-4 space-y-2 border-t border-slate-100 pt-4 text-sm text-slate-600" onClick={(event) => event.stopPropagation()}>
+                        <div id={detailsId} className="mt-4 space-y-2 border-t border-slate-100 pt-4 text-sm text-slate-600">
                           <InfoRow label="Автор" value={host?.realName || 'Организатор'} />
                           {host?.username && <InfoRow label="Telegram" value={host.username} href={telegramLink(host.username)} />}
                           <InfoRow label="Дата" value={`${weekdayShortByDate(meeting.date)} ${formatDateShort(meeting.date)}`} />
@@ -2764,14 +3476,19 @@ export default function MiniApp({
                               ? current.filter((id) => id !== meeting.id)
                               : [...current, meeting.id])}
                           />
-                          {!invited && !attending && <p className="rounded-2xl bg-blue-50 px-3 py-2 text-xs font-bold text-[#005BC4]">Тебя не добавили в исходный состав, но к этому собранию можно присоединиться.</p>}
+                          <div className="grid grid-cols-2 gap-2 text-xs font-bold">
+                            <div className="rounded-xl bg-rose-50 px-3 py-2 text-rose-700">Не придут · {declinedUsers.length}</div>
+                            <div className="rounded-xl bg-slate-100 px-3 py-2 text-slate-600">Не ответили · {unansweredCount}</div>
+                          </div>
+                          {declinedUsers.length > 0 && <p className="break-words text-xs text-slate-500">Не придут: {declinedUsers.map((user) => user.realName).join(', ')}</p>}
+                          {!invited && currentResponse !== 'yes' && <p className="rounded-2xl bg-blue-50 px-3 py-2 text-xs font-bold text-[#005BC4]">Тебя не добавили в исходный состав, но к этому собранию можно присоединиться.</p>}
                           {canManage && (
-                            <div className="flex gap-2 pt-2">
-                              <button onClick={() => startMeetingEdit(meeting)} className={miniButtonClass}>
+                            <div className="flex flex-wrap gap-2 pt-2">
+                              <button type="button" onClick={() => startMeetingEdit(meeting)} className={miniButtonClass}>
                                 <PencilSimple className="h-4 w-4" />
                                 Редактировать
                               </button>
-                              <button onClick={() => deleteMeeting(meeting.id)} className={`${miniButtonClass} border-rose-100 bg-rose-50 text-rose-600 hover:bg-rose-100 active:bg-rose-200`}>
+                              <button type="button" onClick={() => deleteMeeting(meeting.id)} className={`${miniButtonClass} border-rose-100 bg-rose-50 text-rose-600 hover:bg-rose-100 active:bg-rose-200`}>
                                 <Trash className="h-4 w-4" />
                                 Удалить
                               </button>
@@ -2783,6 +3500,22 @@ export default function MiniApp({
                   );
                 })
               )}
+              {meetingHistory.length > 0 && (
+                <div className="pt-2">
+                  <button type="button" onClick={() => setShowMeetingHistory((value) => !value)} aria-expanded={showMeetingHistory} className={`${secondaryButtonClass} w-full justify-between`}>
+                    <span>История встреч · {meetingHistory.length}</span>
+                    {showMeetingHistory ? <CaretUp className="h-4 w-4" /> : <CaretDown className="h-4 w-4" />}
+                  </button>
+                  {showMeetingHistory && <div className="mt-3 space-y-2">{meetingHistory.map((meeting) => (
+                    <div key={meeting.id} className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
+                      <div className="flex min-w-0 items-start justify-between gap-3">
+                        <div className="min-w-0"><p className="break-words font-black">{meeting.title}</p><p className="mt-1 text-xs font-semibold text-slate-500">{formatDateShort(meeting.date)} · {meeting.time}</p></div>
+                        <span className="shrink-0 rounded-full bg-white px-2 py-1 text-xs font-black text-slate-600">{meeting.status === 'cancelled' ? 'Отменена' : 'Завершилась'}</span>
+                      </div>
+                    </div>
+                  ))}</div>}
+                </div>
+              )}
             </div>
           </section>
         )}
@@ -2790,17 +3523,34 @@ export default function MiniApp({
         {activeTab === 'tasks' && (
           <section className="space-y-4">
             <EventScopePicker
-              events={activeEvents}
+              events={allEvents}
               value={selectedTaskEventId}
               onChange={(eventId) => {
+                if (taskDraftDirty && !window.confirm('Сменить фильтр и удалить несохранённый черновик задачи?')) return;
                 setSelectedTaskEventId(eventId);
                 resetTaskForm();
                 setShowTaskForm(false);
                 setTaskError('');
               }}
             />
-            {taskError && <div role="alert" className="rounded-2xl border border-rose-200 bg-rose-50 p-3 text-sm font-bold text-rose-800">{taskError}</div>}
-            {taskNotice && <div role="status" className="rounded-2xl border border-emerald-200 bg-emerald-50 p-3 text-sm font-bold text-emerald-800">{taskNotice}</div>}
+            <div className="rounded-3xl border border-blue-100 bg-white p-3">
+              <div className="mb-2 px-1 text-xs font-black uppercase tracking-wide text-slate-500">Какие задачи показать</div>
+              <Segmented
+                value={taskListView}
+                onChange={(value) => setTaskListView(value as typeof taskListView)}
+                label="Фильтр задач по участию"
+                options={[
+                  ['mine', 'Мои'],
+                  ['open', 'Свободные'],
+                  ['assigned', 'Назначенные мной'],
+                  ['completed', 'Завершённые'],
+                ]}
+              />
+            </div>
+            {taskError && <InlineNotice variant="error" focusOnMount>{taskError}</InlineNotice>}
+            {taskNotice && <InlineNotice variant="success">{taskNotice}</InlineNotice>}
+            {taskDraftNotice && <InlineNotice>{taskDraftNotice}</InlineNotice>}
+            {taskDraftConflict && <InlineNotice variant="warning">Сохранение приостановлено: задача была изменена в другом окне.</InlineNotice>}
             <button onClick={openTaskForm} className={primaryButtonClass}>
               {showTaskForm ? <Minus className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
               {showTaskForm ? 'Скрыть форму' : 'Создать задачу'}
@@ -2809,10 +3559,17 @@ export default function MiniApp({
               <form onSubmit={submitTask} className="space-y-3 rounded-3xl border border-blue-100 bg-white p-4 shadow-sm animate-in fade-in slide-in-from-top-2 duration-200">
                 <div className="flex items-center justify-between gap-3">
                   <h2 className="font-black">{editingTaskId ? 'Редактировать задачу' : 'Новая задача'}</h2>
-                  {editingTaskId && <button type="button" onClick={() => { resetTaskForm(); setShowTaskForm(false); }} className={miniButtonClass}><X className="h-4 w-4" /> Отмена</button>}
+                  <button type="button" onClick={discardTaskForm} className={miniButtonClass}><X className="h-4 w-4" /> Закрыть</button>
                 </div>
                 <Field label="Мероприятие">
-                  <div className="rounded-2xl bg-blue-50 px-3 py-3 text-sm font-black text-[#005BC4]">{selectedTaskEvent?.name || 'Не выбрано'}</div>
+                  <select value={taskEventId} onChange={(event) => setTaskEventId(event.target.value)} className={selectClass}>
+                    <option value="">Без мероприятия</option>
+                    {activeEvents.map((workEvent) => <option key={workEvent.id} value={workEvent.id}>{workEvent.name}</option>)}
+                    {editingTaskId && taskEventId && !activeEvents.some((item) => item.id === taskEventId) && (
+                      <option value={taskEventId}>{allEvents.find((item) => item.id === taskEventId)?.name || 'Архивное мероприятие'} · архив</option>
+                    )}
+                  </select>
+                  <p className="mt-1 text-xs font-semibold text-slate-500">Можно оставить задачу вне мероприятия. Архивная привязка сохраняется при редактировании.</p>
                 </Field>
                 <Field label="Название задачи">
                   <input value={taskTitle} onChange={(e) => setTaskTitle(e.target.value)} className={inputClass} />
@@ -2892,8 +3649,8 @@ export default function MiniApp({
                   </div>
                 </Field>
                 <div className="grid min-w-0 grid-cols-1 gap-3 overflow-hidden sm:grid-cols-2">
-                  <Field label="Дедлайн">
-                    <DatePickerField value={taskDeadline} onChange={setTaskDeadline} placeholder="Дата не выбрана" />
+                  <Field label="Дедлайн · до конца дня, МСК">
+                    <DatePickerField label="Дедлайн задачи, до конца дня по московскому времени" value={taskDeadline} onChange={setTaskDeadline} placeholder="Дата не выбрана" />
                   </Field>
                   <Field label="Приоритет">
                     <select value={taskPriority} onChange={(e) => setTaskPriority(e.target.value as Task['priority'])} className={selectClass}>
@@ -2930,28 +3687,20 @@ export default function MiniApp({
                     <p className="text-xs font-semibold text-slate-500">Они отправятся автоматически. После сохранения можно также нажать «Уведомить сейчас».</p>
                   </div>
                 </Field>
-                <button disabled={savingTask} className={`${primaryButtonClass} disabled:opacity-70`}>
+                <Button pending={savingTask} disabled={taskDraftConflict}>
                   {savingTask ? 'Сохраняю...' : editingTaskId ? 'Сохранить изменения' : 'Сохранить задачу'}
-                </button>
+                </Button>
               </form>
             )}
-            <TaskList title="Мои задачи" tasks={myTasks} users={state.users} events={allEvents} currentUser={currentUser} actionLabel="Готово" onAction={openCompletionPrompt} onRelease={onReleaseTask} onEdit={startTaskEdit} onDelete={deleteTask} onNotify={notifyTaskAssignees} onSaveComment={saveTaskComment} />
-            <TaskList title="Назначенные мной" tasks={assignedByMeTasks} users={state.users} events={allEvents} currentUser={currentUser} onEdit={startTaskEdit} onDelete={deleteTask} onNotify={notifyTaskAssignees} onSaveComment={saveTaskComment} />
-            <TaskList title="Открытые задачи" tasks={openTasks} users={state.users} events={allEvents} currentUser={currentUser} actionLabel="Взять" onAction={claimTask} onEdit={startTaskEdit} onDelete={deleteTask} onNotify={notifyTaskAssignees} onSaveComment={saveTaskComment} />
-            <button onClick={() => setShowCompletedTasks((value) => !value)} className={secondaryButtonClass}>
-              {showCompletedTasks ? <Minus className="h-4 w-4" /> : <Check className="h-4 w-4" />}
-              {showCompletedTasks ? 'Скрыть выполненные задачи' : 'Посмотреть выполненные задачи'}
-            </button>
-            {showCompletedTasks && (
-              <>
-                <TaskList title="Последние выполненные" tasks={latestCompletedTasks} users={state.users} events={allEvents} currentUser={currentUser} actionLabel="Готово" onAction={() => undefined} onEdit={startTaskEdit} onEditCompletion={openCompletionPrompt} onSaveComment={saveTaskComment} />
-              </>
-            )}
+            {taskListView === 'mine' && <TaskList title="Мои задачи" tasks={myTasks} users={state.users} events={allEvents} currentUser={currentUser} actionLabel="Готово" onAction={openCompletionPrompt} onRelease={onReleaseTask} onEdit={startTaskEdit} onDelete={deleteTask} onNotify={notifyTaskAssignees} onSaveComment={saveTaskComment} />}
+            {taskListView === 'open' && <TaskList title="Свободные задачи" tasks={openTasks} users={state.users} events={allEvents} currentUser={currentUser} actionLabel="Взять" onAction={claimTask} onEdit={startTaskEdit} onDelete={deleteTask} onNotify={notifyTaskAssignees} onSaveComment={saveTaskComment} />}
+            {taskListView === 'assigned' && <TaskList title="Назначенные мной" tasks={assignedByMeTasks} users={state.users} events={allEvents} currentUser={currentUser} onEdit={startTaskEdit} onDelete={deleteTask} onNotify={notifyTaskAssignees} onSaveComment={saveTaskComment} />}
+            {taskListView === 'completed' && <TaskList title="Последние завершённые" tasks={latestCompletedTasks} users={state.users} events={allEvents} currentUser={currentUser} onEdit={startTaskEdit} onEditCompletion={openCompletionPrompt} onSaveComment={saveTaskComment} />}
 
             <div className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
               <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <div>
-                  <h2 className="font-black">Бэклог задач</h2>
+                  <h2 className="font-black">Журнал задач</h2>
                   <p className="text-xs font-semibold text-slate-500">Все задачи за всё время, разбитые по блокам.</p>
                 </div>
                 <div className="flex flex-wrap gap-2">
@@ -2976,13 +3725,122 @@ export default function MiniApp({
         {(activeTab === 'team' || (isAdminPanel && adminSection === 'team')) && (
           <section className="space-y-4">
             {teamError && <div role="alert" className="rounded-2xl border border-rose-200 bg-rose-50 p-3 text-sm font-bold text-rose-800">{teamError}</div>}
+            {isAdmin && (
+              <div className="overflow-hidden rounded-3xl border border-blue-100 bg-white shadow-sm">
+                <button type="button" onClick={toggleDiagnostics} className={`${secondaryButtonClass} min-h-12 w-full justify-between rounded-none border-0 px-4`} aria-expanded={diagnosticsOpen} aria-controls="service-diagnostics">
+                  <span className="flex min-w-0 items-center gap-2 text-left">
+                    <Shield className="h-4 w-4 shrink-0" />
+                    <span className="min-w-0 break-words">Состояние сервиса{diagnostics ? ` · ${diagnostics.status === 'healthy' ? 'в норме' : diagnostics.status === 'degraded' ? 'есть предупреждения' : 'недоступен'}` : ''}</span>
+                  </span>
+                  {diagnosticsOpen ? <CaretUp className="h-4 w-4 shrink-0" /> : <CaretDown className="h-4 w-4 shrink-0" />}
+                </button>
+                {diagnosticsOpen && (
+                  <div id="service-diagnostics" className="border-t border-blue-100 px-4 py-4">
+                    {diagnosticsError && <InlineNotice variant="error">{diagnosticsError}</InlineNotice>}
+                    {diagnosticsBusy && !diagnostics && <p className="text-sm font-bold text-slate-500" role="status">Проверяю хранилище и очереди…</p>}
+                    {diagnostics && (
+                      <div className="space-y-3">
+                        <InlineNotice variant={diagnostics.status === 'healthy' ? 'success' : 'error'}>
+                          {diagnostics.status === 'healthy'
+                            ? 'Команды сохраняются, очереди не требуют вмешательства.'
+                            : diagnostics.status === 'degraded'
+                              ? 'Основные функции доступны, но часть очередей или интеграций требует внимания.'
+                              : 'Сервис не готов надёжно принимать изменения.'}
+                        </InlineNotice>
+                        {diagnostics.warnings.length > 0 && (
+                          <ul className="space-y-1 text-sm font-semibold text-amber-900">
+                            {diagnostics.warnings.map((warning) => <li key={warning} className="break-words">• {warning}</li>)}
+                          </ul>
+                        )}
+                        <dl className="divide-y divide-slate-200 border-y border-slate-200 text-sm">
+                          <div className="flex min-w-0 items-start justify-between gap-4 py-3">
+                            <dt className="font-black text-slate-900">Хранилище</dt>
+                            <dd className="min-w-0 text-right font-semibold text-slate-600">
+                              <span className="block">ревизия {diagnostics.persistence.durableRevision}</span>
+                              <span className="block break-words">реплика {diagnostics.persistence.replicatedRevision}{diagnostics.persistence.pendingReplication ? ' · ожидает' : ''}</span>
+                            </dd>
+                          </div>
+                          <div className="flex min-w-0 items-start justify-between gap-4 py-3">
+                            <dt className="font-black text-slate-900">Доставка</dt>
+                            <dd className="min-w-0 text-right font-semibold text-slate-600">ожидают {diagnostics.queues.notificationDelivery.pending} · решить {diagnostics.queues.notificationDelivery.attention}</dd>
+                          </div>
+                          <div className="flex min-w-0 items-start justify-between gap-4 py-3">
+                            <dt className="font-black text-slate-900">Входящие Telegram</dt>
+                            <dd className="min-w-0 text-right font-semibold text-slate-600">ожидают {diagnostics.queues.telegramInbox.pending} · ошибок {diagnostics.queues.telegramInbox.failed}</dd>
+                          </div>
+                          <div className="flex min-w-0 items-start justify-between gap-4 py-3">
+                            <dt className="font-black text-slate-900">Повторы интеграций</dt>
+                            <dd className="min-w-0 text-right font-semibold text-slate-600">Calendar {diagnostics.queues.calendar.pending} · слоты {diagnostics.queues.availabilitySheets.pending}</dd>
+                          </div>
+                        </dl>
+                        <details className="text-xs font-semibold text-slate-600">
+                          <summary className="min-h-11 cursor-pointer py-3 font-black text-slate-800">Технические подробности</summary>
+                          <div className="space-y-1 break-words pb-2">
+                            <p>Версия: {diagnostics.service.revision} · uptime {Math.floor(diagnostics.service.uptimeSeconds / 60)} мин · {diagnostics.service.timeZone}</p>
+                            <p>Последняя запись: {formatDiagnosticTime(diagnostics.persistence.lastSuccessAt)}</p>
+                            <p>Последняя репликация: {formatDiagnosticTime(diagnostics.persistence.lastReplicationSuccessAt)}</p>
+                            {diagnostics.persistence.lastError && <p className="text-rose-700">Хранилище: {diagnostics.persistence.lastError}</p>}
+                            {diagnostics.persistence.lastReplicationError && <p className="text-rose-700">Репликация: {diagnostics.persistence.lastReplicationError}</p>}
+                            <p>Снимок: {formatDiagnosticTime(diagnostics.generatedAt)}{diagnostics.requestId ? ` · request ${diagnostics.requestId}` : ''}</p>
+                          </div>
+                        </details>
+                        <button type="button" onClick={loadDiagnostics} disabled={diagnosticsBusy} className={`${secondaryButtonClass} w-full disabled:opacity-60`}>
+                          <ArrowClockwise className={`h-4 w-4 ${diagnosticsBusy ? 'animate-spin' : ''}`} /> {diagnosticsBusy ? 'Обновляю…' : 'Обновить состояние'}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+            {isAdmin && state.settings?.notificationDeliverySummary && (
+              <div className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
+                <button type="button" onClick={toggleDeliveryJournal} className={`${secondaryButtonClass} w-full justify-between`} aria-expanded={deliveryJournalOpen} aria-controls="delivery-journal">
+                  <span className="flex min-w-0 items-center gap-2 text-left">
+                    <Bell className="h-4 w-4 shrink-0" />
+                    Доставка сообщений · ожидают {state.settings.notificationDeliverySummary.pending} · требуют решения {state.settings.notificationDeliverySummary.attention}
+                  </span>
+                  {deliveryJournalOpen ? <CaretUp className="h-4 w-4 shrink-0" /> : <CaretDown className="h-4 w-4 shrink-0" />}
+                </button>
+                {deliveryJournalOpen && (
+                  <div id="delivery-journal" className="mt-3 space-y-2">
+                    {state.settings.notificationDeliverySummary.overloaded && <InlineNotice variant="error">Очередь перегружена: новые уведомления сохраняются, но доставка отстаёт. Проверь ошибки и состояние Telegram.</InlineNotice>}
+                    {deliveryJournalError && <InlineNotice variant="error">{deliveryJournalError}</InlineNotice>}
+                    {deliveryJournalBusy && !deliveryIssues.length && <p className="text-sm font-bold text-slate-500">Загружаю журнал…</p>}
+                    {!deliveryJournalBusy && !deliveryIssues.length && <InlineNotice variant="success">Ошибок и неоднозначных доставок нет.</InlineNotice>}
+                    {deliveryIssues.map((delivery) => (
+                      <label key={delivery.id} className="flex items-start gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-3 text-sm">
+                        <input
+                          type="checkbox"
+                          className="mt-1"
+                          checked={selectedDeliveryIds.includes(delivery.id)}
+                          onChange={() => setSelectedDeliveryIds((current) => current.includes(delivery.id)
+                            ? current.filter((id) => id !== delivery.id) : [...current, delivery.id])}
+                        />
+                        <span className="min-w-0 flex-1">
+                          <strong className="block break-words">{delivery.recipientName || 'Командный чат'} · {delivery.status === 'unknown' ? 'результат неизвестен' : 'не доставлено'}</strong>
+                          <span className="mt-1 block break-words text-xs font-semibold text-slate-600">{delivery.textPreview}</span>
+                          <span className="mt-1 block break-words text-xs font-bold text-rose-700">{delivery.lastErrorCode || 'error'}{delivery.lastErrorMessage ? ` · ${delivery.lastErrorMessage}` : ''}</span>
+                        </span>
+                      </label>
+                    ))}
+                    {deliveryIssues.length > 0 && (
+                      <button type="button" disabled={!selectedDeliveryIds.length || deliveryJournalBusy} onClick={retrySelectedDeliveries} className={`${primaryButtonClass} w-full disabled:opacity-60`}>
+                        <ArrowClockwise className="h-4 w-4" /> Повторить выбранные ({selectedDeliveryIds.length})
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
             <div className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
-                <button type="button" onClick={() => setBroadcastOpen((value) => !value)} className={`${secondaryButtonClass} w-full justify-between`} aria-expanded={broadcastOpen}>
+                <button type="button" onClick={() => setBroadcastOpen((value) => !value)} className={`${secondaryButtonClass} w-full justify-between`} aria-expanded={broadcastOpen} aria-controls="broadcast-form">
                   <span className="flex items-center gap-2"><PaperPlaneTilt className="h-4 w-4" /> Создать рассылку</span>
                   {broadcastOpen ? <CaretUp className="h-4 w-4" /> : <CaretDown className="h-4 w-4" />}
                 </button>
                 {broadcastOpen && (
-                  <form onSubmit={submitBroadcast} className="mt-4 space-y-3">
+                  <form id="broadcast-form" onSubmit={submitBroadcast} className="mt-4 space-y-3">
+                    {broadcastDraftNotice && <InlineNotice>{broadcastDraftNotice}</InlineNotice>}
                     <Field label="Получатели">
                       <div className="grid grid-cols-2 gap-1.5 rounded-2xl bg-slate-100 p-1.5">
                         {([['all', 'Все'], ['blocks', 'По блоку'], ['people', 'Конкретные люди'], ['missing_slots', 'Не отметили слоты']] as const).map(([mode, label]) => (
@@ -3061,7 +3919,7 @@ export default function MiniApp({
                               <label key={user.id} className="flex min-h-11 items-center justify-between gap-3 rounded-xl bg-white px-3 py-2 text-sm font-semibold">
                                 <span className="min-w-0">
                                   <strong className="block truncate">{user.realName}{user.id === currentUser.id ? ' · это вы' : ''}</strong>
-                                  {!user.telegramId && <span className="block truncate text-xs font-bold text-amber-700">Нужно открыть бота через /start</span>}
+                                  {!user.registered && <span className="block truncate text-xs font-bold text-amber-700">Нужно открыть бота через /start</span>}
                                 </span>
                                 <input type="checkbox" checked={broadcastRecipients.includes(user.id)} onChange={() => setBroadcastRecipients((current) => current.includes(user.id) ? current.filter((id) => id !== user.id) : [...current, user.id])} />
                               </label>
@@ -3074,8 +3932,30 @@ export default function MiniApp({
 
                     <Field label="Заголовок — необязательно"><input value={broadcastTitle} onChange={(event) => setBroadcastTitle(event.target.value)} className={inputClass} maxLength={120} placeholder="Например, Важное обновление" /></Field>
                     <Field label="Текст рассылки"><textarea required value={broadcastBody} onChange={(event) => setBroadcastBody(event.target.value)} className={inputClass} rows={4} maxLength={4000} placeholder="Что нужно сообщить команде" /></Field>
-                    <button disabled={broadcastSaving || (broadcastMode === 'missing_slots' && !missingSlotBroadcastUsers.length)} className={`${primaryButtonClass} disabled:opacity-60`}><PaperPlaneTilt className="h-4 w-4" /> {broadcastSaving ? 'Отправляю...' : 'Отправить рассылку'}</button>
-                    {broadcastNotice && <p role="status" className="rounded-2xl bg-emerald-50 px-3 py-2 text-sm font-black text-emerald-800">{broadcastNotice}</p>}
+
+                    <section aria-labelledby="broadcast-summary-title" className="rounded-2xl border border-blue-100 bg-blue-50 p-3">
+                      <h3 id="broadcast-summary-title" className="font-black text-[#005BC4]">Отправка сейчас</h3>
+                      <p className="mt-1 text-sm font-bold text-slate-700">
+                        {broadcastAudienceUsers.length} получателей · Telegram доступен у {broadcastAvailableUsers.length}
+                      </p>
+                      <p className="mt-1 text-xs font-semibold text-slate-600">
+                        Сообщения отправляются по одному. Подтверждение Telegram не означает, что человек прочитал сообщение.
+                      </p>
+                      {broadcastUnavailableUsers.length > 0 && (
+                        <div className="mt-3 rounded-xl bg-white p-3 text-sm text-amber-900">
+                          <div className="font-black">Не получат сообщение без /start:</div>
+                          <ul className="mt-1 list-disc space-y-1 pl-5 font-semibold">
+                            {broadcastUnavailableUsers.map((user) => <li key={user.id} className="break-words">{user.realName}</li>)}
+                          </ul>
+                        </div>
+                      )}
+                    </section>
+
+                    {broadcastError && <InlineNotice variant="error" focusOnMount>{broadcastError}</InlineNotice>}
+                    <button disabled={broadcastSaving || !broadcastAvailableUsers.length || (broadcastMode === 'missing_slots' && !missingSlotBroadcastUsers.length)} className={`${primaryButtonClass} disabled:opacity-60`}>
+                      <PaperPlaneTilt className="h-4 w-4" /> {broadcastSaving ? 'Отправляю...' : broadcastError ? 'Повторить отправку' : 'Отправить сейчас'}
+                    </button>
+                    {broadcastNotice && <InlineNotice variant="success">{broadcastNotice}</InlineNotice>}
                   </form>
                 )}
             </div>
@@ -3106,7 +3986,7 @@ export default function MiniApp({
                     </select>
                   </Field>
                   <Field label="ДР">
-                    <DatePickerField value={newUserBirthday} onChange={setNewUserBirthday} placeholder="Выбери дату" fullYear />
+                    <DatePickerField label="Дата рождения" value={newUserBirthday} onChange={setNewUserBirthday} placeholder="Выбери дату" fullYear />
                   </Field>
                 </div>
                 <button className={primaryButtonClass}>Добавить</button>
@@ -3116,9 +3996,9 @@ export default function MiniApp({
             {isAdminPanel && (
               <div className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
                 <h2 className="font-black">Блоки и компетенции</h2>
-                <div className="mt-3 flex gap-2">
+                <div className="mt-3 flex flex-col gap-2 min-[400px]:flex-row">
                   <input value={newCompetency} onChange={(e) => setNewCompetency(e.target.value)} className={inputClass} placeholder="Например, Дизайн" />
-                  <button type="button" onClick={addCompetency} className={miniButtonClass}>
+                  <button type="button" onClick={addCompetency} className={`${miniButtonClass} w-full shrink-0 whitespace-nowrap min-[400px]:w-auto`}>
                     <Plus className="h-4 w-4" />
                     Добавить
                   </button>
@@ -3147,31 +4027,24 @@ export default function MiniApp({
             )}
 
             <div className="space-y-3">
-              <div className="flex items-center justify-between gap-2 px-1">
-                <div className={`flex min-w-0 items-center gap-2 transition-all ${teamSearchOpen ? 'flex-1' : ''}`}>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setTeamSearchOpen((value) => !value);
-                      if (teamSearchOpen) setTeamSearch('');
-                    }}
-                    className={miniButtonClass}
-                    aria-label={teamSearchOpen ? 'Закрыть поиск' : 'Найти участника'}
-                  >
-                    {teamSearchOpen ? <X className="h-4 w-4" /> : <MagnifyingGlass className="h-4 w-4" />}
-                  </button>
-                  {teamSearchOpen && (
+              <div className="flex flex-col items-stretch gap-2 px-1 min-[520px]:flex-row min-[520px]:items-end min-[520px]:justify-between">
+                <Field label="Поиск по команде" className="min-w-0 flex-1">
+                  <div className="relative">
+                    <MagnifyingGlass className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" aria-hidden="true" />
                     <input
-                      autoFocus
                       type="search"
                       value={teamSearch}
                       onChange={(event) => setTeamSearch(event.target.value)}
-                      className={`${inputClass} min-w-0 flex-1`}
+                      className={`${inputClass} pl-10 pr-10`}
                       placeholder="Имя, фамилия или @username"
-                      aria-label="Поиск участника"
                     />
-                  )}
-                </div>
+                    {teamSearch && (
+                      <button type="button" onClick={() => setTeamSearch('')} className="absolute right-1 top-1/2 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100" aria-label="Очистить поиск">
+                        <X className="h-4 w-4" />
+                      </button>
+                    )}
+                  </div>
+                </Field>
                 {!normalizedTeamSearch && filteredTeamUsers.length > 3 && (
                   <ListDisclosure
                     expanded={showAllTeamUsers}
@@ -3188,9 +4061,10 @@ export default function MiniApp({
                 visibleTeamUsers.map((user) => {
                   const expanded = expandedUserId === user.id;
                   const editing = editingUserId === user.id;
+                  const detailsId = `team-user-${user.id}-details`;
                   return (
-                    <div key={user.id} className={`rounded-3xl border border-blue-100 bg-white p-4 shadow-sm ${pressClass}`} onClick={() => setExpandedUserId(expanded ? null : user.id)}>
-                      <div className="flex items-center justify-between gap-3">
+                    <div key={user.id} className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
+                      <div className="flex flex-col items-stretch gap-3 min-[440px]:flex-row min-[440px]:items-center min-[440px]:justify-between">
                         <div className="flex min-w-0 items-center gap-3">
                           <UserAvatar user={user} className="h-11 w-11 shrink-0 rounded-xl" />
                           <div className="min-w-0">
@@ -3200,24 +4074,34 @@ export default function MiniApp({
                           </a>
                           </div>
                         </div>
-                        <div className="text-right">
-                          <div className="rounded-full bg-blue-50 px-3 py-1 text-xs font-black text-[#0069E0]">{user.primaryCompetency || 'Блок не выбран'}</div>
-                          <div className={`mt-1 rounded-full px-2.5 py-1 text-xs font-black ${user.registered ? 'bg-emerald-50 text-emerald-800' : 'bg-slate-100 text-[#4D647A]'}`}>
-                            {user.registered ? 'В боте' : 'Не в боте'}
+                        <div className="flex flex-wrap gap-2 min-[440px]:max-w-[48%] min-[440px]:justify-end">
+                          <div className="max-w-full break-words rounded-full bg-blue-50 px-3 py-1 text-xs font-black text-[#0069E0]">{user.primaryCompetency || 'Блок не выбран'}</div>
+                          <div className={`max-w-full break-words rounded-full px-2.5 py-1 text-xs font-black ${user.registered ? 'bg-emerald-50 text-emerald-800' : 'bg-slate-100 text-[#4D647A]'}`}>
+                            {user.registered ? 'Telegram подключён' : 'Не подключён'}
                           </div>
-                          <div className="mt-1 text-xs text-slate-500">{formatDateShort(user.birthday) || 'Дата не указана'}</div>
                         </div>
                       </div>
 
+                      <button
+                        type="button"
+                        aria-expanded={expanded}
+                        aria-controls={detailsId}
+                        onClick={() => setExpandedUserId(expanded ? null : user.id)}
+                        className={`${secondaryButtonClass} mt-3 w-full justify-between`}
+                      >
+                        <span>{expanded ? 'Скрыть подробности' : 'Подробнее'}</span>
+                        {expanded ? <CaretUp className="h-4 w-4" /> : <CaretDown className="h-4 w-4" />}
+                      </button>
+
                       {expanded && (
-                        <div className="mt-4 border-t border-slate-100 pt-4" onClick={(event) => event.stopPropagation()}>
+                        <div id={detailsId} className="mt-4 border-t border-slate-100 pt-4">
                           {!editing ? (
                             <div className="space-y-2 text-sm text-slate-600">
                               <InfoRow label="Имя" value={user.realName} />
                               <InfoRow label="Telegram" value={user.username} href={telegramLink(user.username)} />
-                              <InfoRow label="Дата рождения" value={formatDateShort(user.birthday) || 'не указана'} />
-                              <InfoRow label="Регистрация" value={user.registered ? 'зарегистрирован в боте' : 'ещё не заходил в бот'} />
-                              <InfoRow label="Последняя активность" value={formatDateTimeShort(user.lastSeenAt) || 'ещё не заходил'} />
+                              {(isAdminPanel || user.id === currentUser.id) && <InfoRow label="Дата рождения" value={formatDateShort(user.birthday) || 'не указана'} />}
+                              <InfoRow label="Связь с Telegram" value={user.registered ? 'подключена' : 'не подключена'} />
+                              {!user.registered && <InlineNotice>Чтобы подключиться, человеку нужно открыть бота и отправить команду /start.</InlineNotice>}
                               <InfoRow label="Главный блок" value={user.primaryCompetency || 'не выбран'} />
                               <InfoRow label="Блоки" value={(user.competencies || []).join(', ') || 'не выбраны'} />
                               {(isAdminPanel || user.id === currentUser.id) && (
@@ -3229,7 +4113,7 @@ export default function MiniApp({
                                   {isAdminPanel && (
                                     <button onClick={() => deleteUser(user.id)} disabled={user.id === currentUser.id} className={`${miniButtonClass} ml-auto border-rose-100 bg-rose-50 text-rose-600 disabled:opacity-40`}>
                                       <Trash className="h-4 w-4" />
-                                      Удалить
+                                      Деактивировать
                                     </button>
                                   )}
                                 </div>
@@ -3245,7 +4129,7 @@ export default function MiniApp({
                               </Field>
                               <div className={`grid min-w-0 grid-cols-1 gap-3 ${isAdminPanel ? 'min-[440px]:grid-cols-2' : ''}`}>
                                 <Field label="ДР">
-                                  <DatePickerField value={userDraft.birthday} onChange={(value) => setUserDraft((prev) => ({ ...prev, birthday: value }))} placeholder="Выбери дату" fullYear />
+                                  <DatePickerField label="Дата рождения" value={userDraft.birthday} onChange={(value) => setUserDraft((prev) => ({ ...prev, birthday: value }))} placeholder="Выбери дату" fullYear />
                                 </Field>
                                 {isAdminPanel && (
                                   <Field label="Роль">
@@ -3291,6 +4175,12 @@ export default function MiniApp({
 
         {(activeTab === 'faculties' || (isAdminPanel && adminSection === 'faculties')) && (
           <section className="space-y-4">
+            {activeTab === 'faculties' && (
+              <div className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
+                <h2 className="text-lg font-black">Факультеты</h2>
+                <p className="mt-1 text-sm font-semibold text-slate-500">Ответственные, компетенции и задачи мультифакультетского направления.</p>
+              </div>
+            )}
             {isAdminPanel && (
               <>
                 <div className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
@@ -3395,8 +4285,8 @@ export default function MiniApp({
                                         <div>
                                           <div className="font-black">{user.realName}</div>
                                           <a href={telegramLink(user.username)} onClick={(event) => openTelegramProfile(event, telegramLink(user.username))} className="font-bold text-[#0069E0]">{user.username}</a>
-                                          <div className={`mt-1 inline-flex rounded-full px-2.5 py-1 text-xs font-black ${user.registered ? 'bg-emerald-50 text-emerald-800' : 'bg-slate-100 text-[#4D647A]'}`}>
-                                            {user.registered ? 'Зарегистрирован' : 'Не зарегистрирован'}
+                                          <div className={`mt-1 inline-flex max-w-full break-words rounded-full px-2.5 py-1 text-xs font-black ${user.registered ? 'bg-emerald-50 text-emerald-800' : 'bg-slate-100 text-[#4D647A]'}`}>
+                                            {user.registered ? 'Telegram подключён' : 'Не подключён · отправьте /start'}
                                           </div>
                                         </div>
                                         <div className="flex flex-wrap justify-end gap-2">
@@ -3477,7 +4367,7 @@ export default function MiniApp({
                   <Field label="Исполнители">
                     <div className="space-y-2">
                       <select value={facultyTaskDraft.competency} onChange={(e) => setFacultyTaskCompetency(e.target.value)} className={selectClass}>
-                        <option value="">Все люди выбранного факультета</option>
+                        <option value="">Все участники факультета</option>
                         <option value="Ответственные">Ответственные</option>
                         {facultyCompetencies.map((name) => <option key={name} value={name}>{name}</option>)}
                       </select>
@@ -3507,9 +4397,9 @@ export default function MiniApp({
                   <Field label="Описание — необязательно">
                     <textarea value={facultyTaskDraft.description} onChange={(e) => setFacultyTaskDraft((prev) => ({ ...prev, description: e.target.value }))} className={inputClass} rows={3} />
                   </Field>
-                  <Field label="Дедлайн">
-                    <DatePickerField value={facultyTaskDraft.deadline} onChange={(value) => { setFacultyTaskErrors((prev) => ({ ...prev, deadline: false })); setFacultyTaskDraft((prev) => ({ ...prev, deadline: value })); }} placeholder="Выбери дату" error={facultyTaskErrors.deadline} />
-                    {facultyTaskErrors.deadline && <RequiredHint />}
+                  <Field label="Дедлайн · до конца дня, МСК">
+                    <DatePickerField id="faculty-task-deadline" label="Дедлайн задачи факультету, до конца дня по московскому времени" value={facultyTaskDraft.deadline} onChange={(value) => { setFacultyTaskErrors((prev) => ({ ...prev, deadline: false })); setFacultyTaskDraft((prev) => ({ ...prev, deadline: value })); }} placeholder="Выбери дату" error={facultyTaskErrors.deadline} ariaDescribedBy={facultyTaskErrors.deadline ? 'faculty-task-deadline-error' : undefined} />
+                    {facultyTaskErrors.deadline && <RequiredHint id="faculty-task-deadline-error" />}
                   </Field>
                   <Field label="Напоминания">
                     <div className="space-y-2">
@@ -3627,7 +4517,7 @@ export default function MiniApp({
                                     <PencilSimple className="h-4 w-4" /> Редактировать
                                   </button>
                                   <button type="button" onClick={() => deleteTask(task.id)} className={`${miniButtonClass} border-rose-200 bg-rose-50 text-rose-700`}>
-                                    <Trash className="h-4 w-4" /> Удалить
+                                    <Trash className="h-4 w-4" /> Отменить задачу
                                   </button>
                                 </div>
                               )}
@@ -3641,7 +4531,7 @@ export default function MiniApp({
 
                 <div className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
                   <div className="flex flex-wrap items-center justify-between gap-2">
-                    <h2 className="font-black">Бэклог задач факультетов</h2>
+                    <h2 className="font-black">Журнал задач факультетов</h2>
                     <div className="flex flex-wrap gap-2">
                       {facultyTasks.length > 3 && (
                         <ListDisclosure
@@ -3658,7 +4548,7 @@ export default function MiniApp({
                   </div>
                   <div className="mt-3 space-y-3">
                     {Object.keys(facultyTasksByCompetency).length === 0 ? (
-                      <EmptyState text="Бэклог пока пуст" />
+                      <EmptyState text="В журнале пока нет задач" />
                     ) : Object.entries(facultyTasksByCompetency).map(([name, tasks]) => (
                       <div key={name} className="rounded-2xl bg-slate-50 p-3">
                         <div className="font-black">{name}</div>
@@ -3689,19 +4579,23 @@ export default function MiniApp({
       </main>
 
       {completingTaskId && (
-        <div className="fixed inset-0 z-50 flex items-end justify-center bg-slate-950/55 p-3 sm:items-center" role="dialog" aria-modal="true" aria-labelledby="task-completion-title">
-          <div className="w-full max-w-md rounded-[28px] border border-blue-100 bg-white p-5 shadow-[0_24px_70px_rgba(0,0,0,0.28)]">
+        <DialogSheet titleId="task-completion-title" descriptionId="task-completion-description" onClose={() => closeCompletionPrompt()} closeDisabled={savingCompletion} className="border border-blue-100 p-5">
             <div className="flex items-start justify-between gap-4">
               <div>
                 <h2 id="task-completion-title" className="text-xl font-black">{editingCompletedTask ? 'Исправить выполнение' : 'Сколько времени заняла задача?'}</h2>
-                <p className="mt-1 text-sm font-semibold text-slate-500">
+                <p id="task-completion-description" className="mt-1 text-sm font-semibold text-slate-500">
                   Это необязательно, но поможет точнее планировать нагрузку команды.
                 </p>
               </div>
-              <button type="button" onClick={closeCompletionPrompt} className={miniButtonClass} aria-label="Закрыть">
+              <button type="button" data-dialog-initial-focus onClick={() => closeCompletionPrompt()} className={miniButtonClass} aria-label="Закрыть">
                 <X className="h-4 w-4" />
               </button>
             </div>
+            {!editingCompletedTask && sharedCompletionAssigneeCount > 1 && (
+              <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-bold text-amber-900" role="note">
+                Общая задача для {sharedCompletionAssigneeCount} исполнителей. Завершение закроет её для всех.
+              </div>
+            )}
             <div className="mt-5 grid grid-cols-2 gap-3">
               <Field label="Часы">
                 <input
@@ -3755,8 +4649,7 @@ export default function MiniApp({
                 </button>
               )}
             </div>
-          </div>
-        </div>
+        </DialogSheet>
       )}
 
       {avatarEditorSource && (
@@ -3765,11 +4658,11 @@ export default function MiniApp({
 
       <nav className="mega-bottom-nav fixed inset-x-0 bottom-0 z-40 border border-blue-100 bg-white/95 p-1.5 shadow-[0_-12px_30px_rgba(0,105,224,0.08)] backdrop-blur">
         <div className="mega-bottom-nav-inner mx-auto grid max-w-3xl grid-cols-5 gap-1">
-          <NavButton icon={<CalendarDots />} label="Слоты" active={activeTab === 'slots'} onClick={() => setActiveTab('slots')} />
-          <NavButton icon={<UsersThree />} label="Встречи" active={activeTab === 'meetings'} onClick={() => setActiveTab('meetings')} />
-          <NavButton icon={<Briefcase />} label="Задачи" active={activeTab === 'tasks'} onClick={() => setActiveTab('tasks')} />
-          <NavButton icon={<Shield />} label="Команда" active={activeTab === 'team'} onClick={() => setActiveTab('team')} />
-          <NavButton icon={<GraduationCap />} label="МФ" active={activeTab === 'faculties'} onClick={() => setActiveTab('faculties')} />
+          <NavButton icon={<CalendarDots />} label="Слоты" active={activeTab === 'slots'} onClick={() => navigateToTab('slots')} />
+          <NavButton icon={<UsersThree />} label="Встречи" active={activeTab === 'meetings'} onClick={() => navigateToTab('meetings')} />
+          <NavButton icon={<Briefcase />} label="Задачи" active={activeTab === 'tasks'} onClick={() => navigateToTab('tasks')} />
+          <NavButton icon={<Shield />} label="Команда" active={activeTab === 'team'} onClick={() => navigateToTab('team')} />
+          <NavButton icon={<GraduationCap />} label="МФ" active={activeTab === 'faculties'} onClick={() => navigateToTab('faculties')} />
         </div>
       </nav>
     </div>
@@ -3784,21 +4677,6 @@ const primaryCompactButtonClass = `mega-primary-button flex items-center justify
 const secondaryButtonClass = `mega-secondary-button flex items-center justify-center gap-2 rounded-full border border-blue-100 bg-blue-50 px-3 py-2 text-xs font-black text-[#0069E0] hover:bg-blue-100 active:bg-blue-200 ${pressClass}`;
 const miniButtonClass = `mega-secondary-button flex min-w-0 items-center justify-center gap-1 rounded-full border border-blue-100 bg-blue-50 px-3 py-2 text-xs font-black text-[#0069E0] hover:bg-blue-100 active:bg-blue-200 ${pressClass}`;
 const iconButtonClass = `flex items-center justify-center rounded-full border border-white/25 bg-white/15 text-white backdrop-blur hover:bg-white/25 active:bg-white/30 ${pressClass}`;
-
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  const labelledChild = React.isValidElement<Record<string, unknown>>(children)
-    && typeof children.type === 'string'
-    && ['input', 'select', 'textarea'].includes(children.type)
-    ? React.cloneElement(children, { 'aria-label': children.props['aria-label'] || label })
-    : children;
-
-  return (
-    <div className="block min-w-0 max-w-full" role="group" aria-label={label}>
-      <span className="mb-1.5 block text-xs font-black uppercase text-slate-500">{label}</span>
-      {labelledChild}
-    </div>
-  );
-}
 
 function ProfileBlockSelectors({
   competencies,
@@ -3867,20 +4745,29 @@ function ProfileBlockSelectors({
 }
 
 function DatePickerField({
+  id,
+  label,
   value,
   onChange,
   placeholder = 'Дата не выбрана',
   withYear = true,
   fullYear = false,
   error = false,
+  ariaDescribedBy,
 }: {
+  id?: string;
+  label: string;
   value: string;
   onChange: (value: string) => void;
   placeholder?: string;
   withYear?: boolean;
   fullYear?: boolean;
   error?: boolean;
+  ariaDescribedBy?: string;
 }) {
+  const generatedId = useId();
+  const inputId = id || `date-${generatedId.replace(/:/g, '')}`;
+  const valueHintId = `${inputId}-value`;
   const focusedRef = useRef(false);
   const dirtyRef = useRef(false);
   const [draft, setDraft] = useState(() => shortDateToInputDate(value));
@@ -3890,7 +4777,11 @@ function DatePickerField({
   return (
     <div className="min-w-0 max-w-full">
       <input
+        id={inputId}
         type="date"
+        aria-label={label}
+        aria-invalid={error || undefined}
+        aria-describedby={[valueHintId, ariaDescribedBy].filter(Boolean).join(' ') || undefined}
         value={draft}
         onFocus={() => { focusedRef.current = true; dirtyRef.current = false; }}
         onChange={(event) => {
@@ -3906,7 +4797,7 @@ function DatePickerField({
         }}
         className={`${inputClass} mega-date-input block min-w-0 max-w-full cursor-pointer overflow-hidden pr-2 [inline-size:100%] [min-inline-size:0] ${error ? 'border-rose-300 bg-rose-50 focus:border-rose-500' : ''}`}
       />
-      <div className={`mt-1 flex items-center gap-1.5 text-xs font-bold ${value ? 'text-[#0069E0]' : 'text-slate-400'}`}>
+      <div id={valueHintId} className={`mt-1 flex items-center gap-1.5 text-xs font-bold ${value ? 'text-[#0069E0]' : 'text-slate-400'}`}>
         <CalendarDots className="h-3.5 w-3.5" />
         {value || placeholder}
       </div>
@@ -3914,28 +4805,16 @@ function DatePickerField({
   );
 }
 
-function RequiredHint({ text = 'Обязательное поле' }: { text?: string }) {
-  return <div role="alert" className="mt-1 text-xs font-black text-rose-500">{text}</div>;
+function RequiredHint({ text = 'Обязательное поле', id }: { text?: string; id?: string }) {
+  return <div id={id} role="alert" className="mt-1 text-xs font-black text-rose-500">{text}</div>;
 }
 
 function NavButton({ icon, label, active, onClick }: { icon: React.ReactElement; label: string; active: boolean; onClick: () => void }) {
   return (
-    <button onClick={onClick} aria-current={active ? 'page' : undefined} className={`flex h-12 min-w-0 flex-col items-center justify-center gap-0.5 rounded-2xl px-0.5 text-xs font-black leading-tight sm:h-14 ${pressClass} ${active ? 'bg-[#0069E0] text-white shadow-[0_10px_24px_rgba(0,105,224,0.20)] hover:bg-[#1677E8] active:bg-[#0058BD]' : 'text-slate-500 hover:bg-slate-100 active:bg-slate-100'}`}>
+    <button onClick={onClick} aria-current={active ? 'page' : undefined} className={`flex h-12 min-w-0 flex-col items-center justify-center gap-0.5 rounded-2xl px-0.5 text-xs font-black leading-tight sm:h-14 ${pressClass} ${active ? 'bg-[#0069E0] text-white hover:bg-[#1677E8] active:bg-[#0058BD]' : 'text-slate-500 hover:bg-slate-100 active:bg-slate-100'}`}>
       {React.cloneElement(icon, { className: 'h-5 w-5', weight: active ? 'fill' : 'regular' })}
       <span className="truncate">{label}</span>
     </button>
-  );
-}
-
-function Segmented({ value, onChange, options }: { value: string; onChange: (value: string) => void; options: [string, string][] }) {
-  return (
-    <div className={`grid gap-2 rounded-3xl bg-slate-100 p-1 ${options.length === 3 ? 'grid-cols-1 sm:grid-cols-3' : 'grid-cols-2'}`}>
-      {options.map(([key, label]) => (
-        <button key={key} type="button" onClick={() => onChange(key)} className={`mega-segment-option rounded-2xl px-3 py-2 text-sm font-black ${pressClass} ${value === key ? 'mega-segment-option-active shadow-sm' : 'mega-segment-option-idle'}`}>
-          {label}
-        </button>
-      ))}
-    </div>
   );
 }
 
@@ -3948,19 +4827,16 @@ function MeetingKindPicker({ value, onChange }: { value: MeetingKind; onChange: 
   return (
     <fieldset>
       <legend className="mb-2 text-xs font-black uppercase tracking-wide text-slate-500">Что назначаем</legend>
-      <div className="grid grid-cols-1 gap-2 min-[520px]:grid-cols-3" role="radiogroup" aria-label="Тип события">
+      <div className="grid grid-cols-1 gap-2 min-[520px]:grid-cols-3">
         {options.map((option) => (
-          <button
+          <label
             key={option.id}
-            type="button"
-            role="radio"
-            aria-checked={value === option.id}
-            onClick={() => onChange(option.id)}
-            className={`min-w-0 rounded-2xl border px-3 py-3 text-left transition ${pressClass} ${meetingAudienceOptionClass(value === option.id)}`}
+            className={`min-w-0 cursor-pointer rounded-2xl border px-3 py-3 text-left transition has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-[#0069E0] has-[:focus-visible]:ring-offset-2 ${pressClass} ${meetingAudienceOptionClass(value === option.id)}`}
           >
+            <input className="sr-only" type="radio" name="meeting-kind" value={option.id} checked={value === option.id} onChange={() => onChange(option.id)} />
             <span className="block break-words text-sm font-black">{option.title}</span>
             <span className="mt-1 block text-xs font-semibold opacity-75">{option.description}</span>
-          </button>
+          </label>
         ))}
       </div>
     </fieldset>
@@ -3978,16 +4854,14 @@ function MeetingAudiencePicker({ value, onChange }: { value: 'general' | 'custom
       <legend className="mb-2 text-xs font-black uppercase tracking-wide text-slate-500">Кого приглашаем</legend>
       <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
         {options.map((option) => (
-          <button
+          <label
             key={option.id}
-            type="button"
-            aria-pressed={value === option.id}
-            onClick={() => onChange(option.id)}
-            className={`rounded-2xl border px-3 py-3 text-left transition ${pressClass} ${meetingAudienceOptionClass(value === option.id)}`}
+            className={`cursor-pointer rounded-2xl border px-3 py-3 text-left transition has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-[#0069E0] has-[:focus-visible]:ring-offset-2 ${pressClass} ${meetingAudienceOptionClass(value === option.id)}`}
           >
+            <input className="sr-only" type="radio" name="meeting-audience" value={option.id} checked={value === option.id} onChange={() => onChange(option.id)} />
             <span className="block text-sm font-black">{option.title}</span>
             <span className="mt-1 block text-xs font-semibold opacity-75">{option.description}</span>
-          </button>
+          </label>
         ))}
       </div>
     </fieldset>
@@ -3995,21 +4869,26 @@ function MeetingAudiencePicker({ value, onChange }: { value: 'general' | 'custom
 }
 
 function EventScopePicker({ events, value, onChange }: { events: WorkEvent[]; value: string; onChange: (value: string) => void }) {
-  if (!events.length) {
-    return <div className="rounded-3xl border border-amber-200 bg-amber-50 p-4 text-sm font-bold text-amber-900">Нет активных мероприятий. Администратору нужно добавить или вернуть мероприятие в работу.</div>;
-  }
-  const useSingleColumn = events.some((workEvent) => workEvent.name.length > 24)
-    || events.some((workEvent, index) => index % 2 === 1 && workEvent.name.length + events[index - 1].name.length > 38);
+  const activeEvents = events.filter((workEvent) => workEvent.status === 'active');
+  const archivedCount = events.filter((workEvent) => workEvent.status === 'archived').length;
+  const options = [
+    { id: TASK_EVENT_SCOPE_ALL, label: 'Все задачи' },
+    { id: TASK_EVENT_SCOPE_NONE, label: 'Без мероприятия' },
+    ...activeEvents.map((workEvent) => ({ id: workEvent.id, label: workEvent.name })),
+    ...(archivedCount ? [{ id: TASK_EVENT_SCOPE_ARCHIVED, label: `Архив · ${archivedCount}` }] : []),
+  ];
+  const useSingleColumn = options.some((option) => option.label.length > 24)
+    || options.some((option, index) => index % 2 === 1 && option.label.length + options[index - 1].label.length > 38);
   return (
     <div className="rounded-3xl border border-blue-100 bg-white p-3 shadow-sm">
-      <div className="mb-2 px-1 text-xs font-black uppercase tracking-wide text-slate-500">Мероприятие</div>
+      <div className="mb-2 px-1 text-xs font-black uppercase tracking-wide text-slate-500">Показать задачи</div>
       <div className={`grid gap-2 ${useSingleColumn ? 'grid-cols-1' : 'grid-cols-2'}`} role="radiogroup" aria-label="Фильтр задач по мероприятию">
-        {events.map((workEvent, index) => {
-          const selected = value === workEvent.id;
-          const fillsOddLastRow = !useSingleColumn && events.length % 2 === 1 && index === events.length - 1;
+        {options.map((option, index) => {
+          const selected = value === option.id;
+          const fillsOddLastRow = !useSingleColumn && options.length % 2 === 1 && index === options.length - 1;
           return (
-            <button key={workEvent.id} type="button" role="radio" aria-checked={selected} onClick={() => onChange(workEvent.id)} className={`min-h-12 min-w-0 break-words rounded-2xl border px-3 py-2 text-sm font-black leading-tight ${fillsOddLastRow ? 'col-span-2' : ''} ${pressClass} ${selected ? 'border-[#0069E0] bg-[#0069E0] text-white shadow-[0_8px_20px_rgba(0,105,224,0.2)]' : 'border-blue-100 bg-blue-50 text-[#005BC4] hover:bg-blue-100'}`}>
-              {workEvent.name}
+            <button key={option.id} type="button" role="radio" aria-checked={selected} onClick={() => onChange(option.id)} className={`min-h-12 min-w-0 break-words rounded-2xl border px-3 py-2 text-sm font-black leading-tight ${fillsOddLastRow ? 'col-span-2' : ''} ${pressClass} ${selected ? 'border-[#0069E0] bg-[#0069E0] text-white shadow-[0_8px_20px_rgba(0,105,224,0.2)]' : 'border-blue-100 bg-blue-50 text-[#005BC4] hover:bg-blue-100'}`}>
+              {option.label}
             </button>
           );
         })}
@@ -4051,11 +4930,10 @@ function AvatarCropEditor({ source, saving, onCancel, onSave }: { source: string
   };
 
   return (
-    <div className="fixed inset-0 z-[70] flex items-end justify-center bg-slate-950/65 p-3 backdrop-blur-sm sm:items-center" role="dialog" aria-modal="true" aria-labelledby="avatar-editor-title">
-      <div className="w-full max-w-md rounded-3xl bg-white p-4 shadow-2xl">
+    <DialogSheet titleId="avatar-editor-title" descriptionId="avatar-editor-description" onClose={onCancel} closeDisabled={saving}>
         <div className="flex items-center justify-between gap-3">
-          <div><h2 id="avatar-editor-title" className="text-lg font-black">Обрезать аватар</h2><p className="text-xs font-semibold text-slate-500">Перемести кадр ползунками и выбери масштаб.</p></div>
-          <button type="button" onClick={onCancel} className={miniButtonClass} aria-label="Закрыть"><X className="h-4 w-4" /></button>
+          <div><h2 id="avatar-editor-title" className="text-lg font-black">Обрезать аватар</h2><p id="avatar-editor-description" className="text-xs font-semibold text-slate-500">Перемести кадр ползунками и выбери масштаб.</p></div>
+          <button type="button" data-dialog-initial-focus disabled={saving} onClick={onCancel} className={miniButtonClass} aria-label="Закрыть"><X className="h-4 w-4" /></button>
         </div>
         <div className="mx-auto mt-4 aspect-square w-full max-w-[280px] overflow-hidden rounded-3xl bg-slate-100">
           <canvas ref={previewRef} width="560" height="560" aria-label="Предпросмотр аватара" className="h-full w-full" />
@@ -4069,8 +4947,7 @@ function AvatarCropEditor({ source, saving, onCancel, onSave }: { source: string
           </div>
           <button type="button" disabled={saving || !imageLoaded} onClick={() => void crop()} className={`${primaryButtonClass} disabled:opacity-60`}>{saving ? 'Сохраняю...' : imageLoaded ? 'Сохранить аватар' : 'Загружаю фото...'}</button>
         </div>
-      </div>
-    </div>
+    </DialogSheet>
   );
 }
 
@@ -4119,52 +4996,67 @@ function TaskList({
         )}
       </div>
       {tasks.length === 0 ? (
-        <EmptyState text="Пока пусто" />
+        <EmptyState text="По выбранным фильтрам задач нет." />
       ) : (
         visibleTasks.map((task) => {
           const expanded = expandedTaskId === task.id;
           const creator = users.find((user) => user.id === task.creatorId);
           const workEvent = events.find((item) => item.id === task.eventId);
           const executors = taskAssigneeIds(task).map((id) => users.find((user) => user.id === id)).filter(Boolean) as User[];
+          const completedBy = users.find((user) => user.id === task.completedBy);
           const isMine = taskAssigneeIds(task).includes(currentUser.id);
           const canCoordinate = currentUser.role === 'admin' || task.creatorId === currentUser.id;
+          const detailsId = `task-details-${task.id}`;
           return (
-          <div key={task.id} className={`rounded-3xl border border-blue-100 bg-white p-4 shadow-sm ${pressClass}`} onClick={() => setExpandedTaskId(expanded ? null : task.id)}>
+          <div key={task.id} className="rounded-3xl border border-blue-100 bg-white p-4">
             <div className="flex flex-col items-stretch gap-3 min-[380px]:flex-row min-[380px]:items-start min-[380px]:justify-between">
               <div className="min-w-0">
-                <h3 className="font-black">{task.title}</h3>
-                <p className="mt-1 text-sm text-slate-500">{task.description}</p>
+                <h3 className="break-words font-black">{task.title}</h3>
+                <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm font-bold text-slate-600">
+                  <span className="flex items-center gap-1 tabular-nums"><Clock className="h-4 w-4" /> До {formatDateShort(task.deadline)}</span>
+                  <span>{taskPriorityText(task.priority)}</span>
+                </div>
               </div>
               {task.status !== 'completed' && onAction && actionLabel && (
-                <button onClick={(event) => { event.stopPropagation(); onAction(task.id); }} className={`mega-primary-button w-full shrink-0 rounded-full bg-[#0069E0] px-3 py-2 text-xs font-black text-white hover:bg-[#1677E8] active:bg-[#0058BD] min-[380px]:w-auto ${pressClass}`}>
+                <button type="button" onClick={() => onAction(task.id)} className={`mega-primary-button w-full shrink-0 rounded-full bg-[#0069E0] px-3 py-2 text-xs font-black text-white hover:bg-[#1677E8] active:bg-[#0058BD] min-[380px]:w-auto ${pressClass}`}>
                   {actionLabel}
                 </button>
               )}
             </div>
-            <div className="mt-3 flex flex-wrap gap-2 text-xs font-bold text-slate-500">
-              <span className="max-w-full truncate rounded-full bg-slate-950 px-2.5 py-1 text-white">
+            <p className="mt-3 break-words text-sm font-semibold text-slate-700">
+              Исполнители: {executors.length ? executors.map((user) => user.realName).join(', ') : 'пока никто не взял'}
+            </p>
+            <div className="mt-2 flex flex-wrap gap-2 text-xs font-bold text-slate-500">
+              {executors.length > 1 && <span className="rounded-full bg-amber-100 px-2.5 py-1 text-amber-800">Общая задача</span>}
+              <span className="max-w-full break-words rounded-full bg-slate-950 px-2.5 py-1 text-white">
                 {workEvent?.name || 'Без мероприятия'}
               </span>
               <span className="rounded-full bg-blue-50 px-2.5 py-1 text-[#0069E0]">
                 {taskCompetencyNames(task).join(', ') || 'Без блока'}
               </span>
-              <span className="flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-1">
-                <Clock className="h-3 w-3" />
-                {formatDateShort(task.deadline)}
-              </span>
-              <span className="rounded-full bg-blue-50 px-2.5 py-1 text-[#0069E0]">
-                {taskPriorityText(task.priority)}
-              </span>
-              {creator && <span className="rounded-full bg-slate-100 px-2.5 py-1">Автор: {creator.realName}</span>}
             </div>
 
+            <button
+              type="button"
+              aria-expanded={expanded}
+              aria-controls={detailsId}
+              onClick={() => setExpandedTaskId(expanded ? null : task.id)}
+              className={`${secondaryButtonClass} mt-3 w-full justify-between`}
+            >
+              <span>{expanded ? 'Скрыть подробности' : 'Подробнее'}</span>
+              {expanded ? <CaretUp className="h-4 w-4" /> : <CaretDown className="h-4 w-4" />}
+            </button>
+
             {expanded && (
-              <div className="mt-4 space-y-2 border-t border-slate-100 pt-4 text-sm text-slate-600" onClick={(event) => event.stopPropagation()}>
+              <div id={detailsId} className="mt-4 space-y-2 border-t border-slate-100 pt-4 text-sm text-slate-600">
+                <InfoRow label="Описание" value={task.description || 'Без описания'} />
                 {creator && <InfoRow label="Автор" value={creator.realName} href={telegramLink(creator.username)} />}
                 <InfoRow label="Мероприятие" value={workEvent?.name || 'Без мероприятия'} />
                 <InfoRow label="Блоки" value={taskCompetencyNames(task).join(', ') || 'Без блока'} />
                 <InfoRow label="Статус" value={task.status === 'open' ? 'Открытая' : task.status === 'completed' ? 'Готово' : 'В работе'} />
                 <InfoRow label="Исполнители" value={executors.length ? executors.map((user) => user.realName).join(', ') : 'пока никто'} />
+                {executors.length > 1 && <InfoRow label="Режим" value="Общая: завершение закроет задачу для всех" />}
+                {task.status === 'completed' && completedBy && <InfoRow label="Завершил" value={completedBy.realName} />}
                 {executors.length > 0 && (
                   <div className="space-y-2 pt-1">
                     <div className="text-xs font-black uppercase tracking-wide text-slate-500">Что делает каждый исполнитель</div>
@@ -4237,7 +5129,7 @@ function TaskList({
                 <InfoRow label="Дедлайн" value={formatDateShort(task.deadline)} />
                 <InfoRow label="Приоритет" value={taskPriorityText(task.priority)} />
                 {task.timeSpentMinutes ? <InfoRow label="Затрачено времени" value={taskDurationText(task.timeSpentMinutes)} /> : null}
-                {task.sow && <p className="rounded-2xl bg-slate-50 p-3 text-xs text-slate-600">{task.sow}</p>}
+                {task.sow && <InfoRow label="ТЗ" value={task.sow} />}
                 {task.tips?.length > 0 && (
                   <div className="space-y-1 text-xs text-slate-500">
                     {task.tips.map((tip, index) => (
@@ -4249,7 +5141,7 @@ function TaskList({
                   <div className="flex flex-wrap gap-2 pt-2">
                     {onEdit && <button type="button" onClick={() => onEdit(task)} className={miniButtonClass}><PencilSimple className="h-4 w-4" /> Редактировать</button>}
                     {onNotify && task.status !== 'completed' && <button type="button" onClick={() => onNotify(task.id)} className={miniButtonClass}><Bell className="h-4 w-4" /> Уведомить сейчас</button>}
-                    {onDelete && task.status !== 'completed' && <button type="button" onClick={() => onDelete(task.id)} className={`${miniButtonClass} border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100`}><Trash className="h-4 w-4" /> Удалить задачу</button>}
+                    {onDelete && task.status !== 'completed' && <button type="button" onClick={() => onDelete(task.id)} className={`${miniButtonClass} border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100`}><Trash className="h-4 w-4" /> Отменить задачу</button>}
                   </div>
                 )}
                 {task.status === 'completed' && (isMine || currentUser.role === 'admin') && onEditCompletion && (
@@ -4258,7 +5150,7 @@ function TaskList({
                   </button>
                 )}
                 {isMine && task.status === 'assigned' && onRelease && (
-                  <button onClick={() => onRelease(task.id)} className={`${miniButtonClass} border-amber-100 bg-amber-50 text-amber-700 hover:bg-amber-100`}>
+                  <button type="button" onClick={() => onRelease(task.id)} className={`${miniButtonClass} border-amber-100 bg-amber-50 text-amber-700 hover:bg-amber-100`}>
                     Отказаться от задачи
                   </button>
                 )}

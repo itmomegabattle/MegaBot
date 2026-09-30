@@ -21,6 +21,11 @@
   pointer-events: none;
   transform: translateZ(0);
   backface-visibility: hidden;
+  opacity: 0.48;
+}
+
+html.dark-theme .brand-background__canvas {
+  opacity: 0.58;
 }
 
 html:not(.dark-theme) .brand-background {

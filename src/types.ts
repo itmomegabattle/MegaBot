@@ -15,6 +15,9 @@ export interface User {
   facultyId?: string;
   joinedAt?: string;
   lastSeenAt?: string;
+  active?: boolean;
+  deactivatedAt?: string;
+  deactivatedBy?: string;
 }
 
 export interface Availability {
@@ -22,12 +25,14 @@ export interface Availability {
   slots: Record<number, number[]>;
   hardUnavailableDays?: number[];
   outWeekIndexes?: number[];
+  weekVersions?: Record<string, number>;
   updatedAt: string;
   weekStart?: string;
 }
 
 export type MeetingType = 'general' | 'custom';
 export type MeetingKind = 'meeting' | 'setup' | 'vibe';
+export type MeetingRsvp = 'yes' | 'no';
 
 export interface Meeting {
   id: string;
@@ -40,7 +45,10 @@ export interface Meeting {
   duration: number;
   hostId: string;
   participants: string[] | 'all';
+  audiencePolicy?: 'snapshot';
+  audienceUserIds?: string[];
   attendeeIds?: string[];
+  rsvpByUser?: Record<string, MeetingRsvp>;
   competency?: string;
   topic?: string;
   description?: string;
@@ -87,6 +95,7 @@ export interface TaskReminder {
 
 export interface Task {
   id: string;
+  version?: number;
   title: string;
   description: string;
   deadline: string;
@@ -100,6 +109,8 @@ export interface Task {
   priority: 'normal' | 'important' | 'critical';
   createdAt?: string;
   completedAt?: string;
+  assignmentMode?: 'shared';
+  completedBy?: string;
   cancelledAt?: string;
   cancelledBy?: string;
   timeSpentMinutes?: number;
@@ -125,6 +136,8 @@ export interface BotMessage {
 }
 
 export interface SimulationState {
+  serverNow?: string;
+  timeZone?: string;
   users: User[];
   faculties?: Faculty[];
   facultyCompetencies?: string[];
@@ -153,6 +166,73 @@ export interface SimulationState {
       attempts: number;
       lastAttemptAt?: string;
     }>;
+    notificationDeliveries?: NotificationDelivery[];
+    notificationDeliverySummary?: {
+      total: number;
+      byStatus: Record<string, number>;
+      pending: number;
+      attention: number;
+      overloaded: boolean;
+      oldestPendingAt?: string;
+    };
+    telegramInbox?: TelegramInboxEntry[];
     databaseRevision?: number;
+    idempotencyRecords?: Array<{
+      key: string;
+      actorId: string;
+      operation: string;
+      bodyHash: string;
+      status: 'processing' | 'completed';
+      responseStatus?: number;
+      responseBody?: unknown;
+      createdAt: string;
+      completedAt?: string;
+    }>;
   };
+}
+
+export type NotificationDeliveryStatus = 'planned' | 'sending' | 'sent' | 'retry' | 'failed' | 'unknown' | 'cancelled' | 'expired';
+
+export interface NotificationDelivery {
+  id: string;
+  dedupeKey: string;
+  category: string;
+  recipientId?: string;
+  chatId: string;
+  text: string;
+  replyMarkup?: Record<string, unknown>;
+  messageThreadId?: number;
+  disableNotification?: boolean;
+  disableWebPagePreview?: boolean;
+  intendedAt: string;
+  availableAt: string;
+  expiresAt?: string;
+  status: NotificationDeliveryStatus;
+  attempts: number;
+  leaseToken?: string;
+  leasedUntil?: string;
+  lastAttemptAt?: string;
+  lastErrorCode?: string;
+  lastErrorMessage?: string;
+  telegramMessageId?: number;
+  sentAt?: string;
+  updatedAt: string;
+}
+
+export type TelegramInboxStatus = 'received' | 'processing' | 'retry' | 'completed' | 'failed';
+
+export interface TelegramInboxEntry {
+  updateId: number;
+  chatKey: string;
+  payload: Record<string, unknown>;
+  status: TelegramInboxStatus;
+  receivedAt: string;
+  availableAt: string;
+  attempts: number;
+  leaseToken?: string;
+  leasedUntil?: string;
+  lastAttemptAt?: string;
+  lastError?: string;
+  processedAt?: string;
+  updatedAt: string;
 }

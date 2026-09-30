@@ -7,7 +7,7 @@ import fs from 'fs';
 import crypto from 'crypto';
 import { createServer as createViteServer } from 'vite';
 import { ProxyAgent } from 'undici';
-import { SimulationState, User, Availability, Meeting, Task, BotMessage, Faculty, TaskReminder, WorkEvent } from './src/types.js';
+import { SimulationState, User, Availability, Meeting, Task, BotMessage, Faculty, TaskReminder, WorkEvent, NotificationDelivery } from './src/types.js';
 import { isAvailabilityReminderTime, millisecondsUntilNextWholeHour, moscowClock } from './src/reminderSchedule.js';
 import {
   buildUserMappingReport,
@@ -28,13 +28,54 @@ import {
 } from './src/googleSheetsDatabase.js';
 import { mergePrimarySheetAvailability, sanitizeSimulationState } from './src/stateMaintenance.js';
 import { alignAvailabilityToWeek, filterSlotsByAvailabilityConfig, normalizeAvailabilityConfig } from './src/availabilityConfig.js';
+import { AvailabilityWeekConflictError, AvailabilityWeekRangeError, replaceAvailabilityWeek } from './src/availabilityWeekMutation.js';
 import { birthdayParts, deliverBirthdayReminders } from './src/birthdayGift.js';
 import { meetingKindText, normalizeMeetingKind } from './src/meetingKind.js';
+import { meetingPhase, meetingStartTimestamp } from './src/meetingLifecycle.js';
+import { meetingRsvpFor, normalizedMeetingRsvps, setMeetingRsvp } from './src/meetingRsvp.js';
+import { completeTaskCommand, releaseTaskCommand, TaskCommandError } from './src/taskCommands.js';
+import { meetingScheduleError } from './src/meetingScheduling.js';
+import { chatNavigationTarget } from './src/chatNavigation.js';
+import {
+  applyTelegramDeliveryOutcome,
+  claimNotificationDelivery,
+  createNotificationDelivery,
+  notificationDeliverySummary,
+  retryNotificationDelivery,
+  type TelegramDeliveryOutcome,
+} from './src/notificationDelivery.js';
+import {
+  claimTelegramInboxEntry,
+  completeTelegramInboxEntry,
+  failTelegramInboxEntry,
+  recordTelegramUpdates,
+} from './src/telegramInbox.js';
+import { deactivateUser, findOrphanUserReferences, isUserActive } from './src/userLifecycle.js';
+import {
+  activeCoreTeamUsers,
+  resolveMeetingAudienceUsers,
+  resolveTaskAudienceUsers,
+  sanitizeTaskAssigneeIds,
+  snapshotMeetingAudienceUserIds,
+} from './src/audiencePolicy.js';
+import { completeIdempotency, findIdempotencyRecord, idempotencyActor, idempotencyBodyHash, reserveIdempotency } from './src/idempotency.js';
 import {
   googleCalendarConfigFromEnv,
   reconcileGoogleCalendar,
   syncMeetingToGoogleCalendar,
 } from './src/googleCalendarSync.js';
+import {
+  databaseRecoveryDirectory,
+  readLatestDatabaseRecoveryRecord,
+  writeDatabaseRecoveryRecord,
+} from './src/databaseRecoveryJournal.js';
+import {
+  PROJECT_TIME_ZONE,
+  parseProjectLocalDate,
+  projectClock,
+  projectDateDeadlineInstant,
+  projectDateTimeInstant,
+} from './src/projectTime.js';
 
 const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
 const telegramProxyAgent = proxyUrl ? new ProxyAgent(proxyUrl) : null;
@@ -42,8 +83,12 @@ const telegramProxyAgent = proxyUrl ? new ProxyAgent(proxyUrl) : null;
 function telegramFetch(input: string, init: RequestInit = {}) {
   const url = String(input);
   const isLongPoll = url.includes('/getUpdates');
+  const isSendMessage = url.includes('/sendMessage');
   const timeoutMs = isLongPoll ? 40000 : 10000;
-  const attempts = isLongPoll ? 1 : 2;
+  // A timed-out sendMessage may already have been accepted by Telegram. Retrying
+  // it blindly can duplicate a user-visible notification, so the durable queue
+  // records it as unknown and leaves the decision to an administrator.
+  const attempts = isLongPoll || isSendMessage ? 1 : 2;
 
   const run = async (attempt = 1): Promise<Response> => {
     const controller = new AbortController();
@@ -75,7 +120,12 @@ const PORT = Number(process.env.PORT || 3000);
 const DB_FILE = process.env.DB_FILE
   ? path.resolve(process.env.DB_FILE)
   : path.join(process.cwd(), 'database.json');
+const SESSION_FILE = process.env.SESSION_FILE
+  ? path.resolve(process.env.SESSION_FILE)
+  : path.join(path.dirname(DB_FILE), 'sessions.json');
 const DATABASE_SHEETS_CONFIG = googleSheetsDatabaseConfigFromEnv();
+const DATABASE_RECOVERY_DIRECTORY = databaseRecoveryDirectory(DB_FILE);
+const DATABASE_RECOVERY_RETENTION = positiveIntegerEnvironment('DATABASE_RECOVERY_RETENTION', 20);
 const CHAT_PANEL_FILE = process.env.CHAT_PANEL_FILE
   ? path.resolve(process.env.CHAT_PANEL_FILE)
   : DATABASE_SHEETS_CONFIG?.enabled
@@ -85,10 +135,127 @@ let databaseStateCache: SimulationState | null = null;
 let pendingDatabaseSheetsState: SimulationState | null = null;
 let databaseSheetsFlushTimer: NodeJS.Timeout | null = null;
 let databaseSheetsFlushPromise: Promise<void> | null = null;
+let lastDatabaseSheetsSyncedRevision = 0;
+let isShuttingDown = false;
+const runtimeOperations = {
+  lastPersistenceSuccessAt: undefined as string | undefined,
+  lastPersistenceErrorAt: undefined as string | undefined,
+  lastPersistenceError: undefined as string | undefined,
+  lastReplicationSuccessAt: undefined as string | undefined,
+  lastReplicationErrorAt: undefined as string | undefined,
+  lastReplicationError: undefined as string | undefined,
+  lastTelegramSuccessAt: undefined as string | undefined,
+  lastTelegramErrorAt: undefined as string | undefined,
+  lastTelegramError: undefined as string | undefined,
+  lastCalendarSuccessAt: undefined as string | undefined,
+  lastCalendarErrorAt: undefined as string | undefined,
+  lastCalendarError: undefined as string | undefined,
+  lastAvailabilitySheetsSuccessAt: undefined as string | undefined,
+  lastAvailabilitySheetsErrorAt: undefined as string | undefined,
+  lastAvailabilitySheetsError: undefined as string | undefined,
+  workerHeartbeats: {} as Record<string, string>,
+};
+const SESSION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+
+type StoredSession = {
+  tokenHash: string;
+  userId: string;
+  createdAt: number;
+  expiresAt: number;
+};
+
+let sessionStoreCache: StoredSession[] | null = null;
 
 const PRODUCTION_WEBAPP_URL = 'https://megaorgiabot.ru';
 const TEMPORARY_TUNNEL_HOST = /(?:^|\.)(?:loca\.lt|localtunnel\.me|lhr\.life|ngrok(?:-free)?\.(?:app|io)|trycloudflare\.com)$/i;
+const SELF_ACTOR_USER_ID_PATHS = new Set(['/availability', '/task/claim', '/task/release']);
+const FACULTY_SESSION_PATHS = new Set(['/auth/logout', '/faculty/me', '/faculty/my-tasks']);
+const IDEMPOTENT_CREATE_PATHS = new Set([
+  '/user/add', '/faculty/user/add', '/faculty/task/create', '/meeting', '/task/create', '/team/broadcast',
+]);
 let resolvedWebAppUrl: string | undefined;
+
+type TelegramUpdateMode = 'polling' | 'webhook' | 'disabled';
+
+type RateLimitResult = { allowed: boolean; retryAfterSeconds: number };
+
+function positiveIntegerEnvironment(name: string, fallback: number) {
+  const value = Number(process.env[name]);
+  return Number.isInteger(value) && value > 0 ? value : fallback;
+}
+
+function safeOperationalError(error: unknown) {
+  return String(error instanceof Error ? error.message : error)
+    .replace(/\/bot[^/\s]+\//gi, '/bot[redacted]/')
+    .replace(/([?&](?:token|key|secret|signature)=)[^&\s]+/gi, '$1[redacted]')
+    .slice(0, 500);
+}
+
+function markWorkerHeartbeat(worker: string) {
+  runtimeOperations.workerHeartbeats[worker] = new Date().toISOString();
+}
+
+function createFixedWindowRateLimiter(windowMs: number, limit: number) {
+  const entries = new Map<string, { count: number; resetAt: number }>();
+  return (key: string, cost = 1): RateLimitResult => {
+    const now = Date.now();
+    let entry = entries.get(key);
+    if (!entry || entry.resetAt <= now) {
+      entry = { count: 0, resetAt: now + windowMs };
+      entries.set(key, entry);
+    }
+    const retryAfterSeconds = Math.max(1, Math.ceil((entry.resetAt - now) / 1000));
+    if (entry.count + cost > limit) return { allowed: false, retryAfterSeconds };
+    entry.count += cost;
+    if (entries.size > 10_000) {
+      for (const [entryKey, candidate] of entries) {
+        if (candidate.resetAt <= now) entries.delete(entryKey);
+      }
+    }
+    return { allowed: true, retryAfterSeconds };
+  };
+}
+
+function rateLimitResponse(res: express.Response, result: RateLimitResult, error: string) {
+  res.setHeader('Retry-After', String(result.retryAfterSeconds));
+  return res.status(429).json({ error, retryAfterSeconds: result.retryAfterSeconds });
+}
+
+function isAllowedMutationOrigin(req: express.Request) {
+  const rawOrigin = req.get('Origin');
+  if (!rawOrigin) return false;
+  try {
+    const origin = new URL(rawOrigin).origin;
+    const allowedOrigins = new Set<string>();
+    const host = req.get('host');
+    if (host) {
+      const forwardedProtocol = String(req.get('x-forwarded-proto') || '').split(',')[0].trim();
+      allowedOrigins.add(`${forwardedProtocol || req.protocol}://${host}`);
+    }
+    const webAppUrl = configuredWebAppUrl();
+    if (webAppUrl) allowedOrigins.add(new URL(webAppUrl).origin);
+    return allowedOrigins.has(origin);
+  } catch {
+    return false;
+  }
+}
+
+function configuredTelegramUpdateMode(): TelegramUpdateMode {
+  const configured = String(process.env.TELEGRAM_UPDATE_MODE || '').trim().toLowerCase();
+  if (!configured) return process.env.DISABLE_TELEGRAM_POLLING === 'true' ? 'disabled' : 'polling';
+  if (configured === 'polling' || configured === 'webhook' || configured === 'disabled') return configured;
+  throw new Error('TELEGRAM_UPDATE_MODE must be polling, webhook, or disabled');
+}
+
+function constantTimeSecretEquals(actual: string, expected: string) {
+  const actualDigest = crypto.createHash('sha256').update(actual).digest();
+  const expectedDigest = crypto.createHash('sha256').update(expected).digest();
+  return crypto.timingSafeEqual(actualDigest, expectedDigest) && actual.length === expected.length;
+}
+
+function isValidTelegramWebhookSecret(secret: string) {
+  return /^[A-Za-z0-9_-]{1,256}$/.test(secret);
+}
 
 function revisionedWebAppUrl(value: string) {
   const revision = String(process.env.APP_REVISION || '').trim().slice(0, 12);
@@ -148,53 +315,196 @@ function getAdminTelegramIds() {
     .filter(Boolean);
 }
 
-function getAdminUsernames() {
-  return (process.env.ADMIN_USERNAMES || '@wonkersone')
-    .split(',')
-    .map((item) => item.trim().replace(/^@/, '').toLowerCase())
-    .filter(Boolean);
-}
-
-function getRoleForTelegramUser(telegramId: string | number, username?: string): User['role'] {
-  const id = String(telegramId);
-  const normalizedUsername = (username || '').replace(/^@/, '').toLowerCase();
-  if (getAdminTelegramIds().includes(id) || getAdminUsernames().includes(normalizedUsername)) {
-    return 'admin';
-  }
-  return 'organizer';
-}
-
-function isEnvAdmin(telegramId: string | number, username?: string) {
-  const id = String(telegramId);
-  const normalizedUsername = (username || '').replace(/^@/, '').toLowerCase();
-  return getAdminTelegramIds().includes(id) || getAdminUsernames().includes(normalizedUsername);
+function isEnvAdmin(telegramId: string | number) {
+  return getAdminTelegramIds().includes(String(telegramId));
 }
 
 function isFacultyUser(user?: User) {
   return user?.role === 'faculty_responsible' || user?.role === 'faculty_helper';
 }
 
+function birthdayDayMonth(value?: string) {
+  const birthday = String(value || '').trim();
+  const shortDate = birthday.match(/^(\d{2})\.(\d{2})(?:\.\d{4})?$/);
+  if (shortDate) return `${shortDate[1]}.${shortDate[2]}`;
+  const isoDate = birthday.match(/^\d{4}-(\d{2})-(\d{2})$/);
+  return isoDate ? `${isoDate[2]}.${isoDate[1]}` : '';
+}
+
+function clientUser(user: User, viewer: User): User {
+  const isAdmin = viewer.role === 'admin';
+  const isSelf = user.id === viewer.id;
+  return {
+    id: user.id,
+    username: user.username,
+    realName: user.realName,
+    role: user.role,
+    avatarSeed: user.avatarSeed,
+    ...(user.avatarDataUrl ? { avatarDataUrl: user.avatarDataUrl } : {}),
+    birthday: isAdmin || isSelf ? user.birthday || '' : birthdayDayMonth(user.birthday),
+    registered: Boolean(user.registered),
+    competencies: [...(user.competencies || [])],
+    primaryCompetency: user.primaryCompetency || '',
+    facultyId: user.facultyId || '',
+    active: isUserActive(user),
+    ...(isAdmin && user.deactivatedAt ? { deactivatedAt: user.deactivatedAt, deactivatedBy: user.deactivatedBy } : {}),
+    ...(isAdmin && user.lastSeenAt ? { lastSeenAt: user.lastSeenAt } : {}),
+  };
+}
+
+function coreMeetingClientView(meeting: Meeting): Meeting {
+  return {
+    id: meeting.id,
+    title: meeting.title,
+    kind: meeting.kind,
+    eventId: meeting.eventId,
+    type: meeting.type,
+    date: meeting.date,
+    time: meeting.time,
+    duration: meeting.duration,
+    hostId: meeting.hostId,
+    participants: meeting.participants,
+    audiencePolicy: meeting.audiencePolicy,
+    audienceUserIds: meeting.audienceUserIds,
+    attendeeIds: meeting.attendeeIds,
+    rsvpByUser: meeting.rsvpByUser,
+    competency: meeting.competency,
+    topic: meeting.topic,
+    description: meeting.description,
+    status: meeting.status,
+  };
+}
+
+function coreTaskClientView(task: Task): Task {
+  return {
+    id: task.id,
+    version: task.version,
+    title: task.title,
+    description: task.description,
+    deadline: task.deadline,
+    assignedTo: task.assignedTo,
+    creatorId: task.creatorId,
+    competency: task.competency,
+    competencies: task.competencies,
+    sow: task.sow,
+    tips: task.tips,
+    status: task.status,
+    priority: task.priority,
+    createdAt: task.createdAt,
+    completedAt: task.completedAt,
+    assignmentMode: task.assignmentMode || 'shared',
+    completedBy: task.completedBy,
+    cancelledAt: task.cancelledAt,
+    cancelledBy: task.cancelledBy,
+    timeSpentMinutes: task.timeSpentMinutes,
+    facultyId: task.facultyId,
+    eventId: task.eventId,
+    reminders: task.reminders?.map((reminder) => ({
+      id: reminder.id,
+      type: reminder.type,
+      value: reminder.value,
+      unit: reminder.unit,
+    })),
+    assigneeNotes: task.assigneeNotes,
+    completionComments: task.completionComments,
+  };
+}
+
+function coreClientState(state: SimulationState, viewer: User): SimulationState {
+  const coreUserIds = new Set(state.users.filter((user) => !isFacultyUser(user) && isUserActive(user)).map((user) => user.id));
+  const availabilities = Object.fromEntries(
+    Object.entries(state.availabilities).filter(([userId]) => coreUserIds.has(userId)),
+  );
+  const settings = state.settings || {};
+  return {
+    users: state.users.map((user) => clientUser(user, viewer)),
+    faculties: [...(state.faculties || [])],
+    facultyCompetencies: [...(state.facultyCompetencies || [])],
+    competencies: [...(state.competencies || [])],
+    availabilities,
+    meetings: state.meetings.map(coreMeetingClientView),
+    events: (state.events || []).map((event) => ({
+      id: event.id,
+      name: event.name,
+      description: event.description,
+      startsAt: event.startsAt,
+      endsAt: event.endsAt,
+      status: event.status,
+      createdAt: event.createdAt,
+      createdBy: event.createdBy,
+    })),
+    tasks: state.tasks.map(coreTaskClientView),
+    messages: { [viewer.id]: state.messages[viewer.id] || [] },
+    settings: {
+      availabilityWeekCount: settings.availabilityWeekCount,
+      availabilityActiveDays: settings.availabilityActiveDays,
+      availabilityStartHour: settings.availabilityStartHour,
+      availabilityEndHour: settings.availabilityEndHour,
+      availabilityWeekNames: settings.availabilityWeekNames,
+      availabilityWeekDescriptions: settings.availabilityWeekDescriptions,
+      availabilityWeekMetadata: settings.availabilityWeekMetadata,
+      availabilityWeekStart: settings.availabilityWeekStart,
+      notificationDeliverySummary: viewer.role === 'admin'
+        ? notificationDeliverySummary(settings.notificationDeliveries || [])
+        : undefined,
+    },
+  };
+}
+
+function facultyTaskClientView(task: Task, viewerId: string): Task {
+  return {
+    id: task.id,
+    version: task.version,
+    title: task.title,
+    description: task.description,
+    deadline: task.deadline,
+    assignedTo: [viewerId],
+    creatorId: task.creatorId,
+    competency: task.competency,
+    competencies: task.competencies,
+    sow: task.sow,
+    tips: task.tips,
+    status: task.status,
+    priority: task.priority,
+    createdAt: task.createdAt,
+    completedAt: task.completedAt,
+    assignmentMode: task.assignmentMode || 'shared',
+    completedBy: task.completedBy,
+    cancelledAt: task.cancelledAt,
+    timeSpentMinutes: task.timeSpentMinutes,
+    facultyId: task.facultyId,
+    eventId: task.eventId,
+    assigneeNotes: task.assigneeNotes?.[viewerId] ? { [viewerId]: task.assigneeNotes[viewerId] } : {},
+    completionComments: task.completionComments?.[viewerId] ? { [viewerId]: task.completionComments[viewerId] } : {},
+  };
+}
+
 function findUserByTelegramIdentity(state: SimulationState, telegramId: string | number, username?: string) {
   const id = String(telegramId);
   const normalizedUsername = (username || '').replace(/^@/, '').toLowerCase();
-  const userByTelegramId = state.users.find((user) => user.telegramId === id);
-  if (userByTelegramId) return userByTelegramId;
+  const usersByTelegramId = state.users.filter((user) => isUserActive(user) && user.telegramId === id);
+  if (usersByTelegramId.length === 1) return usersByTelegramId[0];
+  if (usersByTelegramId.length > 1) return undefined;
   if (!normalizedUsername) return undefined;
-  return state.users.find((user) => (
+  const usersByUsername = state.users.filter((user) => (
+    isUserActive(user)
+    &&
     !user.telegramId
     && user.username.replace(/^@/, '').toLowerCase() === normalizedUsername
   ));
+  return usersByUsername.length === 1 ? usersByUsername[0] : undefined;
 }
 
 function ensureEnvAdminUser(state: SimulationState, telegramId: string | number, username?: string, realName?: string) {
-  if (!isEnvAdmin(telegramId, username)) return undefined;
+  if (!isEnvAdmin(telegramId)) return undefined;
   const id = String(telegramId);
   const normalizedUsername = username ? `@${username.replace(/^@/, '')}` : `@tg${id}`;
   let user = findUserByTelegramIdentity(state, id, username);
 
   if (!user) {
+    if (state.users.some((candidate) => candidate.telegramId === id)) return undefined;
     user = {
-      id: 'u_' + Date.now(),
+      id: `u_${crypto.randomUUID()}`,
       username: normalizedUsername,
       realName: realName || username || `Telegram ${id}`,
       role: 'admin',
@@ -220,11 +530,27 @@ function ensureEnvAdminUser(state: SimulationState, telegramId: string | number,
   return user;
 }
 
-function verifyTelegramInitData(initData: string, botToken?: string) {
-  if (!botToken || !initData) return false;
+type VerifiedTelegramUser = {
+  id: string;
+  username?: string;
+  firstName?: string;
+  lastName?: string;
+};
+
+function optionalTelegramString(value: unknown) {
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function verifyTelegramInitData(initData: string, botToken?: string): VerifiedTelegramUser | undefined {
+  if (!botToken || !initData) return undefined;
   const params = new URLSearchParams(initData);
+  const seenKeys = new Set<string>();
+  for (const [key] of params.entries()) {
+    if (seenKeys.has(key)) return undefined;
+    seenKeys.add(key);
+  }
   const hash = params.get('hash');
-  if (!hash) return false;
+  if (!hash || !/^[a-f0-9]{64}$/i.test(hash)) return undefined;
   params.delete('hash');
   const dataCheckString = [...params.entries()]
     .sort(([a], [b]) => a.localeCompare(b))
@@ -233,36 +559,131 @@ function verifyTelegramInitData(initData: string, botToken?: string) {
   const secretKey = crypto.createHmac('sha256', 'WebAppData').update(botToken).digest();
   const calculated = crypto.createHmac('sha256', secretKey).update(dataCheckString).digest('hex');
   try {
-    return crypto.timingSafeEqual(Buffer.from(calculated, 'hex'), Buffer.from(hash, 'hex'));
+    if (!crypto.timingSafeEqual(Buffer.from(calculated, 'hex'), Buffer.from(hash, 'hex'))) {
+      return undefined;
+    }
   } catch {
-    return false;
+    return undefined;
   }
+
+  const authDateText = params.get('auth_date');
+  if (!authDateText || !/^\d+$/.test(authDateText)) return undefined;
+  const authDate = Number(authDateText);
+  if (!Number.isSafeInteger(authDate) || authDate <= 0) return undefined;
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  if (authDate < nowSeconds - 5 * 60 || authDate > nowSeconds + 30) return undefined;
+
+  const rawUser = params.get('user');
+  if (!rawUser) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(rawUser);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
+    const telegramUser = parsed as Record<string, unknown>;
+    if (typeof telegramUser.id !== 'number'
+      || !Number.isSafeInteger(telegramUser.id)
+      || telegramUser.id <= 0) {
+      return undefined;
+    }
+    if (telegramUser.username !== undefined && typeof telegramUser.username !== 'string') return undefined;
+    if (telegramUser.first_name !== undefined && typeof telegramUser.first_name !== 'string') return undefined;
+    if (telegramUser.last_name !== undefined && typeof telegramUser.last_name !== 'string') return undefined;
+    return {
+      id: String(telegramUser.id),
+      username: optionalTelegramString(telegramUser.username),
+      firstName: optionalTelegramString(telegramUser.first_name),
+      lastName: optionalTelegramString(telegramUser.last_name),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function sessionTokenHash(token: string) {
+  return crypto.createHash('sha256').update(token).digest('hex');
+}
+
+function loadSessionStore() {
+  if (sessionStoreCache) return sessionStoreCache;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(SESSION_FILE, 'utf8')) as { sessions?: unknown[] };
+    sessionStoreCache = (Array.isArray(parsed.sessions) ? parsed.sessions : [])
+      .filter((item): item is StoredSession => Boolean(
+        item && typeof item === 'object'
+        && typeof (item as StoredSession).tokenHash === 'string'
+        && /^[a-f0-9]{64}$/.test((item as StoredSession).tokenHash)
+        && typeof (item as StoredSession).userId === 'string'
+        && Number.isSafeInteger((item as StoredSession).createdAt)
+        && Number.isSafeInteger((item as StoredSession).expiresAt),
+      ));
+  } catch (error) {
+    if (fs.existsSync(SESSION_FILE)) console.error('Failed to read session registry; existing sessions were invalidated:', error);
+    sessionStoreCache = [];
+  }
+  return sessionStoreCache;
+}
+
+function saveSessionStore(sessions: StoredSession[]) {
+  sessionStoreCache = sessions;
+  const temporaryFile = `${SESSION_FILE}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  try {
+    fs.writeFileSync(temporaryFile, JSON.stringify({ version: 1, sessions }, null, 2), { encoding: 'utf8', mode: 0o600 });
+    fs.renameSync(temporaryFile, SESSION_FILE);
+  } catch (error) {
+    try {
+      if (fs.existsSync(temporaryFile)) fs.unlinkSync(temporaryFile);
+    } catch {
+      // The registry write error is the useful one.
+    }
+    throw error;
+  }
+}
+
+function pruneExpiredSessions(now = Date.now()) {
+  const sessions = loadSessionStore();
+  const active = sessions.filter((session) => session.expiresAt > now);
+  if (active.length !== sessions.length) saveSessionStore(active);
+  return active;
 }
 
 function createSessionToken(userId: string) {
-  const secret = process.env.SESSION_SECRET || process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
+  const secret = process.env.SESSION_SECRET;
   if (!secret) return '';
-  const payload = Buffer.from(JSON.stringify({
-    userId,
-    expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000,
-  })).toString('base64url');
-  const signature = crypto.createHmac('sha256', secret).update(payload).digest('base64url');
-  return `${payload}.${signature}`;
+  const sessionId = crypto.randomBytes(32).toString('base64url');
+  const signature = crypto.createHmac('sha256', secret).update(sessionId).digest('base64url');
+  const token = `${sessionId}.${signature}`;
+  const now = Date.now();
+  const sessions = pruneExpiredSessions(now).filter((session) => session.userId !== userId);
+  sessions.push({ tokenHash: sessionTokenHash(token), userId, createdAt: now, expiresAt: now + SESSION_MAX_AGE_MS });
+  saveSessionStore(sessions);
+  return token;
 }
 
 function verifySessionToken(token?: string) {
-  const secret = process.env.SESSION_SECRET || process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
-  if (!secret || !token) return '';
-  const [payload, signature] = token.split('.');
-  if (!payload || !signature) return '';
-  const expected = crypto.createHmac('sha256', secret).update(payload).digest('base64url');
-  try {
-    if (!crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) return '';
-    const data = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
-    return data.expiresAt > Date.now() && typeof data.userId === 'string' ? data.userId : '';
-  } catch {
-    return '';
-  }
+  const secret = process.env.SESSION_SECRET;
+  if (!secret || !token) return undefined;
+  const parts = token.split('.');
+  if (parts.length !== 2) return undefined;
+  const [sessionId, signature] = parts;
+  if (!sessionId || !signature) return undefined;
+  const expected = crypto.createHmac('sha256', secret).update(sessionId).digest('base64url');
+  if (!constantTimeSecretEquals(signature, expected)) return undefined;
+  const tokenHash = sessionTokenHash(token);
+  const session = pruneExpiredSessions().find((candidate) => candidate.tokenHash === tokenHash);
+  return session ? { userId: session.userId, tokenHash } : undefined;
+}
+
+function revokeSessionToken(token?: string) {
+  if (!token) return;
+  const tokenHash = sessionTokenHash(token);
+  const sessions = loadSessionStore();
+  const remaining = sessions.filter((session) => session.tokenHash !== tokenHash);
+  if (remaining.length !== sessions.length) saveSessionStore(remaining);
+}
+
+function revokeUserSessions(userId: string) {
+  const sessions = loadSessionStore();
+  const remaining = sessions.filter((session) => session.userId !== userId);
+  if (remaining.length !== sessions.length) saveSessionStore(remaining);
 }
 
 function cookieValue(cookieHeader: string | undefined, name: string) {
@@ -292,7 +713,7 @@ function formatMeetingDate(value?: string) {
   return `${weekdays[date.getUTCDay()]}, ${formatted}`;
 }
 
-function ageOnBirthday(value: string | undefined, year = new Date().getFullYear()) {
+function ageOnBirthday(value: string | undefined, year = projectClock().year) {
   const parts = birthdayParts(value);
   return parts?.year ? year - parts.year : null;
 }
@@ -306,36 +727,15 @@ function formatBirthday(value?: string) {
 function daysUntilBirthday(value?: string, from = new Date()) {
   const parts = birthdayParts(value);
   if (!parts) return null;
-  const today = new Date(from.getFullYear(), from.getMonth(), from.getDate());
-  let target = new Date(from.getFullYear(), parts.month - 1, parts.day);
-  if (target < today) target = new Date(from.getFullYear() + 1, parts.month - 1, parts.day);
+  const clock = projectClock(from);
+  const today = new Date(Date.UTC(clock.year, clock.month - 1, clock.day));
+  let target = new Date(Date.UTC(clock.year, parts.month - 1, parts.day));
+  if (target < today) target = new Date(Date.UTC(clock.year + 1, parts.month - 1, parts.day));
   return Math.round((target.getTime() - today.getTime()) / (24 * 60 * 60 * 1000));
 }
 
 function parseShortDate(value?: string) {
-  if (!value) return null;
-  const normalized = formatShortDate(value);
-  const match = normalized.match(/^(\d{2})\.(\d{2})(?:\.(\d{2}))?$/);
-  if (!match) return null;
-  const year = match[3] ? Number(`20${match[3]}`) : new Date().getFullYear();
-  return new Date(year, Number(match[2]) - 1, Number(match[1]), 18, 0, 0, 0);
-}
-
-function meetingDateTime(meeting: Pick<Meeting, 'date' | 'time'>) {
-  const normalized = formatShortDate(meeting.date);
-  const dateMatch = normalized.match(/^(\d{2})\.(\d{2})(?:\.(\d{2}|\d{4}))?$/);
-  const timeMatch = String(meeting.time || '').match(/^(\d{1,2}):(\d{2})$/);
-  if (!dateMatch) return Number.POSITIVE_INFINITY;
-  const year = dateMatch[3]
-    ? Number(dateMatch[3].length === 4 ? dateMatch[3] : `20${dateMatch[3]}`)
-    : new Date().getFullYear();
-  return new Date(
-    year,
-    Number(dateMatch[2]) - 1,
-    Number(dateMatch[1]),
-    Number(timeMatch?.[1] || 0),
-    Number(timeMatch?.[2] || 0),
-  ).getTime();
+  return projectDateDeadlineInstant(value);
 }
 
 function isRegistrationPrompt(text: string) {
@@ -385,32 +785,6 @@ function taskCompetencyNames(task: Task) {
   return task.competencies?.length ? task.competencies : task.competency ? [task.competency] : [];
 }
 
-function meetingScheduleError(
-  dateValue: string,
-  timeValue: string,
-  duration: number,
-  settings: SimulationState['settings'],
-  kind: Meeting['kind'] = 'meeting',
-) {
-  const date = parseShortDate(dateValue);
-  const timeMatch = String(timeValue || '').match(/^(\d{1,2}):(\d{2})$/);
-  if (!date || !timeMatch) return 'Проверь дату и время собрания';
-  if (Number(timeMatch[1]) > 23 || Number(timeMatch[2]) > 59) return 'Проверь время собрания';
-  // A vibe is an informal event and is deliberately independent from the
-  // team's working-day and availability-slot settings.
-  if (normalizeMeetingKind(kind) === 'vibe') return '';
-  const config = normalizeAvailabilityConfig(settings);
-  const dayIndex = date.getDay() === 0 ? 6 : date.getDay() - 1;
-  if (!config.activeDays.includes(dayIndex)) return 'В этот день встречи отключены в настройках слотов';
-  const startMinutes = Number(timeMatch[1]) * 60 + Number(timeMatch[2]);
-  const allowedStart = config.startHour * 60;
-  const allowedEnd = (config.endHour + 1) * 60;
-  if (startMinutes < allowedStart || startMinutes + duration * 60 > allowedEnd) {
-    return `Встреча должна полностью помещаться в диапазон ${String(config.startHour).padStart(2, '0')}:00–${String(config.endHour).padStart(2, '0')}:59`;
-  }
-  return '';
-}
-
 function userMention(user?: User) {
   if (!user) return 'не указан';
   return `${user.realName} (${user.username})`;
@@ -454,7 +828,8 @@ function taskDetailsText(task: Task, state: SimulationState) {
   const completionNotes = Object.entries(task.completionComments || {})
     .filter(([, comment]) => String(comment || '').trim())
     .map(([id, comment]) => `• ${state.users.find((user) => user.id === id)?.realName || 'Исполнитель'}: ${comment}`);
-  return `*${task.title}*\n\n${task.description}\n\n*Мероприятие:* ${workEvent?.name || 'без мероприятия'}\n*Блоки:* ${taskCompetencyNames(task).join(', ') || 'не указаны'}\n*Приоритет:* ${taskPriorityLabel(task.priority)}\n*Автор:* ${userMention(creator)}\n*Срок:* ${formatShortDate(task.deadline)}\n*Исполнитель:* ${executorText}${task.timeSpentMinutes ? `\n*Затрачено:* ${taskDurationLabel(task.timeSpentMinutes)}` : ''}${task.sow ? `\n\n*ТЗ:* ${task.sow}` : ''}${progressNotes.length ? `\n\n*Комментарии по работе:*\n${progressNotes.join('\n')}` : ''}${completionNotes.length ? `\n\n*Комментарий при завершении:*\n${completionNotes.join('\n')}` : ''}${task.tips?.length ? `\n\n*Подсказки:*\n${task.tips.map((tip) => `• ${tip}`).join('\n')}` : ''}`;
+  const completedBy = state.users.find((user) => user.id === task.completedBy);
+  return `*${task.title}*\n\n${task.description}\n\n*Мероприятие:* ${workEvent?.name || 'без мероприятия'}\n*Блоки:* ${taskCompetencyNames(task).join(', ') || 'не указаны'}\n*Приоритет:* ${taskPriorityLabel(task.priority)}\n*Автор:* ${userMention(creator)}\n*Срок:* ${formatShortDate(task.deadline)}\n*Исполнитель:* ${executorText}${task.status === 'completed' && completedBy ? `\n*Завершил:* ${userMention(completedBy)}` : ''}${task.timeSpentMinutes ? `\n*Затрачено:* ${taskDurationLabel(task.timeSpentMinutes)}` : ''}${task.sow ? `\n\n*ТЗ:* ${task.sow}` : ''}${progressNotes.length ? `\n\n*Комментарии по работе:*\n${progressNotes.join('\n')}` : ''}${completionNotes.length ? `\n\n*Комментарий при завершении:*\n${completionNotes.join('\n')}` : ''}${task.tips?.length ? `\n\n*Подсказки:*\n${task.tips.map((tip) => `• ${tip}`).join('\n')}` : ''}`;
 }
 
 function meetingDetailsText(meeting: Meeting, state: SimulationState) {
@@ -468,9 +843,11 @@ function meetingDetailsText(meeting: Meeting, state: SimulationState) {
 function meetingUpdateText(before: Meeting, after: Meeting, state: SimulationState) {
   const changes: string[] = [];
   const value = (input?: string) => String(input || '').trim() || 'не указано';
-  const participantKey = (meeting: Meeting) => meeting.participants === 'all'
-    ? 'all'
-    : [...meeting.participants].sort().join('|');
+  const participantKey = (meeting: Meeting) => meeting.audiencePolicy === 'snapshot'
+    ? [...(meeting.audienceUserIds || [])].sort().join('|')
+    : meeting.participants === 'all'
+      ? 'all'
+      : [...meeting.participants].sort().join('|');
   if (before.title !== after.title) changes.push(`❗Название: ${value(before.title)} → ${value(after.title)}`);
   if ((before.kind || 'meeting') !== (after.kind || 'meeting')) changes.push(`❗Тип: ${meetingKindText(before.kind).label} → ${meetingKindText(after.kind).label}`);
   if (value(before.eventId) !== value(after.eventId)) {
@@ -495,9 +872,11 @@ function meetingUpdateText(before: Meeting, after: Meeting, state: SimulationSta
 }
 
 function meetingRsvpButtons(meeting: Meeting, userId: string) {
-  const attending = (meeting.attendeeIds || []).includes(userId);
+  const response = meetingRsvpFor(meeting, userId);
   return [
-    { text: attending ? '❌ Я не приду' : '✅ Я приду', action: `meeting_rsvp:${meeting.id}` },
+    { text: response === 'yes' ? '✅ Приду · выбрано' : '✅ Приду', action: `meeting_rsvp:${meeting.id}:yes` },
+    { text: response === 'no' ? '❌ Не приду · выбрано' : '❌ Не приду', action: `meeting_rsvp:${meeting.id}:no` },
+    ...(response === 'unanswered' ? [] : [{ text: 'Сбросить ответ', action: `meeting_rsvp:${meeting.id}:unanswered` }]),
     { text: 'Открыть встречи', action: 'open_meetings' },
   ];
 }
@@ -515,11 +894,14 @@ function profileSummaryText(user: User, state: SimulationState) {
   const upcomingMeetings = state.meetings
     .filter((meeting) => (
       meeting.status === 'scheduled'
-      && (meeting.participants === 'all' || meeting.participants.includes(user.id) || meeting.hostId === user.id)
-      && meetingDateTime(meeting) >= Date.now()
+      && resolveMeetingAudienceUsers(state.users, meeting).some((member) => member.id === user.id)
+      && meetingPhase(meeting) !== 'past'
     ))
     .slice()
-    .sort((a, b) => meetingDateTime(a) - meetingDateTime(b));
+    .sort((a, b) => {
+      const phaseOrder = Number(meetingPhase(a) !== 'ongoing') - Number(meetingPhase(b) !== 'ongoing');
+      return phaseOrder || meetingStartTimestamp(a) - meetingStartTimestamp(b);
+    });
   const availability = alignedAvailabilitySlots(state.availabilities[user.id]);
   const availableHours = Array.from({ length: 7 }, (_, dayIndex) => availability[dayIndex] || [])
     .reduce((sum, hours) => sum + hours.length, 0);
@@ -554,10 +936,13 @@ function meetingsSummaryText(user: User, state: SimulationState) {
   const meetings = state.meetings
     .filter((meeting) => (
       meeting.status === 'scheduled'
-      && meetingDateTime(meeting) >= Date.now()
+      && meetingPhase(meeting) !== 'past'
     ))
     .slice()
-    .sort((a, b) => meetingDateTime(a) - meetingDateTime(b))
+    .sort((a, b) => {
+      const phaseOrder = Number(meetingPhase(a) !== 'ongoing') - Number(meetingPhase(b) !== 'ongoing');
+      return phaseOrder || meetingStartTimestamp(a) - meetingStartTimestamp(b);
+    })
     .slice(0, 8);
   if (!meetings.length) return '*Встречи*\n\nБлижайших встреч нет.';
   return `*Ближайшие встречи*\n\n${meetings.map((meeting, index) => (
@@ -578,7 +963,7 @@ function tasksSummaryText(user: User, state: SimulationState) {
 }
 
 function teamSummaryText(state: SimulationState) {
-  const users = state.users.filter((user) => !isFacultyUser(user));
+  const users = state.users.filter((user) => !isFacultyUser(user) && isUserActive(user));
   const registered = users.filter((user) => user.registered).length;
   return `*Команда · ${users.length}*\nВ боте: ${registered}/${users.length}\n\n`
     + users.slice(0, 12).map((user) => `• ${user.realName} · ${user.primaryCompetency || 'без блока'} · ${user.username}`).join('\n');
@@ -731,12 +1116,18 @@ function loadDatabase(): SimulationState {
     }
   });
   databaseStateCache = cleanState;
+  runtimeOperations.lastPersistenceSuccessAt ||= new Date().toISOString();
   if (JSON.stringify(state) !== JSON.stringify(cleanState)) saveDatabase(cleanState);
   return structuredClone(databaseStateCache);
 }
 
 function saveDatabase(state: SimulationState, options: { changedMeetingIds?: Iterable<string> } = {}) {
+  const previousCache = databaseStateCache ? structuredClone(databaseStateCache) : null;
   const cleanState = sanitizeSimulationState(state);
+  const orphanReferences = findOrphanUserReferences(cleanState);
+  if (orphanReferences.length) {
+    console.error('Database contains orphan user references:', JSON.stringify(orphanReferences));
+  }
   if (DATABASE_SHEETS_CONFIG?.enabled) {
     cleanState.settings ||= {};
     const incomingRevision = Math.max(0, Number(cleanState.settings.databaseRevision || 0));
@@ -758,6 +1149,16 @@ function saveDatabase(state: SimulationState, options: { changedMeetingIds?: Ite
       cleanState.meetings = mergedMeetings;
     }
     cleanState.settings.databaseRevision = Math.max(incomingRevision, currentRevision) + 1;
+    try {
+      writeDatabaseRecoveryRecord(DATABASE_RECOVERY_DIRECTORY, cleanState, DATABASE_RECOVERY_RETENTION);
+      runtimeOperations.lastPersistenceSuccessAt = new Date().toISOString();
+      runtimeOperations.lastPersistenceError = undefined;
+    } catch (error) {
+      runtimeOperations.lastPersistenceErrorAt = new Date().toISOString();
+      runtimeOperations.lastPersistenceError = safeOperationalError(error);
+      console.error('Database recovery journal write failed; mutation was not acknowledged:', error);
+      return false;
+    }
   }
   Object.keys(state).forEach((key) => delete (state as unknown as Record<string, unknown>)[key]);
   Object.assign(state, cleanState);
@@ -766,7 +1167,16 @@ function saveDatabase(state: SimulationState, options: { changedMeetingIds?: Ite
     scheduleDatabaseSheetsSnapshot(state);
     return true;
   }
-  return writeDatabaseFile(state);
+  const saved = writeDatabaseFile(state);
+  if (saved) {
+    runtimeOperations.lastPersistenceSuccessAt = new Date().toISOString();
+    runtimeOperations.lastPersistenceError = undefined;
+  } else {
+    runtimeOperations.lastPersistenceErrorAt = new Date().toISOString();
+    runtimeOperations.lastPersistenceError = 'Local database file write failed';
+    databaseStateCache = previousCache;
+  }
+  return saved;
 }
 
 function writeDatabaseFile(state: SimulationState) {
@@ -784,6 +1194,134 @@ function writeDatabaseFile(state: SimulationState) {
     }
     return false;
   }
+}
+
+class DatabaseMutationError extends Error {
+  constructor(public status: number, message: string, public fieldErrors?: Record<string, string>) {
+    super(message);
+  }
+}
+
+function validationErrorResponse(res: express.Response, fieldErrors: Record<string, string>, message = 'Проверь поля формы') {
+  return res.status(400).json({
+    error: message,
+    message,
+    fieldErrors,
+    serverNow: new Date().toISOString(),
+  });
+}
+
+function textFieldError(value: unknown, maximum: number, required = false) {
+  if (typeof value !== 'string') return required || value !== undefined ? 'Ожидается строка' : '';
+  const length = value.trim().length;
+  if (required && !length) return 'Поле обязательно';
+  if (length > maximum) return `Не больше ${maximum} символов`;
+  return '';
+}
+
+function meetingPayloadFieldErrors(payload: Record<string, unknown>, now = new Date()) {
+  const errors: Record<string, string> = {};
+  const titleError = textFieldError(payload.title, 160, true);
+  if (titleError) errors.title = titleError;
+  const kind = String(payload.kind || 'meeting');
+  if (!['meeting', 'setup', 'vibe'].includes(kind)) errors.kind = 'Неизвестный вид события';
+  const type = String(payload.type || 'general');
+  if (!['general', 'custom'].includes(type)) errors.type = 'Неизвестный тип аудитории';
+  const date = String(payload.date || '');
+  if (!parseProjectLocalDate(date)) errors.date = 'Укажи существующую календарную дату';
+  const time = String(payload.time || '');
+  if (!/^\d{2}:\d{2}$/.test(time) || !projectDateTimeInstant(date, time, now)) errors.time = 'Укажи время в формате ЧЧ:ММ';
+  const duration = Number(payload.duration);
+  if (!Number.isFinite(duration) || duration < 0.5 || duration > 6 || duration * 2 !== Math.round(duration * 2)) {
+    errors.duration = 'От 30 минут до 6 часов с шагом 30 минут';
+  }
+  if (!errors.date && !errors.time && (projectDateTimeInstant(date, time, now)?.getTime() || 0) <= now.getTime()) {
+    errors.date = 'Нельзя создать событие в прошлом';
+  }
+  for (const [field, maximum] of [['topic', 500], ['description', 4_000], ['competency', 200], ['eventId', 200]] as const) {
+    const error = textFieldError(payload[field], maximum);
+    if (error) errors[field] = error;
+  }
+  if (payload.participants !== 'all') {
+    const error = idArrayFieldError(payload.participants);
+    if (error) errors.participants = error;
+  }
+  return errors;
+}
+
+function taskPayloadFieldErrors(payload: Record<string, unknown>, requireCoreFields: boolean, now = new Date()) {
+  const errors: Record<string, string> = {};
+  if (requireCoreFields || payload.title !== undefined) {
+    const error = textFieldError(payload.title, 160, true);
+    if (error) errors.title = error;
+  }
+  if (requireCoreFields || payload.deadline !== undefined) {
+    const deadline = String(payload.deadline || '');
+    if (!parseProjectLocalDate(deadline)) errors.deadline = 'Укажи существующую календарную дату';
+    else if (requireCoreFields && (projectDateDeadlineInstant(deadline, now)?.getTime() || 0) < now.getTime()) errors.deadline = 'Дедлайн уже прошёл';
+  }
+  for (const [field, maximum] of [['description', 4_000], ['sow', 8_000], ['eventId', 200], ['competency', 200]] as const) {
+    if (payload[field] === undefined) continue;
+    const error = textFieldError(payload[field], maximum);
+    if (error) errors[field] = error;
+  }
+  if (payload.priority !== undefined && !['normal', 'important', 'critical'].includes(String(payload.priority))) {
+    errors.priority = 'Неизвестный приоритет';
+  }
+  if (payload.assignedTo !== undefined) {
+    const error = idArrayFieldError(payload.assignedTo);
+    if (error) errors.assignedTo = error;
+  }
+  if (payload.competencies !== undefined) {
+    const error = idArrayFieldError(payload.competencies, 50);
+    if (error) errors.competencies = error;
+  }
+  if (payload.tips !== undefined) {
+    if (!Array.isArray(payload.tips) || payload.tips.length > 50 || payload.tips.some((tip) => typeof tip !== 'string' || tip.length > 500)) {
+      errors.tips = 'Не больше 50 подсказок по 500 символов';
+    }
+  }
+  if (payload.reminders !== undefined) {
+    if (!Array.isArray(payload.reminders) || payload.reminders.length > 20 || payload.reminders.some((item) => (
+      !item || typeof item !== 'object'
+      || !['before_deadline', 'repeat'].includes(String((item as any).type))
+      || !['days', 'hours'].includes(String((item as any).unit))
+      || !Number.isFinite(Number((item as any).value))
+      || Number((item as any).value) <= 0
+      || Number((item as any).value) > 365
+    ))) errors.reminders = 'Проверь тип, единицу и значение напоминаний';
+  }
+  return errors;
+}
+
+function idArrayFieldError(value: unknown, maximumItems = 100) {
+  if (!Array.isArray(value)) return 'Ожидается список';
+  if (value.length > maximumItems) return `Не больше ${maximumItems} элементов`;
+  if (value.some((item) => typeof item !== 'string' || !item.trim() || item.length > 200)) return 'Список содержит некорректный идентификатор';
+  return '';
+}
+
+function mutateDatabaseAtomically<T>(mutation: (state: SimulationState) => T) {
+  // The callback must stay synchronous. Node executes this load/mutate/save
+  // section without interleaving another request; network work belongs after it.
+  const state = loadDatabase();
+  const value = mutation(state);
+  if (!saveDatabase(state)) {
+    throw new DatabaseMutationError(503, 'Не удалось надёжно сохранить изменение. Повторите позже.');
+  }
+  return { state, value };
+}
+
+function databaseMutationErrorResponse(res: express.Response, error: unknown) {
+  if (error instanceof DatabaseMutationError) {
+    return res.status(error.status).json({
+      error: error.message,
+      message: error.message,
+      ...(error.fieldErrors ? { fieldErrors: error.fieldErrors } : {}),
+      serverNow: new Date().toISOString(),
+    });
+  }
+  throw error;
 }
 
 function scheduleDatabaseSheetsSnapshot(state: SimulationState, delayMs = 500) {
@@ -805,10 +1343,21 @@ async function flushDatabaseSheetsSnapshots() {
       pendingDatabaseSheetsState = null;
       try {
         await exportStateToGoogleSheetsDatabase(DATABASE_SHEETS_CONFIG, snapshot, 'runtime_snapshot');
+        lastDatabaseSheetsSyncedRevision = Math.max(
+          lastDatabaseSheetsSyncedRevision,
+          Number(snapshot.settings?.databaseRevision || 0),
+        );
+        runtimeOperations.lastReplicationSuccessAt = new Date().toISOString();
+        runtimeOperations.lastReplicationError = undefined;
       } catch (error) {
-        console.error('Google Sheets database snapshot failed; local JSON remains authoritative until retry:', error);
+        runtimeOperations.lastReplicationErrorAt = new Date().toISOString();
+        runtimeOperations.lastReplicationError = safeOperationalError(error);
+        console.error(
+          `Google Sheets database snapshot failed; durable recovery revision ${Number(snapshot.settings?.databaseRevision || 0)} retained until retry:`,
+          error,
+        );
         pendingDatabaseSheetsState ||= snapshot;
-        if (!databaseSheetsFlushTimer) {
+        if (!isShuttingDown && !databaseSheetsFlushTimer) {
           databaseSheetsFlushTimer = setTimeout(() => {
             databaseSheetsFlushTimer = null;
             void flushDatabaseSheetsSnapshots();
@@ -819,21 +1368,39 @@ async function flushDatabaseSheetsSnapshots() {
     }
   })().finally(() => {
     databaseSheetsFlushPromise = null;
-    if (pendingDatabaseSheetsState && !databaseSheetsFlushTimer) scheduleDatabaseSheetsSnapshot(pendingDatabaseSheetsState);
+    if (!isShuttingDown && pendingDatabaseSheetsState && !databaseSheetsFlushTimer) {
+      scheduleDatabaseSheetsSnapshot(pendingDatabaseSheetsState);
+    }
   });
   return databaseSheetsFlushPromise;
 }
 
 async function hydrateDatabaseFromGoogleSheets() {
   if (!DATABASE_SHEETS_CONFIG?.enabled) return;
+  const recoveryRecord = readLatestDatabaseRecoveryRecord(DATABASE_RECOVERY_DIRECTORY);
   let lastError: unknown;
   for (let attempt = 1; attempt <= 6; attempt += 1) {
     try {
       const remote = await importStateFromGoogleSheetsDatabase(DATABASE_SHEETS_CONFIG);
       if (!remote.initialized || !remote.state) throw new Error('Google Sheets database has no complete snapshot');
-      databaseStateCache = remote.state;
-      saveDatabase(structuredClone(remote.state));
-      console.log(`Google Sheets database loaded at revision ${remote.revision}.`);
+      const remoteState = sanitizeSimulationState(remote.state);
+      const remoteRevision = Math.max(0, Number(remote.revision || remoteState.settings?.databaseRevision || 0));
+      lastDatabaseSheetsSyncedRevision = remoteRevision;
+      runtimeOperations.lastPersistenceSuccessAt = new Date().toISOString();
+      runtimeOperations.lastReplicationSuccessAt = new Date().toISOString();
+      if (recoveryRecord && recoveryRecord.revision > remoteRevision) {
+        databaseStateCache = sanitizeSimulationState(recoveryRecord.state);
+        scheduleDatabaseSheetsSnapshot(databaseStateCache, 0);
+        console.warn(
+          `Recovered durable database revision ${recoveryRecord.revision}; Google Sheets revision ${remoteRevision} will be updated.`,
+        );
+      } else {
+        databaseStateCache = remoteState;
+        if (!recoveryRecord || recoveryRecord.revision !== remoteRevision) {
+          writeDatabaseRecoveryRecord(DATABASE_RECOVERY_DIRECTORY, remoteState, DATABASE_RECOVERY_RETENTION);
+        }
+        console.log(`Google Sheets database loaded at revision ${remoteRevision}.`);
+      }
       return;
     } catch (error) {
       lastError = error;
@@ -842,6 +1409,14 @@ async function hydrateDatabaseFromGoogleSheets() {
       console.warn(`Google Sheets database snapshot is temporarily unavailable; retrying in ${retryDelayMs}ms (${attempt}/6).`);
       await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
     }
+  }
+  if (recoveryRecord) {
+    databaseStateCache = sanitizeSimulationState(recoveryRecord.state);
+    scheduleDatabaseSheetsSnapshot(databaseStateCache, 0);
+    console.warn(
+      `Google Sheets database is unavailable; started from durable recovery revision ${recoveryRecord.revision}.`,
+    );
+    return;
   }
   throw lastError instanceof Error ? lastError : new Error('Google Sheets database has no complete snapshot');
 }
@@ -852,7 +1427,7 @@ function normalizeTaskReminders(value: unknown): TaskReminder[] {
     .filter((item: any) => Number(item?.value) > 0)
     .slice(0, 3)
     .map((item: any, index) => ({
-      id: String(item.id || `rem_${Date.now()}_${index}`),
+      id: String(item.id || `rem_${crypto.randomUUID()}`),
       type: item.type === 'repeat' ? 'repeat' : 'before_deadline',
       value: Math.max(1, Number(item.value) || 1),
       unit: item.unit === 'hours' ? 'hours' : 'days',
@@ -868,14 +1443,88 @@ function pruneExpiredAvailabilityWeeks() {
 }
 
 async function startServer() {
+  if (process.env.NODE_ENV === 'production' && process.env.ALLOW_LOCAL_PREVIEW === 'true') {
+    throw new Error('ALLOW_LOCAL_PREVIEW=true is forbidden in production');
+  }
+  const telegramUpdateMode = configuredTelegramUpdateMode();
+  const telegramWebhookSecret = String(process.env.TELEGRAM_WEBHOOK_SECRET || '');
+  if (telegramUpdateMode === 'webhook' && !isValidTelegramWebhookSecret(telegramWebhookSecret)) {
+    throw new Error('TELEGRAM_WEBHOOK_SECRET must contain 1-256 characters: A-Z, a-z, 0-9, _ or -');
+  }
+  const telegramBotToken = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
+  if (telegramUpdateMode === 'webhook' && telegramBotToken && telegramWebhookSecret === telegramBotToken) {
+    throw new Error('TELEGRAM_WEBHOOK_SECRET must be independent from the Telegram bot token');
+  }
+  const sessionSecret = String(process.env.SESSION_SECRET || '');
+  if (process.env.NODE_ENV === 'production' && sessionSecret.length < 32) {
+    throw new Error('SESSION_SECRET with at least 32 characters is required in production');
+  }
+  if (telegramBotToken && sessionSecret === telegramBotToken) {
+    throw new Error('SESSION_SECRET must be independent from the Telegram bot token');
+  }
   await hydrateDatabaseFromGoogleSheets();
   pruneExpiredAvailabilityWeeks();
   const app = express();
+  app.set('trust proxy', 'loopback');
   const sheetsConfig = googleSheetsConfigFromEnv();
   const calendarConfig = googleCalendarConfigFromEnv();
+  const authWindowMs = positiveIntegerEnvironment('AUTH_RATE_LIMIT_WINDOW_MS', 5 * 60 * 1000);
+  const authIpRateLimit = createFixedWindowRateLimiter(
+    authWindowMs,
+    positiveIntegerEnvironment('AUTH_RATE_LIMIT_IP_MAX', 30),
+  );
+  const authUserRateLimit = createFixedWindowRateLimiter(
+    authWindowMs,
+    positiveIntegerEnvironment('AUTH_RATE_LIMIT_USER_MAX', 10),
+  );
+  const broadcastWindowMs = positiveIntegerEnvironment('BROADCAST_RATE_LIMIT_WINDOW_MS', 10 * 60 * 1000);
+  const broadcastRateLimit = createFixedWindowRateLimiter(
+    broadcastWindowMs,
+    positiveIntegerEnvironment('BROADCAST_RATE_LIMIT_MAX', 10),
+  );
+  const broadcastVolumeRateLimit = createFixedWindowRateLimiter(
+    positiveIntegerEnvironment('BROADCAST_VOLUME_WINDOW_MS', 60 * 60 * 1000),
+    positiveIntegerEnvironment('BROADCAST_VOLUME_MAX_RECIPIENTS', 500),
+  );
   const pendingCalendarMeetingIds = new Set<string>();
+  const idempotencyInFlight = new Map<string, Promise<void>>();
+  const idempotencyResolvers = new Map<string, () => void>();
   let calendarReconciliationRunning = false;
   const processedSheetsEvents = new Set<string>();
+  app.use((req, res, next) => {
+    const incomingRequestId = String(req.get('X-Request-ID') || '').trim();
+    const requestId = /^[A-Za-z0-9._:-]{8,128}$/.test(incomingRequestId) ? incomingRequestId : crypto.randomUUID();
+    const incomingOperationId = String(req.get('Idempotency-Key') || '').trim();
+    const operationId = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)
+      ? (/^[A-Za-z0-9._:-]{8,128}$/.test(incomingOperationId) ? incomingOperationId : crypto.randomUUID())
+      : undefined;
+    (req as express.Request & { requestId?: string; operationId?: string }).requestId = requestId;
+    (req as express.Request & { requestId?: string; operationId?: string }).operationId = operationId;
+    res.setHeader('X-Request-ID', requestId);
+    if (operationId) res.setHeader('X-Operation-ID', operationId);
+    const startedAt = Date.now();
+    res.once('finish', () => {
+      if (res.statusCode < 500) return;
+      console.error(JSON.stringify({
+        event: 'http_request_failed', requestId, operationId, method: req.method,
+        path: req.path, status: res.statusCode, durationMs: Date.now() - startedAt,
+      }));
+    });
+    next();
+  });
+  app.use('/api/telegram-webhook', (req, res, next) => {
+    if (req.method !== 'POST' || telegramUpdateMode !== 'webhook') {
+      return res.status(404).json({ error: 'Telegram webhook transport is disabled' });
+    }
+    const providedSecret = req.get('X-Telegram-Bot-Api-Secret-Token');
+    if (!providedSecret) {
+      return res.status(401).json({ error: 'Telegram webhook secret is required' });
+    }
+    if (!constantTimeSecretEquals(providedSecret, telegramWebhookSecret)) {
+      return res.status(403).json({ error: 'Telegram webhook secret is invalid' });
+    }
+    return next();
+  });
   app.use(express.json({
     limit: '1mb',
     verify: (req, _res, buffer) => {
@@ -884,81 +1533,183 @@ async function startServer() {
       }
     },
   }));
+  app.use((_req, res, next) => {
+    const developmentCsp = process.env.NODE_ENV !== 'production';
+    res.setHeader('Content-Security-Policy', [
+      "default-src 'self'",
+      `script-src 'self' https://telegram.org${developmentCsp ? " 'unsafe-inline'" : ''}`,
+      "style-src 'self' 'unsafe-inline'",
+      "img-src 'self' data: blob:",
+      "font-src 'self' data:",
+      `connect-src 'self'${developmentCsp ? ' ws: http: https:' : ''}`,
+      "frame-ancestors https://web.telegram.org https://*.telegram.org",
+      "base-uri 'self'",
+      "form-action 'self'",
+      "object-src 'none'",
+    ].join('; '));
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    next();
+  });
 
-  app.get('/api/health', (_req, res) => {
-    res.json({
-      ok: true,
+  app.use('/api', (req, res, next) => {
+    if (isShuttingDown && ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
+      res.setHeader('Connection', 'close');
+      return res.status(503).json({ error: 'Сервис завершает работу и временно не принимает изменения.' });
+    }
+    return next();
+  });
+
+  const readinessSnapshot = () => {
+    const currentRevision = Number(databaseStateCache?.settings?.databaseRevision || 0);
+    const persistenceReady = Boolean(databaseStateCache) && !runtimeOperations.lastPersistenceError;
+    const replicationPending = Boolean(pendingDatabaseSheetsState || databaseSheetsFlushPromise);
+    const degraded = persistenceReady && Boolean(DATABASE_SHEETS_CONFIG?.enabled && (replicationPending || runtimeOperations.lastReplicationError));
+    return {
+      ready: !isShuttingDown && persistenceReady,
+      status: isShuttingDown || !persistenceReady ? 'unavailable' : degraded ? 'degraded' : 'ready',
       service: 'megabot',
       revision: process.env.APP_REVISION || 'unknown',
       uptimeSeconds: Math.floor(process.uptime()),
-      telegramConfigured: Boolean(process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN),
-      webAppConfigured: Boolean(configuredWebAppUrl()),
-      googleSheetsConfigured: Boolean(sheetsConfig),
-      googleSheetsDatabaseConfigured: Boolean(DATABASE_SHEETS_CONFIG),
-      googleSheetsDatabaseEnabled: Boolean(DATABASE_SHEETS_CONFIG?.enabled),
-      googleCalendarConfigured: Boolean(calendarConfig),
-      googleCalendarEnabled: Boolean(calendarConfig?.enabled),
-    });
+      telegramUpdateMode,
+      serverNow: new Date().toISOString(),
+      timeZone: PROJECT_TIME_ZONE,
+      persistence: DATABASE_SHEETS_CONFIG?.enabled ? {
+        mode: 'google_sheets_with_local_recovery',
+        durableRevision: currentRevision,
+        replicatedRevision: lastDatabaseSheetsSyncedRevision,
+        pendingReplication: replicationPending,
+      } : {
+        mode: 'local_json',
+        durableRevision: currentRevision,
+        replicatedRevision: currentRevision,
+        pendingReplication: false,
+      },
+    };
+  };
+  app.get('/api/health/live', (_req, res) => {
+    res.json({ ok: true, service: 'megabot', serverNow: new Date().toISOString(), uptimeSeconds: Math.floor(process.uptime()) });
+  });
+  app.get('/api/health/ready', (_req, res) => {
+    const readiness = readinessSnapshot();
+    return res.status(readiness.ready ? 200 : 503).json(readiness);
+  });
+  app.get('/api/health', (_req, res) => {
+    const readiness = readinessSnapshot();
+    res.status(readiness.ready ? 200 : 503).json({ ok: readiness.ready, ...readiness });
   });
   app.use('/api', (req, res, next) => {
     const publicPaths = new Set([
       '/user/get-or-create',
       '/telegram-webhook',
-      '/setup-webhook',
       '/integrations/google-sheets/webhook',
     ]);
     if (publicPaths.has(req.path)) return next();
 
-    const isLocalHost = ['localhost', '127.0.0.1', '::1'].includes(req.hostname);
-    if (process.env.NODE_ENV !== 'production' || (isLocalHost && process.env.ALLOW_LOCAL_PREVIEW === 'true')) {
+    if (process.env.NODE_ENV !== 'production') {
       return next();
     }
 
     const state = loadDatabase();
-    const sessionUserId = verifySessionToken(cookieValue(req.headers.cookie, 'megabot_session'));
-    const authUser = state.users.find((user) => user.id === sessionUserId && user.registered);
+    const verifiedSession = verifySessionToken(cookieValue(req.headers.cookie, 'megabot_session'));
+    const authUser = state.users.find((user) => user.id === verifiedSession?.userId && user.registered && isUserActive(user));
     if (!authUser) {
       return res.status(401).json({ error: 'Открой Mini App кнопкой в Telegram, чтобы подтвердить доступ.' });
     }
     (req as express.Request & { authUserId?: string }).authUserId = authUser.id;
+    if (isFacultyUser(authUser) && !FACULTY_SESSION_PATHS.has(req.path)) {
+      return res.status(403).json({ error: 'Для этой роли Mini App недоступен. Используйте назначенные задачи в чате с ботом.' });
+    }
+    if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method) && !isAllowedMutationOrigin(req)) {
+      return res.status(403).json({ error: 'Неверный источник запроса. Обновите Mini App и повторите действие.' });
+    }
 
-    const identityFieldByPath: Record<string, string> = {
-      '/availability': 'userId',
-      '/availability/weeks': 'requesterId',
-      '/meeting': 'hostId',
-      '/meeting/update': 'requesterId',
-      '/meeting/delete': 'requesterId',
-      '/meeting/rsvp': 'requesterId',
-      '/event/create': 'requesterId',
-      '/event/update': 'requesterId',
-      '/task/create': 'creatorId',
-      '/task/update': 'requesterId',
-      '/task/comment': 'requesterId',
-      '/task/delete': 'requesterId',
-      '/task/notify': 'requesterId',
-      '/task/claim': 'userId',
-      '/task/release': 'userId',
-      '/task/status': 'requesterId',
-      '/task/log/clear': 'requesterId',
-      '/team/broadcast': 'requesterId',
-      '/user/add': 'requesterId',
-      '/user/delete': 'requesterId',
-      '/user/update': 'requesterId',
-      '/competency/add': 'requesterId',
-      '/competency/delete': 'requesterId',
-      '/faculty/competency/add': 'requesterId',
-      '/faculty/competency/delete': 'requesterId',
-      '/faculty/user/add': 'requesterId',
-      '/faculty/user/delete': 'requesterId',
-      '/faculty/user/update': 'requesterId',
-      '/faculty/task/create': 'requesterId',
-      '/faculty/task/update': 'requesterId',
-    };
-    const identityField = identityFieldByPath[req.path];
-    if (identityField && req.body && typeof req.body === 'object') {
-      req.body[identityField] = authUser.id;
+    if (req.body && typeof req.body === 'object') {
+      // Actor fields are always supplied by the verified session. Applying this
+      // rule uniformly prevents new requesterId-based routes from silently
+      // falling outside a path-by-path allowlist.
+      req.body.requesterId = authUser.id;
+      req.body.creatorId = authUser.id;
+      req.body.hostId = authUser.id;
+
+      // These endpoints use userId as the acting user rather than as a target.
+      if (SELF_ACTOR_USER_ID_PATHS.has(req.path)) {
+        req.body.userId = authUser.id;
+      }
     }
     return next();
+  });
+  app.use('/api', async (req, res, next) => {
+    if (req.method !== 'POST' || !IDEMPOTENT_CREATE_PATHS.has(req.path)) return next();
+    const key = String(req.get('Idempotency-Key') || '').trim();
+    // Compatibility window for already opened Mini App versions. Current clients
+    // always send the header; a later Java cutover can make it mandatory.
+    if (!key) return next();
+    if (!/^[A-Za-z0-9._:-]{8,128}$/.test(key)) {
+      return res.status(400).json({ error: 'Idempotency-Key должен содержать 8–128 безопасных символов' });
+    }
+    const body = req.body && typeof req.body === 'object' ? req.body as Record<string, unknown> : {};
+    const actorId = idempotencyActor(body);
+    if (!actorId) return res.status(400).json({ error: 'Не удалось определить автора идемпотентной операции' });
+    const operation = `POST ${req.path}`;
+    const bodyHash = idempotencyBodyHash(body);
+    const scope = `${actorId}:${key}`;
+    let reservation: ReturnType<typeof reserveIdempotency>;
+    try {
+      const committed = mutateDatabaseAtomically((state) => reserveIdempotency(state, { actorId, key, operation, bodyHash }));
+      reservation = committed.value;
+    } catch (error) {
+      return databaseMutationErrorResponse(res, error);
+    }
+    if (reservation.kind === 'conflict') {
+      return res.status(409).json({ error: 'Idempotency-Key уже использован для другой операции или другого тела запроса' });
+    }
+    if (reservation.kind === 'full') {
+      return res.status(503).json({ error: 'Реестр идемпотентности переполнен; операция не выполнялась' });
+    }
+    if (reservation.kind === 'processing') {
+      const pending = idempotencyInFlight.get(scope);
+      if (!pending) {
+        return res.status(409).json({ error: 'Операция с этим Idempotency-Key ещё обрабатывается. Повторите запрос позже.' });
+      }
+      await pending;
+      const completed = findIdempotencyRecord(loadDatabase(), actorId, key);
+      if (!completed || completed.status !== 'completed') {
+        return res.status(503).json({ error: 'Не удалось подтвердить результат идемпотентной операции' });
+      }
+      res.setHeader('Idempotency-Replayed', 'true');
+      return res.status(completed.responseStatus || 200).json(completed.responseBody);
+    }
+    if (reservation.kind === 'replay') {
+      res.setHeader('Idempotency-Replayed', 'true');
+      return res.status(reservation.record.responseStatus || 200).json(reservation.record.responseBody);
+    }
+
+    let resolveInFlight = () => {};
+    const pending = new Promise<void>((resolve) => { resolveInFlight = resolve; });
+    idempotencyInFlight.set(scope, pending);
+    idempotencyResolvers.set(scope, resolveInFlight);
+    const originalJson = res.json.bind(res);
+    res.json = ((responseBody: unknown) => {
+      try {
+        const state = loadDatabase();
+        if (!completeIdempotency(state, actorId, key, res.statusCode, responseBody) || !saveDatabase(state)) {
+          res.status(503);
+          responseBody = { error: 'Результат операции выполнен, но не удалось сохранить защиту от повтора' };
+        }
+      } finally {
+        idempotencyResolvers.get(scope)?.();
+        idempotencyResolvers.delete(scope);
+        idempotencyInFlight.delete(scope);
+      }
+      return originalJson(responseBody);
+    }) as express.Response['json'];
+    return next();
+  });
+  app.post('/api/auth/logout', (req, res) => {
+    revokeSessionToken(cookieValue(req.headers.cookie, 'megabot_session'));
+    res.setHeader('Set-Cookie', 'megabot_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0; Secure');
+    return res.json({ success: true });
   });
   app.get('/api/integrations/google-sheets/availability', (_req, res) => {
     if (!sheetsConfig) return res.status(503).json({ error: 'Google Sheets availability is not configured' });
@@ -1008,6 +1759,7 @@ async function startServer() {
     slots: Record<number, number[]>;
     hardUnavailableDays?: number[];
     outWeekIndexes?: number[];
+    weekVersions?: Record<string, number>;
     dayBaseline?: { dayIndex: number; hours: number[]; unavailable: boolean };
   };
   type StoredChatUiState = {
@@ -1065,6 +1817,7 @@ async function startServer() {
   const pendingGroupCheckins = new Map<string, { expiresAt: number; promptMessageId?: number; messageThreadId?: number }>();
   const processedCallbackIds = new Set<string>();
   const telegramChatUpdateQueues = new Map<string, Promise<void>>();
+  let telegramInboxFlushPromise: Promise<void> | null = null;
   const persistChatPanelMessageIds = () => {
     const temporaryFile = `${CHAT_PANEL_FILE}.${process.pid}.${crypto.randomUUID()}.tmp`;
     try {
@@ -1144,7 +1897,11 @@ async function startServer() {
       try {
         await exportAvailabilityToSheet(sheetsConfig, state.users, availability);
         pendingSheetAvailabilityExports.delete(userId);
+        runtimeOperations.lastAvailabilitySheetsSuccessAt = new Date().toISOString();
+        runtimeOperations.lastAvailabilitySheetsError = undefined;
       } catch (error: any) {
+        runtimeOperations.lastAvailabilitySheetsErrorAt = new Date().toISOString();
+        runtimeOperations.lastAvailabilitySheetsError = safeOperationalError(error);
         console.error(`Google Sheets queued availability export failed for ${userId}:`, error.message || error);
       }
     }
@@ -1183,10 +1940,14 @@ async function startServer() {
         state.availabilities[availability.userId] = merged;
         changed = true;
       }
-      if (changed) saveDatabase(state);
+      if (changed && !saveDatabase(state)) throw new Error('Failed to persist imported Google Sheets availability');
       lastSheetAvailabilityPullAt = Date.now();
+      runtimeOperations.lastAvailabilitySheetsSuccessAt = new Date().toISOString();
+      runtimeOperations.lastAvailabilitySheetsError = undefined;
     })().catch((error) => {
       nextSheetAvailabilityPullAt = Date.now() + sheetAvailabilityErrorBackoffMs;
+      runtimeOperations.lastAvailabilitySheetsErrorAt = new Date().toISOString();
+      runtimeOperations.lastAvailabilitySheetsError = safeOperationalError(error);
       throw error;
     }).finally(() => { sheetAvailabilityPull = null; });
     return sheetAvailabilityPull;
@@ -1194,22 +1955,179 @@ async function startServer() {
 
   // API Routes
 
-  // Get entire simulation state
+  // Return only the client DTO allowed for the authenticated core-team member.
   app.get('/api/state', async (req, res) => {
     if (sheetsConfig) {
       try { await reconcileAvailabilityFromPrimarySheet(sheetAvailabilityPullMinIntervalMs); }
       catch (error: any) { console.error('Google Sheets on-read reconciliation failed:', error.message || error); }
     }
     const state = loadDatabase();
-    res.json(state);
+    const authUserId = (req as express.Request & { authUserId?: string }).authUserId;
+    const viewer = state.users.find((user) => user.id === authUserId)
+      || (process.env.NODE_ENV !== 'production'
+        ? state.users.find((user) => user.role === 'admin' && isUserActive(user)) || state.users.find((user) => !isFacultyUser(user) && isUserActive(user))
+        : undefined);
+    if (!viewer || !isUserActive(viewer) || isFacultyUser(viewer)) {
+      return res.status(403).json({ error: 'State access is restricted to the core team' });
+    }
+    return res.json({
+      ...coreClientState(state, viewer),
+      serverNow: new Date().toISOString(),
+      timeZone: PROJECT_TIME_ZONE,
+    });
+  });
+
+  app.get('/api/admin/diagnostics', (req, res) => {
+    const state = loadDatabase();
+    const authUserId = (req as express.Request & { authUserId?: string }).authUserId;
+    const viewer = state.users.find((user) => user.id === authUserId)
+      || (process.env.NODE_ENV !== 'production' ? state.users.find((user) => user.role === 'admin' && isUserActive(user)) : undefined);
+    if (!viewer || viewer.role !== 'admin' || !isUserActive(viewer)) {
+      return res.status(403).json({ error: 'Диагностика доступна только администратору' });
+    }
+    const nowMs = Date.now();
+    const deliveries = state.settings?.notificationDeliveries || [];
+    const inbox = state.settings?.telegramInbox || [];
+    const deliveryPending = deliveries.filter((item) => ['planned', 'sending', 'retry'].includes(item.status));
+    const deliveryAttention = deliveries.filter((item) => item.status === 'failed' || item.status === 'unknown');
+    const inboxPending = inbox.filter((item) => ['received', 'processing', 'retry'].includes(item.status));
+    const inboxFailed = inbox.filter((item) => item.status === 'failed');
+    const oldestAgeSeconds = (values: Array<string | undefined>) => {
+      const timestamps = values.map((value) => Date.parse(String(value || ''))).filter(Number.isFinite);
+      return timestamps.length ? Math.max(0, Math.floor((nowMs - Math.min(...timestamps)) / 1000)) : 0;
+    };
+    const readiness = readinessSnapshot();
+    const warnings = [
+      ...(readiness.status === 'degraded' ? ['Репликация основной базы отстаёт от durable revision.'] : []),
+      ...(deliveryAttention.length ? [`Доставки требуют решения: ${deliveryAttention.length}.`] : []),
+      ...(inboxFailed.length ? [`Telegram updates завершились ошибкой: ${inboxFailed.length}.`] : []),
+      ...(pendingCalendarMeetingIds.size ? [`Google Calendar ожидает повтор: ${pendingCalendarMeetingIds.size}.`] : []),
+      ...(pendingSheetAvailabilityExports.size ? [`Экспорт слотов ожидает повтор: ${pendingSheetAvailabilityExports.size}.`] : []),
+    ];
+    return res.json({
+      generatedAt: new Date(nowMs).toISOString(),
+      requestId: (req as express.Request & { requestId?: string }).requestId,
+      status: !readiness.ready ? 'unavailable' : warnings.length ? 'degraded' : 'healthy',
+      warnings,
+      service: {
+        revision: process.env.APP_REVISION || 'unknown', uptimeSeconds: Math.floor(process.uptime()),
+        updateMode: telegramUpdateMode, timeZone: PROJECT_TIME_ZONE,
+      },
+      persistence: {
+        ...readiness.persistence,
+        status: readiness.ready ? (readiness.status === 'degraded' ? 'degraded' : 'healthy') : 'unavailable',
+        lastSuccessAt: runtimeOperations.lastPersistenceSuccessAt,
+        lastErrorAt: runtimeOperations.lastPersistenceErrorAt,
+        lastError: runtimeOperations.lastPersistenceError,
+        lastReplicationSuccessAt: runtimeOperations.lastReplicationSuccessAt,
+        lastReplicationErrorAt: runtimeOperations.lastReplicationErrorAt,
+        lastReplicationError: runtimeOperations.lastReplicationError,
+      },
+      queues: {
+        notificationDelivery: {
+          total: deliveries.length, pending: deliveryPending.length, attention: deliveryAttention.length,
+          oldestPendingAgeSeconds: oldestAgeSeconds(deliveryPending.map((item) => item.intendedAt)),
+          byStatus: notificationDeliverySummary(deliveries).byStatus,
+        },
+        telegramInbox: {
+          total: inbox.length, pending: inboxPending.length, failed: inboxFailed.length,
+          oldestPendingAgeSeconds: oldestAgeSeconds(inboxPending.map((item) => item.receivedAt)),
+          byStatus: inbox.reduce<Record<string, number>>((counts, item) => {
+            counts[item.status] = (counts[item.status] || 0) + 1;
+            return counts;
+          }, {}),
+        },
+        calendar: { pending: pendingCalendarMeetingIds.size },
+        availabilitySheets: { pending: pendingSheetAvailabilityExports.size },
+      },
+      integrations: {
+        telegram: {
+          configured: Boolean(telegramBotToken), updateMode: telegramUpdateMode,
+          lastSuccessAt: runtimeOperations.lastTelegramSuccessAt,
+          lastErrorAt: runtimeOperations.lastTelegramErrorAt,
+          lastError: runtimeOperations.lastTelegramError,
+        },
+        googleCalendar: {
+          configured: Boolean(calendarConfig?.enabled), lastSuccessAt: runtimeOperations.lastCalendarSuccessAt,
+          lastErrorAt: runtimeOperations.lastCalendarErrorAt, lastError: runtimeOperations.lastCalendarError,
+        },
+        availabilitySheets: {
+          configured: Boolean(sheetsConfig), lastSuccessAt: runtimeOperations.lastAvailabilitySheetsSuccessAt,
+          lastErrorAt: runtimeOperations.lastAvailabilitySheetsErrorAt, lastError: runtimeOperations.lastAvailabilitySheetsError,
+        },
+      },
+      workers: runtimeOperations.workerHeartbeats,
+    });
+  });
+
+  app.get('/api/notification-deliveries', (req, res) => {
+    const state = loadDatabase();
+    const authUserId = (req as express.Request & { authUserId?: string }).authUserId;
+    const viewer = state.users.find((user) => user.id === authUserId)
+      || (process.env.NODE_ENV !== 'production' ? state.users.find((user) => user.role === 'admin' && isUserActive(user)) : undefined);
+    if (!viewer || viewer.role !== 'admin' || !isUserActive(viewer)) return res.status(403).json({ error: 'Журнал доставки доступен только администратору' });
+    const deliveries = state.settings?.notificationDeliveries || [];
+    const status = String(req.query.status || '').trim();
+    const filtered = (status ? deliveries.filter((item) => item.status === status) : deliveries)
+      .slice().sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 200);
+    return res.json({
+      summary: notificationDeliverySummary(deliveries),
+      deliveries: filtered.map((delivery) => ({
+        id: delivery.id, category: delivery.category, recipientId: delivery.recipientId,
+        recipientName: state.users.find((user) => user.id === delivery.recipientId)?.realName,
+        status: delivery.status, attempts: delivery.attempts, intendedAt: delivery.intendedAt,
+        availableAt: delivery.availableAt, sentAt: delivery.sentAt, updatedAt: delivery.updatedAt,
+        lastErrorCode: delivery.lastErrorCode, lastErrorMessage: delivery.lastErrorMessage,
+        textPreview: delivery.text.slice(0, 160),
+      })),
+    });
+  });
+
+  app.post('/api/notification-deliveries/retry', async (req, res) => {
+    const requesterId = String(req.body?.requesterId || '');
+    const ids = [...new Set<string>((Array.isArray(req.body?.ids) ? req.body.ids : []).map(String))].slice(0, 100);
+    if (!ids.length) return res.status(400).json({ error: 'Выберите хотя бы одну доставку' });
+    let retried = 0;
+    try {
+      mutateDatabaseAtomically((state) => {
+        if (!isAdminUser(state, requesterId)) throw new DatabaseMutationError(403, 'Повторять доставку может только администратор');
+        for (const delivery of state.settings?.notificationDeliveries || []) {
+          if (ids.includes(delivery.id) && retryNotificationDelivery(delivery)) retried += 1;
+        }
+      });
+    } catch (error) {
+      return databaseMutationErrorResponse(res, error);
+    }
+    await flushNotificationDeliveries();
+    return res.json({ success: true, retried, summary: notificationDeliverySummary(loadDatabase().settings?.notificationDeliveries || []) });
+  });
+
+  app.get('/api/faculty/me', (req, res) => {
+    const state = loadDatabase();
+    const authUserId = (req as express.Request & { authUserId?: string }).authUserId;
+    const viewer = state.users.find((user) => user.id === authUserId);
+    if (!viewer || !isUserActive(viewer) || !isFacultyUser(viewer)) return res.status(403).json({ error: 'Faculty access required' });
+    return res.json({ user: clientUser(viewer, viewer), serverNow: new Date().toISOString(), timeZone: PROJECT_TIME_ZONE });
+  });
+
+  app.get('/api/faculty/my-tasks', (req, res) => {
+    const state = loadDatabase();
+    const authUserId = (req as express.Request & { authUserId?: string }).authUserId;
+    const viewer = state.users.find((user) => user.id === authUserId);
+    if (!viewer || !isUserActive(viewer) || !isFacultyUser(viewer)) return res.status(403).json({ error: 'Faculty access required' });
+    const tasks = state.tasks
+      .filter((task) => (Array.isArray(task.assignedTo) ? task.assignedTo : []).includes(viewer.id))
+      .filter((task) => task.facultyId === viewer.facultyId || task.facultyId === 'all')
+      .map((task) => facultyTaskClientView(task, viewer.id));
+    return res.json({ tasks, serverNow: new Date().toISOString(), timeZone: PROJECT_TIME_ZONE });
   });
 
   function isAdminUser(state: SimulationState, userId?: string) {
-    return Boolean(userId && state.users.find((user) => user.id === userId && user.role === 'admin'));
+    return Boolean(userId && state.users.find((user) => user.id === userId && user.role === 'admin' && isUserActive(user)));
   }
 
   function isRegisteredUser(state: SimulationState, userId?: string) {
-    return Boolean(userId && state.users.find((user) => user.id === userId && user.registered));
+    return Boolean(userId && state.users.find((user) => user.id === userId && user.registered && isUserActive(user)));
   }
 
   app.post('/api/integrations/google-sheets/webhook', async (req, res) => {
@@ -1245,16 +2163,19 @@ async function startServer() {
         changedUserRow,
         String(req.body?.sheetTitle || ''),
       );
+      const latestState = loadDatabase();
       let changed = false;
       result.imported.forEach((availability) => {
-        const previous = state.availabilities[availability.userId];
+        const previous = latestState.availabilities[availability.userId];
         const merged = mergePrimarySheetAvailability(previous, availability);
         if (!sameAvailability(previous, merged)) {
-          state.availabilities[availability.userId] = merged;
+          latestState.availabilities[availability.userId] = merged;
           changed = true;
         }
       });
-      if (changed) saveDatabase(state);
+      if (changed && !saveDatabase(latestState)) {
+        return res.status(503).json({ error: 'Не удалось сохранить импортированные слоты' });
+      }
       lastSheetAvailabilityPullAt = Date.now();
       return res.json({ success: true, importedUsers: result.imported.length });
     } catch (error: any) {
@@ -1264,19 +2185,19 @@ async function startServer() {
   });
 
   app.get('/api/integrations/google-sheets/mapping', async (req, res) => {
-    if (!sheetsConfig) return res.status(503).json({ error: 'Google Sheets integration is not configured' });
     const state = loadDatabase();
     const requesterId = (req as express.Request & { authUserId?: string }).authUserId || String(req.query.requesterId || '');
     if (!isAdminUser(state, requesterId)) return res.status(403).json({ error: 'Admin access required' });
+    if (!sheetsConfig) return res.status(503).json({ error: 'Google Sheets integration is not configured' });
     try { return res.json(await buildUserMappingReport(sheetsConfig, state.users)); }
     catch (error: any) { return res.status(500).json({ error: error.message || 'Mapping failed' }); }
   });
 
   app.post('/api/integrations/google-sheets/template', async (req, res) => {
-    if (!sheetsConfig) return res.status(503).json({ error: 'Google Sheets integration is not configured' });
     const state = loadDatabase();
     const requesterId = (req as express.Request & { authUserId?: string }).authUserId || String(req.body?.requesterId || '');
     if (!isAdminUser(state, requesterId)) return res.status(403).json({ error: 'Admin access required' });
+    if (!sheetsConfig) return res.status(503).json({ error: 'Google Sheets integration is not configured' });
     try { return res.json({ success: true, ...(await ensureTemplateSheet(sheetsConfig, state.users)) }); }
     catch (error: any) { return res.status(500).json({ error: error.message || 'Template creation failed' }); }
   });
@@ -1532,6 +2453,122 @@ async function startServer() {
     return false;
   }
 
+  const lastTelegramDeliveryAtByChat = new Map<string, number>();
+  let lastTelegramDeliveryAt = 0;
+  let notificationDeliveryFlushPromise: Promise<void> | null = null;
+
+  async function sendTelegramDeliveryRaw(delivery: NotificationDelivery): Promise<TelegramDeliveryOutcome> {
+    const botToken = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
+    if (!botToken) return { kind: 'retryable', code: 'bot_not_configured', message: 'Telegram bot token is not configured' };
+    const globalDelayMs = Math.max(0, Number(process.env.TELEGRAM_DELIVERY_INTERVAL_MS || 50));
+    const privateDelayMs = Math.max(0, Number(process.env.TELEGRAM_PRIVATE_CHAT_INTERVAL_MS || 1000));
+    const now = Date.now();
+    const previousChatDelivery = lastTelegramDeliveryAtByChat.get(delivery.chatId) || 0;
+    const requiredDelay = Math.max(
+      0,
+      lastTelegramDeliveryAt + globalDelayMs - now,
+      delivery.chatId.startsWith('-') ? 0 : previousChatDelivery + privateDelayMs - now,
+    );
+    if (requiredDelay > 0) await new Promise((resolve) => setTimeout(resolve, requiredDelay));
+
+    try {
+      const tgApiBase = process.env.TELEGRAM_API_BASE || 'https://api.telegram.org';
+      const response = await telegramFetch(`${tgApiBase}/bot${botToken}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: delivery.chatId,
+          text: renderTelegramHtml(delivery.text),
+          parse_mode: 'HTML',
+          reply_markup: delivery.replyMarkup,
+          disable_web_page_preview: delivery.disableWebPagePreview || undefined,
+          disable_notification: delivery.disableNotification || undefined,
+          message_thread_id: delivery.messageThreadId,
+        }),
+      });
+      lastTelegramDeliveryAt = Date.now();
+      lastTelegramDeliveryAtByChat.set(delivery.chatId, lastTelegramDeliveryAt);
+      const responseText = await response.text();
+      let data: { ok?: boolean; description?: string; error_code?: number; parameters?: { retry_after?: number }; result?: { message_id?: number } } | null = null;
+      try { data = responseText ? JSON.parse(responseText) : null; } catch { data = null; }
+      if (response.ok && data?.ok !== false && Number.isInteger(data?.result?.message_id)) {
+        return { kind: 'sent', messageId: Number(data?.result?.message_id) };
+      }
+      const code = String(data?.error_code || response.status || 'telegram_error');
+      const message = data?.description || responseText || 'Unknown Telegram response';
+      if (response.status === 429 || data?.error_code === 429) {
+        return { kind: 'rate_limited', retryAfterSeconds: Math.max(1, Number(data?.parameters?.retry_after || 1)), code, message };
+      }
+      if (response.status === 403 || data?.error_code === 403) return { kind: 'forbidden', code, message };
+      if (response.status >= 500) return { kind: 'retryable', code, message };
+      return { kind: 'permanent', code, message };
+    } catch (error: any) {
+      return { kind: 'unknown', code: error?.name === 'AbortError' ? 'timeout' : 'network_error', message: String(error?.message || error) };
+    }
+  }
+
+  function enqueueTelegramDelivery(input: Parameters<typeof createNotificationDelivery>[0]) {
+    return mutateDatabaseAtomically((state) => {
+      state.settings ||= {};
+      const deliveries = state.settings.notificationDeliveries ||= [];
+      const candidate = createNotificationDelivery(input);
+      const existing = deliveries.find((item) => item.dedupeKey === candidate.dedupeKey);
+      if (existing) return existing;
+      deliveries.push(candidate);
+      return candidate;
+    }).value;
+  }
+
+  async function flushNotificationDeliveries() {
+    markWorkerHeartbeat('notification_delivery');
+    if (notificationDeliveryFlushPromise) return notificationDeliveryFlushPromise;
+    notificationDeliveryFlushPromise = (async () => {
+      while (true) {
+        const snapshot = loadDatabase();
+        const nowMs = Date.now();
+        const candidate = (snapshot.settings?.notificationDeliveries || [])
+          .filter((delivery) => delivery.chatId !== 'unbound:important')
+          .sort((a, b) => a.availableAt.localeCompare(b.availableAt))
+          .find((delivery) => (
+            Boolean(delivery.expiresAt && Date.parse(delivery.expiresAt) <= nowMs)
+            || ((delivery.status === 'planned' || delivery.status === 'retry') && Date.parse(delivery.availableAt) <= nowMs)
+            || (delivery.status === 'sending' && (!delivery.leasedUntil || Date.parse(delivery.leasedUntil) <= nowMs))
+          ));
+        if (!candidate) break;
+        const claimed = mutateDatabaseAtomically((state) => {
+          const delivery = state.settings?.notificationDeliveries?.find((item) => item.id === candidate.id);
+          if (!delivery) return undefined;
+          const leaseToken = claimNotificationDelivery(delivery, new Date());
+          return leaseToken ? { delivery: structuredClone(delivery), leaseToken } : undefined;
+        }).value;
+        if (!claimed) continue;
+        const outcome = await sendTelegramDeliveryRaw(claimed.delivery);
+        if (outcome.kind === 'sent') {
+          runtimeOperations.lastTelegramSuccessAt = new Date().toISOString();
+          runtimeOperations.lastTelegramError = undefined;
+        } else {
+          runtimeOperations.lastTelegramErrorAt = new Date().toISOString();
+          runtimeOperations.lastTelegramError = `${outcome.code || outcome.kind}: ${outcome.message || outcome.kind}`.slice(0, 500);
+          console.error(JSON.stringify({
+            event: 'telegram_delivery_failed', deliveryId: claimed.delivery.id,
+            category: claimed.delivery.category, outcome: outcome.kind, code: outcome.code,
+          }));
+        }
+        mutateDatabaseAtomically((state) => {
+          const delivery = state.settings?.notificationDeliveries?.find((item) => item.id === claimed.delivery.id);
+          if (delivery) applyTelegramDeliveryOutcome(delivery, claimed.leaseToken, outcome);
+        });
+      }
+    })().finally(() => { notificationDeliveryFlushPromise = null; });
+    return notificationDeliveryFlushPromise;
+  }
+
+  async function queueAndDeliverTelegram(input: Parameters<typeof createNotificationDelivery>[0]) {
+    const delivery = enqueueTelegramDelivery(input);
+    await flushNotificationDeliveries();
+    return loadDatabase().settings?.notificationDeliveries?.find((item) => item.id === delivery.id);
+  }
+
   async function sendGroupMessage(chatId: string | number, text: string, silent = false, messageThreadId?: number): Promise<number | undefined> {
     const botToken = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
     if (!botToken) return;
@@ -1564,74 +2601,64 @@ async function startServer() {
     return `${prefix}_${crypto.createHash('sha256').update(text).digest('hex').slice(0, 20)}`;
   }
 
-  function enqueueImportantNotification(state: SimulationState, id: string, text: string, silent: boolean, attempts: number) {
-    state.settings ||= {};
-    const queue = state.settings.pendingImportantNotifications ||= [];
-    const existing = queue.find((item) => item.id === id);
-    if (existing) {
-      existing.attempts = Math.max(existing.attempts, attempts);
-      existing.lastAttemptAt = new Date().toISOString();
-      return;
-    }
-    queue.push({ id, text, silent, createdAt: new Date().toISOString(), attempts, lastAttemptAt: new Date().toISOString() });
-  }
-
   async function deliverImportantNotification(
     state: SimulationState,
     text: string,
     prefix: string,
     silent = false,
-    immediateAttempts = 3,
+    _immediateAttempts = 3,
     existingNotificationId?: string,
   ) {
     const notificationId = existingNotificationId || importantNotificationId(prefix, text);
     const teamChatId = state.settings?.teamChatId;
     const importantThreadId = state.settings?.teamImportantThreadId;
-    if (!teamChatId || !importantThreadId) {
-      enqueueImportantNotification(state, notificationId, text, silent, 0);
-      console.error(`[Important topic] queued ${notificationId}: team chat or IMPORTANT topic is not bound.`);
-      return false;
+    const delivery = await queueAndDeliverTelegram({
+      id: notificationId,
+      dedupeKey: notificationId,
+      category: 'important',
+      chatId: teamChatId && importantThreadId ? teamChatId : 'unbound:important',
+      text,
+      messageThreadId: importantThreadId,
+      disableNotification: silent,
+    });
+    if (delivery?.status === 'sent') {
+      console.log(`[Important topic] delivered ${notificationId} to chat=${delivery.chatId} thread=${delivery.messageThreadId} message=${delivery.telegramMessageId}.`);
+      return true;
     }
-
-    for (let attempt = 1; attempt <= immediateAttempts; attempt += 1) {
-      const messageId = await sendGroupMessage(teamChatId, text, silent, importantThreadId);
-      if (messageId) {
-        if (state.settings?.pendingImportantNotifications?.length) {
-          state.settings.pendingImportantNotifications = state.settings.pendingImportantNotifications
-            .filter((item) => item.id !== notificationId);
-        }
-        console.log(`[Important topic] delivered ${notificationId} to chat=${teamChatId} thread=${importantThreadId} message=${messageId}.`);
-        return true;
-      }
-      if (attempt < immediateAttempts) await new Promise((resolve) => setTimeout(resolve, 600 * attempt));
-    }
-
-    enqueueImportantNotification(state, notificationId, text, silent, immediateAttempts);
-    console.error(`[Important topic] queued ${notificationId} after ${immediateAttempts} failed delivery attempts.`);
+    console.error(`[Important topic] queued ${notificationId}: ${delivery?.lastErrorCode || 'waiting_for_binding'}.`);
     return false;
   }
 
   async function flushPendingImportantNotifications() {
-    const state = loadDatabase();
-    const pending = [...(state.settings?.pendingImportantNotifications || [])];
-    if (!pending.length) return;
-    if (!state.settings?.teamChatId || !state.settings?.teamImportantThreadId) return;
-    let changed = false;
-    for (const item of pending) {
-      const lastAttemptAt = Date.parse(item.lastAttemptAt || item.createdAt);
-      const retryDelayMs = Math.min(30 * 60_000, 60_000 * (2 ** Math.max(0, item.attempts - 3)));
-      if (Number.isFinite(lastAttemptAt) && Date.now() - lastAttemptAt < retryDelayMs) continue;
-      const delivered = await deliverImportantNotification(state, item.text, 'meeting_retry', item.silent, 1, item.id);
-      if (!delivered) {
-        const queued = state.settings?.pendingImportantNotifications?.find((candidate) => candidate.id === item.id);
-        if (queued) {
-          queued.attempts = item.attempts + 1;
-          queued.lastAttemptAt = new Date().toISOString();
+    const snapshot = loadDatabase();
+    const requiresMigration = Boolean(snapshot.settings?.pendingImportantNotifications?.length);
+    const requiresBinding = Boolean(snapshot.settings?.teamChatId && snapshot.settings?.teamImportantThreadId
+      && snapshot.settings?.notificationDeliveries?.some((delivery) => delivery.category === 'important' && delivery.chatId === 'unbound:important'));
+    if (requiresMigration || requiresBinding) mutateDatabaseAtomically((state) => {
+      state.settings ||= {};
+      const deliveries = state.settings.notificationDeliveries ||= [];
+      for (const item of state.settings.pendingImportantNotifications || []) {
+        if (deliveries.some((delivery) => delivery.dedupeKey === item.id)) continue;
+        deliveries.push(createNotificationDelivery({
+          id: item.id, dedupeKey: item.id, category: 'important',
+          chatId: state.settings?.teamChatId && state.settings?.teamImportantThreadId
+            ? state.settings.teamChatId : 'unbound:important',
+          messageThreadId: state.settings?.teamImportantThreadId,
+          text: item.text, disableNotification: item.silent, intendedAt: item.createdAt,
+        }));
+      }
+      state.settings.pendingImportantNotifications = [];
+      if (state.settings.teamChatId && state.settings.teamImportantThreadId) {
+        for (const delivery of deliveries) {
+          if (delivery.category === 'important' && delivery.chatId === 'unbound:important') {
+            delivery.chatId = state.settings.teamChatId;
+            delivery.messageThreadId = state.settings.teamImportantThreadId;
+            delivery.updatedAt = new Date().toISOString();
+          }
         }
       }
-      changed = true;
-    }
-    if (changed) saveDatabase(state);
+    });
+    await flushNotificationDeliveries();
   }
 
   let telegramBotIdPromise: Promise<string | null> | null = null;
@@ -1808,17 +2835,8 @@ async function startServer() {
     }
   }
 
-  function meetingRecipientIds(state: SimulationState, participants: string[] | 'all', hostId: string) {
-    const ids = new Set<string>();
-    if (participants === 'all') {
-      state.users
-        .filter((user) => !isFacultyUser(user))
-        .forEach((user) => ids.add(user.id));
-    } else {
-      participants.forEach((id) => ids.add(id));
-      ids.add(hostId);
-    }
-    return ids;
+  function meetingRecipientIds(state: SimulationState, meeting: Meeting) {
+    return new Set(resolveMeetingAudienceUsers(state.users, meeting).map((user) => user.id));
   }
 
   async function notifyMeetingRecipients(
@@ -1835,11 +2853,11 @@ async function startServer() {
     const storedMessages: BotMessage[] = [];
     for (const userId of recipientIds) {
       const target = state.users.find((user) => user.id === userId);
-      if (!target) continue;
+      if (!target || !isUserActive(target)) continue;
       const targetButtons = typeof buttons === 'function' ? buttons(target.id) : buttons;
       if (!state.messages[target.id]) state.messages[target.id] = [];
       const storedMessage: BotMessage = {
-        id: `${notificationPrefix}_${Date.now()}_${target.id}`,
+        id: `${notificationPrefix}_${crypto.randomUUID()}`,
         userId: target.id,
         sender: 'bot',
         text,
@@ -1871,9 +2889,13 @@ async function startServer() {
       const result = await syncMeetingToGoogleCalendar(calendarConfig, meeting, state);
       if (!('skipped' in result)) meeting.googleCalendarEventId = result.eventId;
       pendingCalendarMeetingIds.delete(meeting.id);
+      runtimeOperations.lastCalendarSuccessAt = new Date().toISOString();
+      runtimeOperations.lastCalendarError = undefined;
       return true;
     } catch (error: any) {
       pendingCalendarMeetingIds.add(meeting.id);
+      runtimeOperations.lastCalendarErrorAt = new Date().toISOString();
+      runtimeOperations.lastCalendarError = safeOperationalError(error);
       console.error(`Google Calendar sync failed for meeting ${meeting.id}:`, error.message || error);
       return false;
     }
@@ -1910,7 +2932,7 @@ async function startServer() {
     };
 
     state.users
-      .filter((member) => !isFacultyUser(member))
+      .filter((member) => !isFacultyUser(member) && isUserActive(member))
       .filter((member) => !competency || member.primaryCompetency === competency || member.competencies?.includes(competency))
       .forEach((member) => {
         const observed = member.telegramId ? knownMembers.get(String(member.telegramId)) : undefined;
@@ -2037,7 +3059,7 @@ async function startServer() {
     competency?: string;
   }) {
     const meeting: Meeting = {
-      id: 'm_' + Date.now(),
+      id: `m_${crypto.randomUUID()}`,
       title: data.title,
       kind: normalizeMeetingKind(data.kind),
       eventId: data.eventId || undefined,
@@ -2047,7 +3069,10 @@ async function startServer() {
       duration: data.duration || 1,
       hostId: data.hostId,
       participants: data.participants,
+      audiencePolicy: 'snapshot',
+      audienceUserIds: snapshotMeetingAudienceUserIds(state.users, data.participants, data.hostId),
       attendeeIds: [data.hostId],
+      rsvpByUser: { [data.hostId]: 'yes' },
       topic: data.topic || '',
       description: data.description || '',
       status: 'scheduled',
@@ -2059,7 +3084,7 @@ async function startServer() {
     const text = `${meetingKindText(meeting.kind).created}\n\n${meetingDetailsText(meeting, state)}\n\nПожалуйста, освободите это время.`;
     await notifyMeetingRecipients(
       state,
-      meetingRecipientIds(state, data.participants, data.hostId),
+      meetingRecipientIds(state, meeting),
       text,
       'meeting_created',
       (userId) => meetingRsvpButtons(meeting, userId),
@@ -2092,27 +3117,15 @@ async function startServer() {
     });
   }
 
-  function updateMeetingAttendance(meeting: Meeting, userId: string, attending: boolean) {
-    const attendees = new Set(meeting.attendeeIds || []);
-    const wasAttending = attendees.has(userId);
-    if (attending) {
-      attendees.add(userId);
-      if (meeting.participants !== 'all' && !meeting.participants.includes(userId)) {
-        meeting.participants = [...meeting.participants, userId];
-      }
-    } else {
-      attendees.delete(userId);
-    }
-    meeting.attendeeIds = [...attendees];
-    return { changed: wasAttending !== attending, attending };
-  }
-
-  async function sendTelegramMessage(chatId: string | number, text: string, buttons?: { text: string; action: string }[], keyboardOnly = false, recipient?: User, silent = false): Promise<boolean> {
-    const botToken = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
-    if (!botToken) {
-      console.warn('TELEGRAM_BOT_TOKEN is not set. Telegram message was not sent.');
-      return false;
-    }
+  async function sendTelegramMessage(
+    chatId: string | number,
+    text: string,
+    buttons?: { text: string; action: string }[],
+    keyboardOnly = false,
+    recipient?: User,
+    silent = false,
+    deliveryOptions: { dedupeKey?: string; category?: string; expiresAt?: string } = {},
+  ): Promise<boolean> {
     const webAppUrl = configuredWebAppUrl();
 
     let replyMarkup: any = buildChatKeyboard(false, recipient);
@@ -2143,32 +3156,17 @@ async function startServer() {
       });
     }
 
-    try {
-      const tgApiBase = process.env.TELEGRAM_API_BASE || 'https://api.telegram.org';
-      const response = await telegramFetch(`${tgApiBase}/bot${botToken}/sendMessage`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          chat_id: chatId,
-          text: renderTelegramHtml(text),
-          parse_mode: 'HTML',
-          reply_markup: Object.keys(replyMarkup).length > 0 ? replyMarkup : undefined,
-          disable_notification: silent || undefined,
-        })
-      });
-      const responseText = await response.text();
-      let responseData: { ok?: boolean; description?: string } | null = null;
-      try { responseData = responseText ? JSON.parse(responseText) : null; }
-      catch { responseData = null; }
-      if (!response.ok || responseData?.ok === false) {
-        console.error('Telegram sendMessage failed:', response.status, responseData?.description || responseText);
-        return false;
-      }
-      return true;
-    } catch (err) {
-      console.error('Telegram sendMessage failed:', err);
-      return false;
-    }
+    const delivery = await queueAndDeliverTelegram({
+      dedupeKey: deliveryOptions.dedupeKey,
+      category: deliveryOptions.category || (silent ? 'task' : 'notification'),
+      recipientId: recipient?.id,
+      chatId,
+      text,
+      replyMarkup: Object.keys(replyMarkup).length > 0 ? replyMarkup : undefined,
+      disableNotification: silent,
+      expiresAt: deliveryOptions.expiresAt,
+    });
+    return delivery?.status === 'sent';
   }
 
   async function showProfilePanel(chatId: string | number, user: User, state: SimulationState) {
@@ -2188,8 +3186,15 @@ async function startServer() {
     await sendTelegramKeyboard(chatId, profileSummaryText(user, state), rows, false, user);
   }
 
-  function sendTaskTelegramMessage(chatId: string | number, text: string, buttons?: { text: string; action: string }[], keyboardOnly = false, recipient?: User) {
-    return sendTelegramMessage(chatId, text, buttons, keyboardOnly, recipient, true);
+  function sendTaskTelegramMessage(
+    chatId: string | number,
+    text: string,
+    buttons?: { text: string; action: string }[],
+    keyboardOnly = false,
+    recipient?: User,
+    deliveryOptions: { dedupeKey?: string; category?: string; expiresAt?: string } = {},
+  ) {
+    return sendTelegramMessage(chatId, text, buttons, keyboardOnly, recipient, true, deliveryOptions);
   }
 
   function sendTaskTelegramKeyboard(chatId: string | number, text: string, rows: string[][], includeWebApp = false, user?: User) {
@@ -2285,6 +3290,12 @@ async function startServer() {
       Object.fromEntries(Object.entries(safeSlots).filter(([day]) => !safeOutWeekIndexes.includes(Math.floor(Number(day) / 7)))),
     ).filter((day) => !safeOutWeekIndexes.includes(Math.floor(day / 7)));
     const previousDraft = chatSlotDrafts.get(chatKey);
+    const weekVersions = previousDraft?.userId === user.id && previousDraft.weekStart === currentWeekStartIso()
+      ? { ...(previousDraft.weekVersions || {}) }
+      : Object.fromEntries(normalizeAvailabilityConfig(state.settings).weekStarts.map((weekStart) => [
+          weekStart,
+          Number(state.availabilities[user.id]?.weekVersions?.[weekStart] || 0),
+        ]));
     const dayBaseline = slotDay === undefined
       ? undefined
       : previousDraft?.dayBaseline?.dayIndex === slotDay
@@ -2301,6 +3312,7 @@ async function startServer() {
       slots: safeSlots,
       hardUnavailableDays: safeUnavailableDays,
       outWeekIndexes: safeOutWeekIndexes,
+      weekVersions,
       dayBaseline,
     });
     persistChatPanelMessageIds();
@@ -2481,12 +3493,15 @@ async function startServer() {
   }
 
   async function finishChatTask(chatId: string | number, user: User, state: SimulationState, session: any, priority: Task['priority']) {
-    const team = state.users.filter((member) => !isFacultyUser(member));
+    state = loadDatabase();
+    user = state.users.find((member) => member.id === user.id) || user;
+    const team = state.users.filter((member) => !isFacultyUser(member) && isUserActive(member));
     const assigneeIds: string[] = session.taskAssignmentMode === 'open'
       ? []
       : [...new Set<string>((session.taskAssigneeIds || []).map(String))];
     const task: Task = {
-      id: `t_${Date.now()}`,
+      id: `t_${crypto.randomUUID()}`,
+      version: 1,
       title: session.taskTitle || 'Без названия',
       description: session.taskDescription || '',
       deadline: session.taskDeadline || '',
@@ -2500,40 +3515,49 @@ async function startServer() {
       priority,
       createdAt: new Date().toISOString(),
       completedAt: '',
+      assignmentMode: 'shared',
     };
     state.tasks.push(task);
     chatSessions.delete(String(chatId));
     const targets = assigneeIds.length
       ? team.filter((member) => assigneeIds.includes(member.id))
       : team;
+    const notifications: Array<{ target: User; text: string }> = [];
     for (const target of targets) {
       if (!target.telegramId || target.id === user.id) continue;
       const notificationText = assigneeIds.length
         ? `Тебе назначена задача:\n\n${taskDetailsText(task, state)}`
         : `На доске появилась свободная задача.\n\n${taskDetailsText(task, state)}`;
-      await sendTaskTelegramMessage(
-        target.telegramId,
-        notificationText,
+      notifications.push({ target, text: notificationText });
+    }
+    if (!saveDatabase(state)) {
+      await sendTaskGroupMessage(chatId, 'Не удалось сохранить задачу. Попробуй ещё раз.');
+      return;
+    }
+    await Promise.allSettled(notifications.map(({ target, text }) => sendTaskTelegramMessage(
+        target.telegramId!,
+        text,
         [{ text: 'Открыть задачи', action: 'open_tasks' }],
         false,
         target,
-      );
-    }
-    saveDatabase(state);
+      )));
     await sendTaskGroupMessage(chatId, `Задача создана:\n\n${taskDetailsText(task, state)}`);
     await showTasksPanel(chatId, user, state);
   }
 
   async function completeTaskFromChat(state: SimulationState, task: Task, user: User, timeSpentMinutes?: number, completionComment = '') {
-    task.status = 'completed';
-    task.completedAt = new Date().toISOString();
-    task.timeSpentMinutes = timeSpentMinutes;
-    task.completionComments = task.completionComments || {};
+    state = loadDatabase();
+    const latestTask = state.tasks.find((item) => item.id === task.id);
+    if (!latestTask) return { ok: false as const, error: 'Задача больше недоступна.' };
+    try {
+      task = completeTaskCommand(latestTask, user.id, { timeSpentMinutes, completionComment });
+    } catch (error) {
+      if (error instanceof TaskCommandError) return { ok: false as const, error: error.message };
+      throw error;
+    }
     const cleanComment = completionComment.trim();
-    if (cleanComment) task.completionComments[user.id] = cleanComment;
-    else delete task.completionComments[user.id];
-    saveDatabase(state);
-    const creator = state.users.find((member) => member.id === task.creatorId && member.telegramId && member.id !== user.id);
+    if (!saveDatabase(state)) return { ok: false as const, error: 'Не удалось сохранить выполнение. Попробуй ещё раз.' };
+    const creator = state.users.find((member) => member.id === task.creatorId && isUserActive(member) && member.telegramId && member.id !== user.id);
     const sendJobs = creator ? [sendTaskTelegramMessage(
         creator.telegramId!,
         `Задача выполнена!\n\n${task.title}\nИсполнитель: ${userMention(user)}${timeSpentMinutes ? `\nЗатрачено: ${taskDurationLabel(timeSpentMinutes)}` : ''}${cleanComment ? `\nКомментарий: ${cleanComment}` : ''}`,
@@ -2542,63 +3566,82 @@ async function startServer() {
         creator,
       )] : [];
     await Promise.allSettled(sendJobs);
+    return { ok: true as const, task };
   }
 
   let birthdayReminderCheckRunning = false;
-  async function sendDueBirthdayReminders() {
+  async function sendDueBirthdayReminders(now = new Date()) {
+    markWorkerHeartbeat('birthday_reminders');
     if (birthdayReminderCheckRunning) return;
+    const firstHour = Math.min(23, positiveIntegerEnvironment('BIRTHDAY_REMINDER_HOUR', 10));
+    if (projectClock(now).hour < firstHour) return;
     birthdayReminderCheckRunning = true;
     try {
       await deliverBirthdayReminders({
         loadState: loadDatabase,
         saveState: saveDatabase,
-        send: (telegramId, text) => sendTelegramMessage(telegramId, text),
-      });
+        send: (telegramId, text, deliveryId) => sendTelegramMessage(
+          telegramId, text, undefined, false, undefined, false,
+          { dedupeKey: deliveryId, category: 'birthday_reminder' },
+        ),
+      }, now);
     } finally {
       birthdayReminderCheckRunning = false;
     }
   }
 
   async function sendSundayAvailabilityReminders(now = new Date()) {
+    markWorkerHeartbeat('availability_reminders');
     if (!isAvailabilityReminderTime(now)) return;
 
     const state = loadDatabase();
     const dateKey = moscowClock(now).dateKey;
     let changed = false;
+    const notifications: Array<{ user: User; text: string; dedupeKey: string }> = [];
 
     for (const user of state.users) {
       if (hasSubmittedAvailabilityForWeek(state.availabilities[user.id], state.settings, 1)) continue;
       const notificationId = `sunday_slots_${dateKey}_${user.id}`;
       if (!state.messages[user.id]) state.messages[user.id] = [];
-      if (state.messages[user.id].some((message) => message.id === notificationId)) continue;
+      const existingMessage = state.messages[user.id].some((message) => message.id === notificationId);
+      const existingDelivery = state.settings?.notificationDeliveries?.find((delivery) => delivery.dedupeKey === notificationId);
+      if ((existingMessage && !existingDelivery) || existingDelivery?.status === 'sent') continue;
 
       const text = '🔔 Сегодня воскресенье. Отметь, пожалуйста, свободные слоты на следующую неделю в Mini App. Это займёт меньше минуты.';
-      state.messages[user.id].push({
-        id: notificationId,
-        userId: user.id,
-        sender: 'bot',
-        text,
-        timestamp: new Date().toISOString(),
-        buttons: [{ text: 'Открыть Mini App', action: 'open_tma' }],
-      });
-      changed = true;
+      if (!existingMessage) {
+        state.messages[user.id].push({
+          id: notificationId,
+          userId: user.id,
+          sender: 'bot',
+          text,
+          timestamp: new Date().toISOString(),
+          buttons: [{ text: 'Открыть Mini App', action: 'open_tma' }],
+        });
+        changed = true;
+      }
 
       if (user.telegramId) {
-        await sendTelegramMessage(user.telegramId, text, [{ text: 'Открыть Mini App', action: 'open_tma' }]);
+        notifications.push({ user, text, dedupeKey: notificationId });
       }
     }
 
     if (changed) {
-      saveDatabase(state);
+      if (!saveDatabase(state)) return;
     }
+    await Promise.allSettled(notifications.map(({ user, text, dedupeKey }) => sendTelegramMessage(
+      user.telegramId!, text, [{ text: 'Открыть Mini App', action: 'open_tma' }], false, user, false,
+      { dedupeKey, category: 'availability_reminder' },
+    )));
   }
 
   async function sendTaskReminders() {
+    markWorkerHeartbeat('task_reminders');
     const state = loadDatabase();
     const now = new Date();
     let changed = false;
+    const notifications: Array<{ taskId: string; reminderId: string; target: User; text: string; dedupeKey: string }> = [];
     for (const task of state.tasks) {
-      if (task.status === 'completed' || !task.reminders?.length) continue;
+      if (task.status === 'completed' || task.status === 'cancelled' || !task.reminders?.length) continue;
       const deadline = parseShortDate(task.deadline);
       if (!deadline) continue;
       for (const reminder of task.reminders) {
@@ -2612,44 +3655,74 @@ async function startServer() {
           shouldSend = now.getTime() - last.getTime() >= intervalMs;
         }
         if (!shouldSend) continue;
+        const cycle = reminder.type === 'before_deadline' ? 'once' : (reminder.lastSentAt || task.createdAt || 'initial');
         for (const id of assignedIds(task)) {
           const target = state.users.find((user) => user.id === id);
-          if (!target) continue;
+          if (!target || !isUserActive(target)) continue;
           const text = `Напоминание по задаче:\n\n${taskDetailsText(task, state)}\n\nТекущий статус: ${taskStatusLabel(task.status)}`;
+          const dedupeKey = `task_reminder:${task.id}:${reminder.id}:${cycle}:${target.id}`;
           if (!state.messages[target.id]) state.messages[target.id] = [];
-          state.messages[target.id].push({
-            id: `task_reminder_${task.id}_${reminder.id}_${Date.now()}_${target.id}`,
-            userId: target.id,
-            sender: 'bot',
-            text,
-            timestamp: new Date().toISOString(),
-          });
-          if (target?.telegramId) {
-            await sendTaskTelegramMessage(target.telegramId, text, undefined, false, target);
+          if (!state.messages[target.id].some((message) => message.id === dedupeKey)) {
+            state.messages[target.id].push({ id: dedupeKey, userId: target.id, sender: 'bot', text, timestamp: now.toISOString() });
+            changed = true;
           }
+          notifications.push({ taskId: task.id, reminderId: reminder.id, target, text, dedupeKey });
         }
-        if (reminder.type === 'before_deadline') reminder.sentAt = now.toISOString();
-        else reminder.lastSentAt = now.toISOString();
-        changed = true;
       }
     }
-    if (changed) saveDatabase(state);
+    if (changed && !saveDatabase(state)) return;
+    const results = new Map<string, boolean[]>();
+    for (const notification of notifications) {
+      const delivered = !notification.target.telegramId || await sendTaskTelegramMessage(
+        notification.target.telegramId,
+        notification.text,
+        undefined,
+        false,
+        notification.target,
+        { dedupeKey: notification.dedupeKey, category: 'task_reminder' },
+      );
+      const key = `${notification.taskId}:${notification.reminderId}`;
+      const values = results.get(key) || [];
+      values.push(delivered);
+      results.set(key, values);
+    }
+    if (!results.size) return;
+    mutateDatabaseAtomically((latestState) => {
+      for (const task of latestState.tasks) {
+        for (const reminder of task.reminders || []) {
+          const outcomes = results.get(`${task.id}:${reminder.id}`);
+          if (!outcomes?.length || !outcomes.every(Boolean)) continue;
+          if (reminder.type === 'before_deadline') reminder.sentAt = now.toISOString();
+          else reminder.lastSentAt = now.toISOString();
+          task.version = Number(task.version || 1) + 1;
+        }
+      }
+    });
   }
 
   // Resolve an already allowed user inside Telegram WebApp.
   app.post('/api/user/get-or-create', (req, res) => {
-    const { telegramId, username, initData } = req.body;
-    if (!telegramId) {
-      return res.status(400).json({ error: 'telegramId is required' });
+    const ipLimit = authIpRateLimit(req.ip || req.socket.remoteAddress || 'unknown');
+    if (!ipLimit.allowed) {
+      return rateLimitResponse(res, ipLimit, 'Слишком много попыток входа. Повторите позже.');
     }
+    const initData = req.body?.initData;
     const botToken = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
-    if (!verifyTelegramInitData(String(initData || ''), botToken)) {
+    const telegramUser = verifyTelegramInitData(String(initData || ''), botToken);
+    if (!telegramUser) {
       return res.status(403).json({ success: false, error: 'Не удалось подтвердить Telegram-аккаунт. Открой приложение кнопкой в боте.' });
     }
+    const userLimit = authUserRateLimit(String(telegramUser.id));
+    if (!userLimit.allowed) {
+      return rateLimitResponse(res, userLimit, 'Слишком много входов для этого Telegram-аккаунта. Повторите позже.');
+    }
+    const telegramId = telegramUser.id;
+    const username = telegramUser.username;
+    const displayName = [telegramUser.firstName, telegramUser.lastName].filter(Boolean).join(' ').trim();
 
     const state = loadDatabase();
     const user = findUserByTelegramIdentity(state, telegramId, username)
-      || ensureEnvAdminUser(state, telegramId, username, username ? `@${username}` : undefined);
+      || ensureEnvAdminUser(state, telegramId, username, displayName || undefined);
 
     if (!user) {
       return res.status(403).json({ success: false, error: 'Вас нет в списке участников. Попросите админа добавить ваш Telegram в раздел «Команда».' });
@@ -2664,7 +3737,7 @@ async function startServer() {
       user.username = `@${username}`;
       changed = true;
     }
-    if (isEnvAdmin(telegramId, username) && user.role !== 'admin') {
+    if (isEnvAdmin(telegramId) && user.role !== 'admin') {
       user.role = 'admin';
       changed = true;
     }
@@ -2678,7 +3751,9 @@ async function startServer() {
     }
     user.lastSeenAt = new Date().toISOString();
     changed = true;
-    if (changed) saveDatabase(state);
+    if (changed && !saveDatabase(state)) {
+      return res.status(503).json({ success: false, error: 'Не удалось надёжно сохранить вход. Повторите позже.' });
+    }
     const sessionToken = createSessionToken(user.id);
     if (sessionToken) {
       res.setHeader(
@@ -2696,67 +3771,8 @@ async function startServer() {
     res.json({ success: true, user });
   });
 
-  // Self-register Telegram Bot webhook
-  app.get('/api/setup-webhook', async (req, res) => {
-    const botToken = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
-    const webAppUrl = configuredWebAppUrl();
-
-    if (!botToken) {
-      return res.status(400).json({ error: 'TELEGRAM_BOT_TOKEN or BOT_TOKEN is not set.' });
-    }
-    if (!webAppUrl) {
-      return res.status(400).json({ error: 'WEBAPP_URL is not set.' });
-    }
-
-    const webhookUrl = `${webAppUrl}/api/telegram-webhook`;
-    try {
-      const tgApiBase = process.env.TELEGRAM_API_BASE || 'https://api.telegram.org';
-      const allowedUpdates = encodeURIComponent(JSON.stringify(['message', 'callback_query', 'chat_member', 'my_chat_member']));
-      const response = await telegramFetch(`${tgApiBase}/bot${botToken}/setWebhook?url=${encodeURIComponent(webhookUrl)}&allowed_updates=${allowedUpdates}`);
-      const data = await response.json();
-      return res.json({
-        success: true,
-        message: 'Telegram webhook setup attempted',
-        webhookUrl,
-        telegramResponse: data
-      });
-    } catch (err: any) {
-      return res.status(500).json({ error: 'Webhook setup failed', details: err.message });
-    }
-  });
-
-  // Telegram webhook router
-  app.post('/api/telegram-webhook', async (req, res, next) => {
-    const update = req.body || {};
-    const chatKey = String(
-      update.callback_query?.message?.chat?.id
-      || update.callback_query?.from?.id
-      || update.message?.chat?.id
-      || update.chat_member?.chat?.id
-      || update.my_chat_member?.chat?.id
-      || 'unknown',
-    );
-    const previous = telegramChatUpdateQueues.get(chatKey) || Promise.resolve();
-    let releaseQueue!: () => void;
-    const gate = new Promise<void>((resolve) => { releaseQueue = resolve; });
-    const tail = previous.catch(() => undefined).then(() => gate);
-    telegramChatUpdateQueues.set(chatKey, tail);
-    await previous.catch(() => undefined);
-
-    let released = false;
-    const release = () => {
-      if (released) return;
-      released = true;
-      releaseQueue();
-      void tail.finally(() => {
-        if (telegramChatUpdateQueues.get(chatKey) === tail) telegramChatUpdateQueues.delete(chatKey);
-      });
-    };
-    res.once('finish', release);
-    res.once('close', release);
-    next();
-  }, async (req, res) => {
-    const update = req.body;
+  async function handleTelegramUpdate(update: any) {
+    const res = { json: <T>(body: T) => body };
 
     const membershipUpdate = update.chat_member || update.my_chat_member;
     if (membershipUpdate?.chat && membershipUpdate?.new_chat_member?.user) {
@@ -2792,7 +3808,7 @@ async function startServer() {
       const fromUser = callback.from;
       const chatId = callback.message?.chat?.id || fromUser.id;
       const state = loadDatabase();
-      const user = state.users.find(u => u.telegramId === String(fromUser.id));
+      const user = state.users.find(u => isUserActive(u) && u.telegramId === String(fromUser.id));
 
       if (!user) {
         await answerCallback(callback.id, 'Сначала напиши /start');
@@ -3015,35 +4031,48 @@ async function startServer() {
         const pendingSlots = currentSlotDraft(chatKey, user, state);
         const hardUnavailableDays = currentSlotUnavailableDays(chatKey, user, state, pendingSlots);
         const outWeekIndexes = currentSlotOutWeekIndexes(chatKey, user, state);
-        const savedSlots = cloneValidSlotSelection(state, alignedAvailabilitySlots(state.availabilities[user.id]));
-        const savedUnavailable = new Set(alignedHardUnavailableDays(state.availabilities[user.id]));
-        const savedOutWeeks = new Set(alignedOutWeekIndexes(state.availabilities[user.id]));
         const dayIndexes = savingDay ? [targetIndex] : Array.from({ length: 7 }, (_, offset) => weekIndex * 7 + offset);
-        for (const dayIndex of dayIndexes) {
-          if (pendingSlots[dayIndex]?.length) savedSlots[dayIndex] = [...pendingSlots[dayIndex]];
-          else delete savedSlots[dayIndex];
-          if (hardUnavailableDays.includes(dayIndex)) savedUnavailable.add(dayIndex);
-          else savedUnavailable.delete(dayIndex);
-        }
-        if (!savingDay) {
-          if (outWeekIndexes.includes(weekIndex)) savedOutWeeks.add(weekIndex);
-          else savedOutWeeks.delete(weekIndex);
-        }
-        state.availabilities[user.id] = {
-          userId: user.id,
-          slots: savedSlots,
-          hardUnavailableDays: [...savedUnavailable].sort((a, b) => a - b),
-          outWeekIndexes: [...savedOutWeeks].sort((a, b) => a - b),
-          weekStart: currentWeekStartIso(),
-          updatedAt: new Date().toISOString(),
-        };
-        if (!saveDatabase(state)) {
+        let savedState: SimulationState;
+        let savedVersion: number;
+        try {
+          const mutation = mutateDatabaseAtomically((latestState) => {
+            const config = normalizeAvailabilityConfig(latestState.settings);
+            const targetWeekStart = config.weekStarts[weekIndex];
+            const currentAligned = alignAvailabilityToWeek(latestState.availabilities[user.id], currentWeekStartIso(), config.weekCount);
+            const days = Object.fromEntries(Array.from({ length: 7 }, (_, relativeDay) => {
+              const absoluteDay = weekIndex * 7 + relativeDay;
+              const source = dayIndexes.includes(absoluteDay) ? pendingSlots : currentAligned.slots;
+              return [relativeDay, [...(source[absoluteDay] || [])]];
+            }));
+            const unavailableSource = new Set(currentAligned.hardUnavailableDays);
+            dayIndexes.forEach((dayIndex) => {
+              if (hardUnavailableDays.includes(dayIndex)) unavailableSource.add(dayIndex);
+              else unavailableSource.delete(dayIndex);
+            });
+            const expected = chatSlotDrafts.get(chatKey)?.weekVersions?.[targetWeekStart]
+              ?? Number(latestState.availabilities[user.id]?.weekVersions?.[targetWeekStart] || 0);
+            const replaced = replaceAvailabilityWeek(latestState.availabilities[user.id], user.id, currentWeekStartIso(), latestState.settings, {
+              weekStart: targetWeekStart,
+              days,
+              hardUnavailableDays: [...unavailableSource].filter((day) => Math.floor(day / 7) === weekIndex).map((day) => day - weekIndex * 7),
+              out: !savingDay && outWeekIndexes.includes(weekIndex),
+              expectedVersion: expected,
+            });
+            latestState.availabilities[user.id] = replaced.availability;
+            return replaced;
+          });
+          savedState = mutation.state;
+          savedVersion = mutation.value.version;
+        } catch (error) {
           await answerCallback(callback.id, 'Не удалось сохранить. Попробуй ещё раз.');
+          const conflicted = error instanceof AvailabilityWeekConflictError;
           await updateInlinePanel(
             chatId,
             callbackMessageId,
-            '⚠️ *Слоты пока не сохранены*\n\nЧерновик не потерян. Повтори сохранение.',
-            [[{ text: 'Повторить', callback_data: action }]],
+            conflicted
+              ? '⚠️ *Неделя уже изменилась*\n\nЧерновик не потерян. Открой слоты заново, проверь изменения и повтори сохранение.'
+              : '⚠️ *Слоты пока не сохранены*\n\nЧерновик не потерян. Повтори сохранение.',
+            [[{ text: conflicted ? 'Открыть слоты' : 'Повторить', callback_data: conflicted ? 'slot_edit' : action }]],
           );
           return res.json({ ok: true });
         }
@@ -3052,8 +4081,13 @@ async function startServer() {
         await answerCallback(callback.id, savingDay ? 'День сохранён' : 'Неделя сохранена');
         if (savingDay) {
           const draft = chatSlotDrafts.get(chatKey);
-          if (draft) draft.dayBaseline = undefined;
-          await showSlotWeekPanel(chatId, user, state, weekIndex, callbackMessageId);
+          const targetWeekStart = normalizeAvailabilityConfig(savedState.settings).weekStarts[weekIndex];
+          if (draft) {
+            draft.dayBaseline = undefined;
+            draft.weekVersions = { ...(draft.weekVersions || {}), [targetWeekStart]: savedVersion };
+          }
+          persistChatPanelMessageIds();
+          await showSlotWeekPanel(chatId, user, savedState, weekIndex, callbackMessageId);
         } else {
           chatSessions.delete(chatKey);
           chatSlotDrafts.delete(chatKey);
@@ -3086,25 +4120,40 @@ async function startServer() {
       }
 
       if (action.startsWith('meeting_rsvp:')) {
-        const meetingId = action.split(':')[1];
+        try {
+        const [, meetingId, requestedResponse] = action.split(':');
         const meeting = state.meetings.find((item) => item.id === meetingId && item.status === 'scheduled');
         if (!meeting) {
           await answerCallback(callback.id, 'Собрание больше неактуально');
           return res.json({ ok: true });
         }
-        const wasAttending = (meeting.attendeeIds || []).includes(user.id);
-        const result = updateMeetingAttendance(meeting, user.id, !wasAttending);
+        if (!meetingRecipientIds(state, meeting).has(user.id)) {
+          await answerCallback(callback.id, 'Вы не приглашены на эту встречу');
+          return res.json({ ok: true });
+        }
+        if (meetingPhase(meeting) === 'past') {
+          await answerCallback(callback.id, 'Встреча уже завершилась');
+          return res.json({ ok: true });
+        }
+        const currentResponse = meetingRsvpFor(meeting, user.id);
+        const response = requestedResponse === 'yes' || requestedResponse === 'no' || requestedResponse === 'unanswered'
+          ? requestedResponse
+          : currentResponse === 'yes' ? 'no' : 'yes';
+        const result = setMeetingRsvp(meeting, user.id, response);
         saveDatabase(state, { changedMeetingIds: [meeting.id] });
         if (result.changed) await syncPersistedMeetingCalendar(meeting.id);
-        await answerCallback(callback.id, result.attending ? 'Отметил: вы придёте' : 'Отметку снял: вы не придёте');
-        const currentKeyboard = callback.message?.reply_markup?.inline_keyboard;
-        if (Array.isArray(currentKeyboard) && callbackMessageId) {
-          const confirmedKeyboard = currentKeyboard.map((row: any[]) => row.map((button: any) => (
-            button.callback_data === action ? { ...button, text: result.attending ? '❌ Я не приду' : '✅ Я приду' } : button
-          )));
+        const answerText = response === 'yes' ? 'Отметил: вы придёте' : response === 'no' ? 'Отметил: вы не придёте' : 'Ответ сброшен';
+        await answerCallback(callback.id, answerText);
+        if (callbackMessageId) {
+          const confirmedKeyboard = meetingRsvpButtons(meeting, user.id).map((button) => [{ text: button.text, callback_data: button.action }]);
           await editTelegramReplyMarkup(chatId, callbackMessageId, confirmedKeyboard);
         }
         return res.json({ ok: true });
+        } catch (error) {
+          console.error('Meeting RSVP callback failed:', error);
+          await answerCallback(callback.id, 'Не удалось сохранить ответ');
+          return res.json({ ok: false });
+        }
       }
 
       if (action.startsWith('task_view:')) {
@@ -3149,16 +4198,17 @@ async function startServer() {
         }
         task.assignedTo = [user.id];
         task.status = 'assigned';
+        task.version = Number(task.version || 1) + 1;
         saveDatabase(state);
         await answerCallback(callback.id, 'Задача закреплена за тобой');
         await sendTaskGroupMessage(chatId, `Ты взял задачу:\n\n${taskDetailsText(task, state)}`);
         await showTasksPanel(chatId, user, state);
         const creator = state.users.find(u => u.id === task.creatorId);
         const notifyClaimText = `Задачу "${task.title}" подхватил ${userMention(user)}.\n\nСвязаться: ${user.username}`;
-        if (creator?.telegramId && creator.id !== user.id) {
+    if (creator?.telegramId && isUserActive(creator) && creator.id !== user.id) {
           await sendTaskTelegramMessage(creator.telegramId, notifyClaimText);
         }
-        for (const admin of state.users.filter(u => u.role === 'admin' && u.telegramId && u.id !== user.id && u.id !== creator?.id)) {
+        for (const admin of state.users.filter(u => u.role === 'admin' && isUserActive(u) && u.telegramId && u.id !== user.id && u.id !== creator?.id)) {
           await sendTaskTelegramMessage(admin.telegramId!, notifyClaimText);
         }
         return res.json({ ok: true });
@@ -3171,24 +4221,36 @@ async function startServer() {
           await answerCallback(callback.id, 'Задача не найдена');
           return res.json({ ok: true });
         }
-        const currentAssignees = assignedIds(task);
-        if (!currentAssignees.includes(user.id)) {
-          await answerCallback(callback.id, 'Эта задача не на тебе');
+        if (task.status === 'cancelled' || task.status === 'completed') {
+          await answerCallback(callback.id, task.status === 'cancelled' ? 'Задача отменена' : 'Задача уже завершена');
           return res.json({ ok: true });
         }
-        task.assignedTo = null;
-        task.status = 'open';
-        task.completedAt = '';
-        task.timeSpentMinutes = undefined;
+        let released;
+        try {
+          released = releaseTaskCommand(task, user.id);
+        } catch (error) {
+          await answerCallback(callback.id, error instanceof TaskCommandError ? error.message : 'Не удалось изменить задачу');
+          await showTasksPanel(chatId, user, state);
+          return res.json({ ok: true });
+        }
+        if (!released.changed) {
+          await answerCallback(callback.id, 'Ты уже не назначен на эту задачу');
+          return res.json({ ok: true });
+        }
         saveDatabase(state);
-        await answerCallback(callback.id, 'Задача возвращена на биржу');
-        await sendTaskGroupMessage(chatId, `Ты отказался от задачи *"${task.title}"*. Она снова открыта.`);
+        await answerCallback(callback.id, released.becameOpen ? 'Задача снова открыта' : 'Ты снят с задачи');
+        await sendTaskGroupMessage(chatId, released.becameOpen
+          ? `Ты отказался от задачи *"${task.title}"*. Она снова открыта.`
+          : `Ты отказался от задачи *"${task.title}"*. Остальные исполнители сохранены.`);
         await showTasksPanel(chatId, user, state);
         const creator = state.users.find(u => u.id === task.creatorId);
-        if (creator?.telegramId && creator.id !== user.id) {
-          await sendTaskTelegramMessage(creator.telegramId, `${userMention(user)} отказался от задачи *"${task.title}"*. Она снова на бирже.`);
+        if (creator?.telegramId && isUserActive(creator) && creator.id !== user.id) {
+          const remainingNames = released.remainingAssigneeIds.map((id) => state.users.find((item) => item.id === id)?.realName || id).join(', ');
+          await sendTaskTelegramMessage(creator.telegramId, released.becameOpen
+            ? `${userMention(user)} отказался от задачи *"${task.title}"*. Она снова на бирже.`
+            : `${userMention(user)} отказался от задачи *"${task.title}"*. Остались: ${remainingNames}.`);
         }
-        for (const target of state.users.filter(u => u.telegramId && u.id !== user.id)) {
+        for (const target of released.becameOpen ? state.users.filter(u => isUserActive(u) && u.telegramId && u.id !== user.id && u.id !== creator?.id) : []) {
           await sendTaskTelegramMessage(target.telegramId!, `Задача снова свободна:\n\n${taskDetailsText(task, state)}`, [{ text: 'Посмотреть задачу', action: 'open_tasks' }], false, target);
         }
         return res.json({ ok: true });
@@ -3197,15 +4259,18 @@ async function startServer() {
       if (action.startsWith('task_complete:')) {
         const taskId = action.split(':')[1];
         const task = state.tasks.find((item) => item.id === taskId);
-        if (!task || !assignedIds(task).includes(user.id)) {
+        if (!task || ['cancelled', 'completed'].includes(task.status) || !assignedIds(task).includes(user.id)) {
           await answerCallback(callback.id, 'Задача не найдена');
           return res.json({ ok: true });
         }
         chatSessions.set(String(chatId), { flow: 'task_complete_time', completionTaskId: task.id });
         await answerCallback(callback.id);
+        const sharedCompletionNotice = assignedIds(task).length > 1
+          ? `\n\nОбщая задача для ${assignedIds(task).length} исполнителей: завершение закроет её для всех.`
+          : '';
         await sendTaskTelegramKeyboard(
           chatId,
-          `Задача *"${task.title}"* готова.\n\nСколько времени ушло на выполнение? Это необязательно, но поможет планировать нагрузку.`,
+          `Задача *"${task.title}"* готова.${sharedCompletionNotice}\n\nСколько времени ушло на выполнение? Это необязательно, но поможет планировать нагрузку.`,
           [['15 минут', '30 минут'], ['1 час', '2 часа'], ['Указать вручную'], ['Не указывать', 'Назад']],
           false,
           user,
@@ -3397,9 +4462,12 @@ async function startServer() {
 
         if (commandName === 'meeting') {
           const nextMeeting = state.meetings
-            .filter((meeting) => meeting.status === 'scheduled' && meetingDateTime(meeting) >= Date.now())
+            .filter((meeting) => meeting.status === 'scheduled' && meetingPhase(meeting) !== 'past')
             .slice()
-            .sort((a, b) => meetingDateTime(a) - meetingDateTime(b))[0];
+            .sort((a, b) => {
+              const phaseOrder = Number(meetingPhase(a) !== 'ongoing') - Number(meetingPhase(b) !== 'ongoing');
+              return phaseOrder || meetingStartTimestamp(a) - meetingStartTimestamp(b);
+            })[0];
           await sendGroupMessage(chatId, nextMeeting
             ? `*Ближайшая встреча*\n\n${meetingDetailsText(nextMeeting, state)}`
             : 'Ближайших встреч нет.', false, messageThreadId);
@@ -3422,7 +4490,7 @@ async function startServer() {
         }
 
         if (commandName === 'slots') {
-          const team = state.users.filter((member) => !isFacultyUser(member));
+          const team = state.users.filter((member) => !isFacultyUser(member) && isUserActive(member));
           const missing = team.filter((member) => !hasSubmittedAvailabilityForWeek(state.availabilities[member.id], state.settings));
           await sendGroupMessage(chatId, missing.length
             ? `*Ещё не отметили слоты (${missing.length}):*\n${missing.map((member) => member.username).join(' ')}`
@@ -3503,7 +4571,7 @@ async function startServer() {
         user.lastSeenAt = new Date().toISOString();
       }
       await deleteTelegramMessage(chatId, update.message.message_id);
-      if (isEnvAdmin(fromUser.id, fromUser.username) && user.role !== 'admin') {
+      if (isEnvAdmin(fromUser.id) && user.role !== 'admin') {
         user.role = 'admin';
       }
       if (text.toLowerCase().startsWith('/start') || isRegistrationPrompt(text)) {
@@ -3512,7 +4580,7 @@ async function startServer() {
 
       if (!state.messages[user.id]) state.messages[user.id] = [];
       state.messages[user.id].push({
-        id: 'usr_' + Date.now(),
+        id: `usr_${crypto.randomUUID()}`,
         userId: user.id,
         sender: 'user',
         text,
@@ -3597,25 +4665,44 @@ async function startServer() {
             return res.json({ ok: true });
           }
           chatSessions.set(chatKey, { flow: 'faculty_task_confirm', selectedTaskId: task.id, selectedStatus });
-          await sendTelegramKeyboard(chatId, `Подтвердить смену статуса?\n\n${task.title}\nНовый статус: ${taskStatusLabel(selectedStatus)}`, [['Подтвердить'], ['Назад']], false, user);
+          const sharedCompletionNotice = selectedStatus === 'completed' && assignedIds(task).length > 1
+            ? `\n\nОбщая задача для ${assignedIds(task).length} исполнителей: завершение закроет её для всех.`
+            : '';
+          await sendTelegramKeyboard(chatId, `Подтвердить смену статуса?\n\n${task.title}\nНовый статус: ${taskStatusLabel(selectedStatus)}${sharedCompletionNotice}`, [['Подтвердить'], ['Назад']], false, user);
           return res.json({ ok: true });
         }
 
         if (session?.flow === 'faculty_task_confirm' && normalizedText === 'подтвердить') {
-          const task = state.tasks.find((item) => item.id === session.selectedTaskId);
+          const latestState = loadDatabase();
+          const task = latestState.tasks.find((item) => item.id === session.selectedTaskId);
           if (!task || !session.selectedStatus) {
             chatSessions.delete(chatKey);
             await sendTelegramKeyboard(chatId, 'Задача не найдена. Открой список заново.', [['Мои задачи', 'Помощь']], false, user);
             return res.json({ ok: true });
           }
-          task.status = session.selectedStatus;
-          task.completedAt = session.selectedStatus === 'completed' ? new Date().toISOString() : '';
-          const creator = state.users.find((item) => item.id === task.creatorId);
+          if (!assignedIds(task).includes(user.id) || task.status === 'cancelled' || task.status === 'completed') {
+            chatSessions.delete(chatKey);
+            await sendTelegramKeyboard(chatId, 'Задача уже изменилась и этот переход больше недоступен. Открой список заново.', [['Мои задачи', 'Помощь']], false, user);
+            return res.json({ ok: true });
+          }
+          if (session.selectedStatus === 'completed') {
+            completeTaskCommand(task, user.id);
+          } else {
+            task.status = session.selectedStatus;
+            task.version = Number(task.version || 1) + 1;
+            task.assignmentMode = 'shared';
+            task.completedAt = '';
+            task.completedBy = undefined;
+          }
+          const creator = latestState.users.find((item) => item.id === task.creatorId);
+          chatSessions.delete(chatKey);
+          if (!saveDatabase(latestState)) {
+            await sendTelegramKeyboard(chatId, 'Не удалось сохранить статус. Попробуй ещё раз.', [['Мои задачи', 'Помощь']], false, user);
+            return res.json({ ok: true });
+          }
           if (creator?.telegramId) {
             await sendTaskTelegramMessage(creator.telegramId, `Статус задачи изменён.\n\nЗадача: ${task.title}\nИсполнитель: ${userMention(user)}\nСтатус: ${taskStatusLabel(task.status)}`);
           }
-          chatSessions.delete(chatKey);
-          saveDatabase(state);
           await sendTelegramKeyboard(chatId, `Готово. Статус задачи "${task.title}" теперь: ${taskStatusLabel(task.status)}.`, [['Мои задачи', 'Помощь']], false, user);
           return res.json({ ok: true });
         }
@@ -3636,9 +4723,15 @@ async function startServer() {
         saveDatabase(state);
         return res.json({ ok: true });
       }
-      if (normalizedText === 'меню' || normalizedText === 'профиль') {
+      const navigationTarget = chatNavigationTarget(text);
+      if (navigationTarget) {
         chatSessions.delete(chatKey);
-        await showProfilePanel(chatId, user, state);
+        if (navigationTarget === 'profile') await showProfilePanel(chatId, user, state);
+        if (navigationTarget === 'slots') await showSlotsPanel(chatId, user, state);
+        if (navigationTarget === 'meetings') await showMeetingsPanel(chatId, user, state);
+        if (navigationTarget === 'tasks') await showTasksPanel(chatId, user, state);
+        if (navigationTarget === 'team') await showTeamPanel(chatId, user, state);
+        if (navigationTarget === 'faculties') await showFacultiesPanel(chatId, user, state);
         return res.json({ ok: true });
       }
 
@@ -3704,9 +4797,14 @@ async function startServer() {
           return res.json({ ok: true });
         }
         const completionComment = normalizedText === 'без комментария' ? '' : text.trim();
-        await completeTaskFromChat(state, task, user, session.completionTimeMinutes, completionComment);
+        const completed = await completeTaskFromChat(state, task, user, session.completionTimeMinutes, completionComment);
+        if (!completed.ok) {
+          chatSessions.delete(chatKey);
+          await sendTaskTelegramKeyboard(chatId, `${completed.error} Открой список задач заново.`, [['Управлять задачами'], ['Меню']], false, user);
+          return res.json({ ok: true });
+        }
         chatSessions.delete(chatKey);
-        await showTasksPanel(chatId, user, state);
+        await showTasksPanel(chatId, user, loadDatabase());
         return res.json({ ok: true });
       }
 
@@ -3888,10 +4986,16 @@ async function startServer() {
           await sendTelegramKeyboard(chatId, 'В этом блоке нет участников. Выбери другой блок.', flowKeyboardRows(['Выбрать блок'], 1));
           return res.json({ ok: true });
         }
+        const meetingDate = session.meetingDate || nextShortDate(1);
+        const scheduleError = meetingScheduleError(meetingDate, meetingTime, 1, freshState.settings, 'meeting');
+        if (scheduleError) {
+          await sendTelegramKeyboard(chatId, `${scheduleError}. Введи другое время или нажми «Назад», чтобы изменить дату.`, flowKeyboardRows(['Назад'], 1));
+          return res.json({ ok: true });
+        }
         const meeting = await createMeetingAndNotify(freshState, {
           title: isBlockMeeting ? `Собрание блока ${session.competency}` : 'Общее собрание',
           type: isBlockMeeting ? 'custom' : 'general',
-          date: session.meetingDate || nextShortDate(1),
+          date: meetingDate,
           time: meetingTime,
           hostId: user.id,
           participants: isBlockMeeting ? participantIds : 'all',
@@ -3907,7 +5011,7 @@ async function startServer() {
       if (session?.flow === 'team_search') {
         const query = normalizedText.replace(/^@/, '');
         const matches = state.users.filter((member) => (
-          !isFacultyUser(member)
+          !isFacultyUser(member) && isUserActive(member)
           && `${member.realName} ${member.username}`.toLowerCase().includes(query)
         )).slice(0, 10);
         chatSessions.set(chatKey, { flow: 'team_submenu' });
@@ -3962,11 +5066,11 @@ async function startServer() {
           return res.json({ ok: true });
         }
         const newUser: User = {
-          id: `u_${Date.now()}`,
+          id: `u_${crypto.randomUUID()}`,
           username: session.draftUsername || '',
           realName: session.draftName || session.draftUsername || 'Участник',
           role,
-          avatarSeed: session.draftUsername || String(Date.now()),
+          avatarSeed: session.draftUsername || crypto.randomUUID(),
           birthday: session.draftBirthday,
           registered: false,
           competencies: [],
@@ -3984,7 +5088,7 @@ async function startServer() {
       }
 
       if (session?.flow === 'task_create_scope') {
-        const team = state.users.filter((member) => !isFacultyUser(member));
+        const team = state.users.filter((member) => !isFacultyUser(member) && isUserActive(member));
         if (normalizedText === 'блоку') {
           chatSessions.set(chatKey, { ...session, flow: 'task_create_block', taskAssignmentMode: 'block' });
           await sendTaskTelegramKeyboard(chatId, 'Выбери блок.', flowKeyboardRows(state.competencies || [], 3), false, user);
@@ -4014,7 +5118,7 @@ async function startServer() {
           return res.json({ ok: true });
         }
         const assigneeIds = state.users
-          .filter((member) => !isFacultyUser(member) && member.competencies?.includes(competency))
+          .filter((member) => !isFacultyUser(member) && isUserActive(member) && member.competencies?.includes(competency))
           .map((member) => member.id);
         if (!assigneeIds.length) {
           await sendTaskTelegramKeyboard(chatId, 'В этом блоке нет участников. Выбери другой блок.', flowKeyboardRows(state.competencies || [], 3), false, user);
@@ -4025,9 +5129,9 @@ async function startServer() {
       }
 
       if (session?.flow === 'task_create_person') {
-        const member = state.users.find((candidate) => !isFacultyUser(candidate) && candidate.realName.toLowerCase() === normalizedText);
+        const member = state.users.find((candidate) => !isFacultyUser(candidate) && isUserActive(candidate) && candidate.realName.toLowerCase() === normalizedText);
         if (!member) {
-          await sendTaskTelegramKeyboard(chatId, 'Выбери человека кнопкой.', flowKeyboardRows(state.users.filter((candidate) => !isFacultyUser(candidate)).map((candidate) => candidate.realName), 3), false, user);
+          await sendTaskTelegramKeyboard(chatId, 'Выбери человека кнопкой.', flowKeyboardRows(state.users.filter((candidate) => !isFacultyUser(candidate) && isUserActive(candidate)).map((candidate) => candidate.realName), 3), false, user);
           return res.json({ ok: true });
         }
         await beginChatTaskDetails(chatId, user, state, { ...session, taskAssigneeIds: [member.id] });
@@ -4216,7 +5320,7 @@ async function startServer() {
         replyText = 'Выбери раздел кнопкой внизу.';
       }
       state.messages[user.id].push({
-        id: 'bot_' + Date.now(),
+        id: `bot_${crypto.randomUUID()}`,
         userId: user.id,
         sender: 'bot',
         text: replyText,
@@ -4229,7 +5333,96 @@ async function startServer() {
       await sendTelegramKeyboard(chatId, replyText, buildChatKeyboard(false, user).keyboard.map((row: any[]) => row.map((item) => item.text)), false, user);
     }
 
-    res.json({ ok: true });
+    return res.json({ ok: true });
+  }
+
+  async function queueTelegramUpdate(update: any) {
+    const chatKey = String(
+      update.callback_query?.message?.chat?.id
+      || update.callback_query?.from?.id
+      || update.message?.chat?.id
+      || update.chat_member?.chat?.id
+      || update.my_chat_member?.chat?.id
+      || 'unknown',
+    );
+    const previous = telegramChatUpdateQueues.get(chatKey) || Promise.resolve();
+    let releaseQueue!: () => void;
+    const gate = new Promise<void>((resolve) => { releaseQueue = resolve; });
+    const tail = previous.catch(() => undefined).then(() => gate);
+    telegramChatUpdateQueues.set(chatKey, tail);
+    await previous.catch(() => undefined);
+    try {
+      return await handleTelegramUpdate(update);
+    } finally {
+      releaseQueue();
+      void tail.finally(() => {
+        if (telegramChatUpdateQueues.get(chatKey) === tail) telegramChatUpdateQueues.delete(chatKey);
+      });
+    }
+  }
+
+  function persistTelegramUpdates(updates: unknown[]) {
+    return mutateDatabaseAtomically((state) => recordTelegramUpdates(state, updates)).value;
+  }
+
+  async function flushTelegramInbox() {
+    markWorkerHeartbeat('telegram_inbox');
+    if (telegramInboxFlushPromise) return telegramInboxFlushPromise;
+    telegramInboxFlushPromise = (async () => {
+      while (true) {
+        const snapshot = loadDatabase();
+        const inbox = snapshot.settings?.telegramInbox || [];
+        const nowMs = Date.now();
+        const candidate = inbox.slice().sort((a, b) => a.updateId - b.updateId).find((entry) => {
+          const due = ((entry.status === 'received' || entry.status === 'retry') && Date.parse(entry.availableAt) <= nowMs)
+            || (entry.status === 'processing' && (!entry.leasedUntil || Date.parse(entry.leasedUntil) <= nowMs));
+          if (!due) return false;
+          return !inbox.some((earlier) => earlier.chatKey === entry.chatKey && earlier.updateId < entry.updateId
+            && earlier.status !== 'completed' && earlier.status !== 'failed');
+        });
+        if (!candidate) break;
+        const claimed = mutateDatabaseAtomically((state) => {
+          const entry = state.settings?.telegramInbox?.find((item) => item.updateId === candidate.updateId);
+          if (!entry) return undefined;
+          const leaseToken = claimTelegramInboxEntry(entry, new Date());
+          return leaseToken ? { entry: structuredClone(entry), leaseToken } : undefined;
+        }).value;
+        if (!claimed) continue;
+        try {
+          const failOnceId = Number(process.env.TELEGRAM_INBOX_FAIL_UPDATE_ONCE || -1);
+          if (claimed.entry.updateId === failOnceId && claimed.entry.attempts === 1) {
+            throw new Error('Injected Telegram inbox processing failure');
+          }
+          await queueTelegramUpdate(claimed.entry.payload);
+          mutateDatabaseAtomically((state) => {
+            const entry = state.settings?.telegramInbox?.find((item) => item.updateId === claimed.entry.updateId);
+            if (entry) completeTelegramInboxEntry(entry, claimed.leaseToken);
+          });
+        } catch (error) {
+          console.error(`Telegram inbox update ${claimed.entry.updateId} failed:`, error);
+          mutateDatabaseAtomically((state) => {
+            const entry = state.settings?.telegramInbox?.find((item) => item.updateId === claimed.entry.updateId);
+            if (entry) failTelegramInboxEntry(entry, claimed.leaseToken, error);
+          });
+        }
+      }
+    })().finally(() => { telegramInboxFlushPromise = null; });
+    return telegramInboxFlushPromise;
+  }
+
+  app.post('/api/telegram-webhook', async (req, res, next) => {
+    try {
+      const update = req.body || {};
+      if (!Number.isSafeInteger(Number(update.update_id)) || Number(update.update_id) < 0) {
+        return res.status(400).json({ error: 'Telegram update_id is required' });
+      }
+      const persisted = persistTelegramUpdates([update]);
+      const processing = flushTelegramInbox();
+      if (process.env.TELEGRAM_INBOX_AWAIT_PROCESSING === 'true') await processing;
+      return res.json({ ok: true, updateId: Number(update.update_id), duplicate: persisted.inserted.length === 0 });
+    } catch (error) {
+      return next(error);
+    }
   });
 
   // Add a new user (Team member)
@@ -4256,7 +5449,7 @@ async function startServer() {
       return res.status(400).json({ error: 'Пользователь с таким Telegram username уже есть в команде' });
     }
 
-    const newUserId = 'u_' + Date.now();
+    const newUserId = `u_${crypto.randomUUID()}`;
     const newUser: User = {
       id: newUserId,
       username: sanitizedUsername,
@@ -4274,7 +5467,7 @@ async function startServer() {
     // Initialize empty message history with a welcome message
     state.messages[newUserId] = [
       {
-        id: 'msg_welcome_' + Date.now(),
+        id: `msg_welcome_${crypto.randomUUID()}`,
         userId: newUserId,
         sender: 'bot',
         text: `Привет, ${realName}! Тебя добавили в команду как ${role === 'admin' ? 'админа' : 'организатора'}. Открой Mini App, чтобы отметить свободные слоты.`,
@@ -4282,27 +5475,24 @@ async function startServer() {
       }
     ];
 
-    saveDatabase(state);
+    if (!saveDatabase(state)) return res.status(503).json({ error: 'Не удалось надёжно сохранить изменение. Повторите позже.' });
     res.json({ success: true, user: newUser });
   });
 
   // Delete a user (Team member)
   app.post('/api/user/delete', (req, res) => {
-    const { requesterId, userId } = req.body;
+    const { requesterId, userId, confirmTaskRelease } = req.body;
     const state = loadDatabase();
 
     if (!isAdminUser(state, requesterId)) {
       return res.status(403).json({ error: 'Удалять участников может только админ' });
     }
 
-    state.users = state.users.filter(u => u.id !== userId);
-
-    // Clean up their availabilities
-    delete state.availabilities[userId];
-    delete state.messages[userId];
-
-    saveDatabase(state);
-    res.json({ success: true });
+    const result = deactivateUser(state, String(userId || ''), requesterId, confirmTaskRelease === true);
+    if (!result.ok) return res.status(result.status).json(result);
+    if (!saveDatabase(state)) return res.status(503).json({ error: 'Не удалось надёжно сохранить изменение. Повторите позже.' });
+    revokeUserSessions(userId);
+    res.json({ success: true, user: result.user, impact: result.impact });
   });
 
   // Update user birthday or details
@@ -4338,6 +5528,10 @@ async function startServer() {
     }
     if (role !== undefined) {
       if (role !== 'admin' && role !== 'organizer') return res.status(400).json({ error: 'Неизвестная роль участника' });
+      if (user.role === 'admin' && role !== 'admin') {
+        const activeAdmins = state.users.filter((member) => member.role === 'admin' && isUserActive(member));
+        if (activeAdmins.length <= 1) return res.status(409).json({ error: 'Нельзя изменить роль последнего активного администратора' });
+      }
       user.role = role;
     }
     if (birthday !== undefined) {
@@ -4365,7 +5559,7 @@ async function startServer() {
       user.avatarDataUrl = cleanAvatar || undefined;
     }
 
-    saveDatabase(state);
+    if (!saveDatabase(state)) return res.status(503).json({ error: 'Не удалось надёжно сохранить изменение. Повторите позже.' });
     res.json({ success: true, user });
   });
 
@@ -4381,7 +5575,7 @@ async function startServer() {
     if (!state.competencies.some((item) => item.toLowerCase() === cleanName.toLowerCase())) {
       state.competencies.push(cleanName);
     }
-    saveDatabase(state);
+    if (!saveDatabase(state)) return res.status(503).json({ error: 'Не удалось надёжно сохранить изменение. Повторите позже.' });
     refreshGroupCommandMenus();
     res.json({ success: true, competencies: state.competencies });
   });
@@ -4398,7 +5592,7 @@ async function startServer() {
       user.competencies = (user.competencies || []).filter((item) => item !== cleanName);
       if (user.primaryCompetency === cleanName) user.primaryCompetency = '';
     });
-    saveDatabase(state);
+    if (!saveDatabase(state)) return res.status(503).json({ error: 'Не удалось надёжно сохранить изменение. Повторите позже.' });
     refreshGroupCommandMenus();
     res.json({ success: true, competencies: state.competencies });
   });
@@ -4415,7 +5609,7 @@ async function startServer() {
     if (!state.facultyCompetencies.some((item) => item.toLowerCase() === cleanName.toLowerCase())) {
       state.facultyCompetencies.push(cleanName);
     }
-    saveDatabase(state);
+    if (!saveDatabase(state)) return res.status(503).json({ error: 'Не удалось надёжно сохранить изменение. Повторите позже.' });
     res.json({ success: true, facultyCompetencies: state.facultyCompetencies });
   });
 
@@ -4432,7 +5626,7 @@ async function startServer() {
       user.competencies = (user.competencies || []).filter((item) => item !== cleanName);
       if (user.primaryCompetency === cleanName) user.primaryCompetency = '';
     });
-    saveDatabase(state);
+    if (!saveDatabase(state)) return res.status(503).json({ error: 'Не удалось надёжно сохранить изменение. Повторите позже.' });
     res.json({ success: true, facultyCompetencies: state.facultyCompetencies });
   });
 
@@ -4459,7 +5653,7 @@ async function startServer() {
       user.primaryCompetency = user.competencies[0] || '';
     } else {
       user = {
-        id: 'u_' + Date.now(),
+        id: `u_${crypto.randomUUID()}`,
         username: sanitizedUsername,
         realName,
         role,
@@ -4475,7 +5669,7 @@ async function startServer() {
       state.users.push(user);
       state.messages[user.id] = [];
     }
-    saveDatabase(state);
+    if (!saveDatabase(state)) return res.status(503).json({ error: 'Не удалось надёжно сохранить изменение. Повторите позже.' });
     res.json({ success: true, user });
   });
 
@@ -4504,25 +5698,23 @@ async function startServer() {
     user.facultyId = facultyId;
     user.competencies = cleanCompetencies;
     user.primaryCompetency = user.competencies[0] || '';
-    saveDatabase(state);
+    if (!saveDatabase(state)) return res.status(503).json({ error: 'Не удалось надёжно сохранить изменение. Повторите позже.' });
     res.json({ success: true, user });
   });
 
   app.post('/api/faculty/user/delete', (req, res) => {
-    const { requesterId, userId } = req.body;
+    const { requesterId, userId, confirmTaskRelease } = req.body;
     const state = loadDatabase();
     if (!isAdminUser(state, requesterId)) {
       return res.status(403).json({ error: 'Удалять ответственных может только админ' });
     }
     const user = state.users.find((u) => u.id === userId);
     if (!user || !isFacultyUser(user)) return res.status(404).json({ error: 'Ответственный не найден' });
-    state.users = state.users.filter((u) => u.id !== userId);
-    state.tasks.forEach((task) => {
-      const ids = assignedIds(task).filter((id) => id !== userId);
-      task.assignedTo = ids.length === 0 ? null : ids;
-    });
-    saveDatabase(state);
-    res.json({ success: true });
+    const result = deactivateUser(state, String(userId || ''), requesterId, confirmTaskRelease === true);
+    if (!result.ok) return res.status(result.status).json(result);
+    if (!saveDatabase(state)) return res.status(503).json({ error: 'Не удалось надёжно сохранить изменение. Повторите позже.' });
+    revokeUserSessions(userId);
+    res.json({ success: true, user: result.user, impact: result.impact });
   });
 
   app.post('/api/faculty/task/create', async (req, res) => {
@@ -4531,12 +5723,20 @@ async function startServer() {
     if (!isAdminUser(state, requesterId) && !state.users.some((u) => u.id === requesterId && u.role === 'organizer')) {
       return res.status(403).json({ error: 'Создавать задачи факультетам могут только мегаорги' });
     }
-    const assigneeIds = Array.isArray(assignedTo)
-      ? [...new Set(assignedTo.filter(Boolean))]
-          .filter((id) => state.users.some((user) => user.id === id && isFacultyUser(user)))
-      : [];
+    const validationErrors = taskPayloadFieldErrors({ title, description, deadline, assignedTo, reminders, competency, eventId }, true);
+    const facultyIdError = textFieldError(facultyId, 200, true);
+    if (facultyIdError) validationErrors.facultyId = facultyIdError;
+    if (Object.keys(validationErrors).length) return validationErrorResponse(res, validationErrors);
+    const assigneeIds = sanitizeTaskAssigneeIds(
+      state.users,
+      Array.isArray(assignedTo) ? assignedTo.filter(Boolean) : [],
+      String(facultyId || ''),
+    );
     if (!facultyId || !title || !deadline || assigneeIds.length === 0) {
       return res.status(400).json({ error: 'Заполни факультет, название, дедлайн и исполнителей' });
+    }
+    if (!parseProjectLocalDate(String(deadline))) {
+      return res.status(400).json({ error: 'Укажи существующую календарную дату дедлайна' });
     }
     const cleanEventId = String(eventId || '').trim();
     if (cleanEventId && !state.events?.some((item) => item.id === cleanEventId && item.status === 'active')) {
@@ -4544,14 +5744,15 @@ async function startServer() {
     }
     const cleanReminders: TaskReminder[] = Array.isArray(reminders)
       ? reminders.filter((item: any) => Number(item.value) > 0).slice(0, 3).map((item: any, index: number) => ({
-          id: 'rem_' + Date.now() + '_' + index,
+          id: `rem_${crypto.randomUUID()}`,
           type: item.type === 'repeat' ? 'repeat' : 'before_deadline',
           value: Math.max(1, Number(item.value) || 1),
           unit: item.unit === 'hours' ? 'hours' : 'days',
         }))
       : [];
     const task: Task = {
-      id: 't_' + Date.now(),
+      id: `t_${crypto.randomUUID()}`,
+      version: 1,
       title,
       description: String(description || '').trim(),
       deadline,
@@ -4566,31 +5767,34 @@ async function startServer() {
       priority: 'normal',
       createdAt: new Date().toISOString(),
       completedAt: '',
+      assignmentMode: 'shared',
       reminders: cleanReminders,
     };
     state.tasks.push(task);
-    for (const id of assigneeIds) {
-      const target = state.users.find((u) => u.id === id);
-      if (!target) continue;
+    const notifications: Array<{ target: User; text: string }> = [];
+    for (const target of resolveTaskAudienceUsers(state.users, task)) {
       const text = `Новая задача от MEGABATTLE:\n\n${taskDetailsText(task, state)}\n\nЧтобы поменять статус, нажми «Мои задачи».`;
       if (!state.messages[target.id]) state.messages[target.id] = [];
       state.messages[target.id].push({
-        id: `faculty_task_created_${Date.now()}_${target.id}`,
+        id: `faculty_task_created_${crypto.randomUUID()}`,
         userId: target.id,
         sender: 'bot',
         text,
         timestamp: new Date().toISOString(),
       });
       if (target?.telegramId) {
-        await sendTaskTelegramMessage(target.telegramId, text, undefined, false, target);
+        notifications.push({ target, text });
       }
     }
-    saveDatabase(state);
+    if (!saveDatabase(state)) return res.status(503).json({ error: 'Не удалось сохранить задачу. Повторите позже.' });
+    await Promise.allSettled(notifications.map(({ target, text }) => sendTaskTelegramMessage(
+      target.telegramId!, text, undefined, false, target,
+    )));
     res.json({ success: true, task });
   });
 
   app.post('/api/faculty/task/update', async (req, res) => {
-    const { requesterId, taskId, title, description, deadline, assignedTo, reminders, facultyId, competency, eventId } = req.body;
+    const { requesterId, taskId, version, title, description, deadline, assignedTo, reminders, facultyId, competency, eventId } = req.body;
     const state = loadDatabase();
     const task = state.tasks.find((item) => item.id === taskId);
     if (!task) return res.status(404).json({ error: 'Задача не найдена' });
@@ -4598,10 +5802,22 @@ async function startServer() {
     if (task.creatorId !== requesterId && !isAdminUser(state, requesterId)) {
       return res.status(403).json({ error: 'Редактировать задачу может автор или админ' });
     }
+    if (version !== undefined && Number(version) !== Number(task.version || 1)) {
+      return res.status(409).json({ error: 'Задача уже изменилась. Обновите данные и повторите правку.' });
+    }
+    const validationErrors = taskPayloadFieldErrors({ title, description, deadline, assignedTo, reminders, competency, eventId }, false);
+    if (facultyId !== undefined) {
+      const facultyIdError = textFieldError(facultyId, 200, true);
+      if (facultyIdError) validationErrors.facultyId = facultyIdError;
+    }
+    if (Object.keys(validationErrors).length) return validationErrorResponse(res, validationErrors);
     const previousAssigneeIds = new Set(assignedIds(task));
     if (title !== undefined) task.title = title;
     if (description !== undefined) task.description = description;
-    if (deadline !== undefined) task.deadline = deadline;
+    if (deadline !== undefined) {
+      if (!parseProjectLocalDate(String(deadline))) return res.status(400).json({ error: 'Укажи существующую календарную дату дедлайна' });
+      task.deadline = deadline;
+    }
     if (facultyId !== undefined) task.facultyId = facultyId;
     if (competency !== undefined) task.competency = String(competency || '').trim() || 'Факультет';
     if (eventId !== undefined) {
@@ -4610,13 +5826,15 @@ async function startServer() {
       task.eventId = cleanEventId;
     }
     if (Array.isArray(assignedTo)) {
-      const assigneeIds = [...new Set(assignedTo.filter(Boolean))]
-        .filter((id) => state.users.some((user) => user.id === id && isFacultyUser(user)));
+      const assigneeIds = sanitizeTaskAssigneeIds(state.users, assignedTo.filter(Boolean), task.facultyId);
+      task.assignedTo = assigneeIds.length ? assigneeIds : null;
+    } else if (facultyId !== undefined) {
+      const assigneeIds = sanitizeTaskAssigneeIds(state.users, assignedIds(task), task.facultyId);
       task.assignedTo = assigneeIds.length ? assigneeIds : null;
     }
     if (Array.isArray(reminders)) {
       task.reminders = reminders.filter((item: any) => Number(item.value) > 0).slice(0, 3).map((item: any, index: number) => ({
-        id: item.id || 'rem_' + Date.now() + '_' + index,
+        id: item.id || `rem_${crypto.randomUUID()}`,
         type: item.type === 'repeat' ? 'repeat' : 'before_deadline',
         value: Math.max(1, Number(item.value) || 1),
         unit: item.unit === 'hours' ? 'hours' : 'days',
@@ -4624,27 +5842,32 @@ async function startServer() {
         lastSentAt: item.lastSentAt,
       }));
     }
+    task.version = Number(task.version || 1) + 1;
     const currentAssigneeIds = new Set(assignedIds(task));
     const notificationIds = new Set([...previousAssigneeIds, ...currentAssigneeIds]);
+    const notifications: Array<{ target: User; text: string }> = [];
     for (const id of notificationIds) {
       const target = state.users.find((user) => user.id === id);
-      if (!target) continue;
+      if (!target || !isUserActive(target)) continue;
       const text = currentAssigneeIds.has(id)
         ? `Задача обновлена.\n\n${taskDetailsText(task, state)}`
         : `Назначение снято.\n\nВы больше не исполнитель задачи «${task.title}».`;
       if (!state.messages[target.id]) state.messages[target.id] = [];
       state.messages[target.id].push({
-        id: `faculty_task_updated_${Date.now()}_${target.id}`,
+        id: `faculty_task_updated_${crypto.randomUUID()}`,
         userId: target.id,
         sender: 'bot',
         text,
         timestamp: new Date().toISOString(),
       });
       if (target.telegramId) {
-        await sendTaskTelegramMessage(target.telegramId, text, undefined, false, target);
+        notifications.push({ target, text });
       }
     }
-    saveDatabase(state);
+    if (!saveDatabase(state)) return res.status(503).json({ error: 'Не удалось сохранить задачу. Повторите позже.' });
+    await Promise.allSettled(notifications.map(({ target, text }) => sendTaskTelegramMessage(
+      target.telegramId!, text, undefined, false, target,
+    )));
     res.json({ success: true, task });
   });
 
@@ -4673,7 +5896,7 @@ async function startServer() {
       availabilityStartHour: requestedStartHour,
       availabilityEndHour: requestedEndHour,
     };
-    saveDatabase(state);
+    if (!saveDatabase(state)) return res.status(503).json({ error: 'Не удалось надёжно сохранить настройки доступности. Повторите позже.' });
     chatSlotDrafts.clear();
     persistChatPanelMessageIds();
     let googleSheetsWeeks: unknown = null;
@@ -4694,11 +5917,11 @@ async function startServer() {
       const text = `Пожалуйста, заполните свободные слоты на ${weekCount} ${weekWord} вперёд в Mini App.`
         + `\nДни: ${requestedActiveDays.map((day) => dayNames[day]).join(', ')}.`
         + `\nВремя: ${String(requestedStartHour).padStart(2, '0')}:00–${String(requestedEndHour).padStart(2, '0')}:00.`;
-      const recipients = state.users.filter((user) => !isFacultyUser(user) && user.registered && user.telegramId);
+      const recipients = state.users.filter((user) => !isFacultyUser(user) && isUserActive(user) && user.registered && user.telegramId);
       recipients.forEach((user) => {
         if (!state.messages[user.id]) state.messages[user.id] = [];
         state.messages[user.id].push({
-          id: `availability_horizon_${Date.now()}_${user.id}`,
+          id: `availability_horizon_${crypto.randomUUID()}`,
           userId: user.id,
           sender: 'bot',
           text,
@@ -4706,7 +5929,7 @@ async function startServer() {
           buttons: [{ text: 'Заполнить слоты', action: 'open_tma' }],
         });
       });
-      saveDatabase(state);
+      if (!saveDatabase(state)) return res.status(503).json({ error: 'Не удалось надёжно сохранить уведомления. Повторите позже.' });
       const results = await Promise.allSettled(recipients.map((user) => sendTelegramMessage(user.telegramId!, text, [{ text: 'Заполнить слоты', action: 'open_tma' }], false, user)));
       notified = results.filter((result) => result.status === 'fulfilled' && result.value).length;
     }
@@ -4740,7 +5963,7 @@ async function startServer() {
         [targetWeekStart]: { name: cleanName, description: cleanDescription },
       },
     };
-    saveDatabase(state);
+    if (!saveDatabase(state)) return res.status(503).json({ error: 'Не удалось надёжно сохранить неделю. Повторите позже.' });
     return res.json({ success: true, weekIndex: index, weekStart: targetWeekStart, name: cleanName, description: cleanDescription });
   });
 
@@ -4754,7 +5977,7 @@ async function startServer() {
       return res.status(409).json({ error: 'Активное мероприятие с таким названием уже существует' });
     }
     const workEvent: WorkEvent = {
-      id: `event_${Date.now()}_${crypto.randomUUID().slice(0, 8)}`,
+      id: `event_${crypto.randomUUID()}`,
       name: cleanName,
       description: String(description || '').trim(),
       startsAt: String(startsAt || '').trim(),
@@ -4764,7 +5987,7 @@ async function startServer() {
       createdBy: requesterId,
     };
     state.events = [...(state.events || []), workEvent];
-    saveDatabase(state);
+    if (!saveDatabase(state)) return res.status(503).json({ error: 'Не удалось надёжно сохранить мероприятие. Повторите позже.' });
     return res.json({ success: true, event: workEvent });
   });
 
@@ -4790,74 +6013,85 @@ async function startServer() {
       if (status !== 'active' && status !== 'archived') return res.status(400).json({ error: 'Неизвестный статус мероприятия' });
       workEvent.status = status;
     }
-    saveDatabase(state);
+    if (!saveDatabase(state)) return res.status(503).json({ error: 'Не удалось надёжно сохранить мероприятие. Повторите позже.' });
     return res.json({ success: true, event: workEvent });
   });
 
   // Save/Update User Availability
   app.post('/api/availability', async (req, res) => {
-    const { userId, slots, weekStart, hardUnavailableDays, outWeekIndexes } = req.body;
-    const state = loadDatabase();
+    const { userId, weekStart, hardUnavailableDays, days, out, expectedVersion } = req.body;
+    const isWeekMutation = days && typeof days === 'object' && expectedVersion !== undefined;
 
-    if (!isRegisteredUser(state, userId)) {
-      return res.status(403).json({ error: 'Сначала нужно зарегистрироваться в чате с ботом' });
-    }
-
-    if (weekStart !== currentWeekStartIso()) {
-      return res.status(409).json({ error: 'Началась новая неделя. Обнови слоты и повтори сохранение.' });
-    }
-    const cleanSlots = filterSlotsByAvailabilityConfig(slots && typeof slots === 'object' ? slots : {}, state.settings);
-    const activeDays = new Set(normalizeAvailabilityConfig(state.settings).activeDays);
-    const weekCount = normalizeAvailabilityConfig(state.settings).weekCount;
-    const cleanOutWeekIndexes = Array.isArray(outWeekIndexes)
-      ? [...new Set(outWeekIndexes.map(Number).filter((weekIndex) => (
-          Number.isInteger(weekIndex) && weekIndex >= 0 && weekIndex < weekCount
-        )))].sort((a, b) => a - b)
-      : [];
-    for (const weekIndex of cleanOutWeekIndexes) {
-      for (let dayIndex = weekIndex * 7; dayIndex < weekIndex * 7 + 7; dayIndex += 1) delete cleanSlots[dayIndex];
-    }
-    const cleanUnavailableDays = Array.isArray(hardUnavailableDays)
-      ? [...new Set(hardUnavailableDays.map(Number).filter((day) => (
-          Number.isInteger(day)
-          && day >= 0
-          && day < weekCount * 7
-          && !cleanOutWeekIndexes.includes(Math.floor(day / 7))
-          && activeDays.has(day % 7)
-          && (cleanSlots[day] || []).length === 0
-        )))].sort((a, b) => a - b)
-      : [];
-    state.availabilities[userId] = {
-      userId,
-      slots: cleanSlots,
-      hardUnavailableDays: cleanUnavailableDays,
-      outWeekIndexes: cleanOutWeekIndexes,
-      weekStart: String(weekStart || ''),
-      updatedAt: new Date().toISOString()
-    };
-
-    saveDatabase(state);
-    let googleSheets: { synced: boolean; error?: string; updatedCells?: number } = { synced: false };
-    if (sheetsConfig) {
+    if (isWeekMutation) {
+      let state: SimulationState;
+      let availability: Availability;
+      let version: number;
       try {
-        const result = await exportAvailabilityToSheet(sheetsConfig, state.users, state.availabilities[userId]);
-        pendingSheetAvailabilityExports.delete(userId);
-        persistChatPanelMessageIds();
-        googleSheets = { synced: true, updatedCells: result.updatedCells };
-      } catch (error: any) {
-        console.error('Google Sheets availability export failed:', error);
-        pendingSheetAvailabilityExports.add(userId);
-        persistChatPanelMessageIds();
-        googleSheets = { synced: false, error: error.message || 'Google Sheets export failed' };
+        const result = mutateDatabaseAtomically((latestState) => {
+          if (!isRegisteredUser(latestState, userId)) {
+            throw new DatabaseMutationError(403, 'Сначала нужно зарегистрироваться в чате с ботом');
+          }
+          const baseWeekStart = currentWeekStartIso();
+          try {
+            const replaced = replaceAvailabilityWeek(
+              latestState.availabilities[userId],
+              userId,
+              baseWeekStart,
+              latestState.settings,
+              { weekStart: String(weekStart || ''), days, hardUnavailableDays, out: Boolean(out), expectedVersion: Number(expectedVersion) },
+            );
+            latestState.availabilities[userId] = replaced.availability;
+            return replaced;
+          } catch (error) {
+            if (error instanceof AvailabilityWeekConflictError || error instanceof AvailabilityWeekRangeError) {
+              throw new DatabaseMutationError(409, error.message);
+            }
+            throw error;
+          }
+        });
+        state = result.state;
+        availability = result.value.availability;
+        version = result.value.version;
+      } catch (error) {
+        return databaseMutationErrorResponse(res, error);
       }
+
+      let googleSheets: { synced: boolean; error?: string; updatedCells?: number } = { synced: false };
+      if (sheetsConfig) {
+        try {
+          const result = await exportAvailabilityToSheet(sheetsConfig, state.users, availability);
+          pendingSheetAvailabilityExports.delete(userId);
+          persistChatPanelMessageIds();
+          runtimeOperations.lastAvailabilitySheetsSuccessAt = new Date().toISOString();
+          runtimeOperations.lastAvailabilitySheetsError = undefined;
+          googleSheets = { synced: true, updatedCells: result.updatedCells };
+        } catch (error: any) {
+          runtimeOperations.lastAvailabilitySheetsErrorAt = new Date().toISOString();
+          runtimeOperations.lastAvailabilitySheetsError = safeOperationalError(error);
+          console.error('Google Sheets availability export failed:', error);
+          pendingSheetAvailabilityExports.add(userId);
+          persistChatPanelMessageIds();
+          googleSheets = { synced: false, error: error.message || 'Google Sheets export failed' };
+        }
+      }
+      return res.json({ success: true, availability, version, googleSheets });
     }
-    res.json({ success: true, availability: state.availabilities[userId], googleSheets });
+
+    return res.status(409).json({ error: 'Формат сохранения слотов устарел. Обнови Mini App и сохрани неделю ещё раз.' });
   });
 
   // Schedule a new meeting
   app.post('/api/meeting', async (req, res) => {
     const { title, kind, eventId, type, date, time, duration, hostId, participants, topic, description, competency } = req.body;
     const state = loadDatabase();
+    const requestedKind = kind === undefined ? 'meeting' : kind;
+    const validationErrors = meetingPayloadFieldErrors({
+      title, kind: requestedKind, eventId, type: requestedKind === 'setup' ? 'general' : type,
+      date, time, duration: requestedKind === 'setup' ? 1 : duration ?? 1,
+      participants: requestedKind === 'setup' ? 'all' : participants,
+      topic, description, competency,
+    });
+    if (Object.keys(validationErrors).length) return validationErrorResponse(res, validationErrors);
     const cleanKind: Meeting['kind'] = normalizeMeetingKind(kind);
     const isSetup = cleanKind === 'setup';
 
@@ -4881,7 +6115,7 @@ async function startServer() {
     const cleanParticipants = isSetup || participants === 'all'
       ? 'all'
       : [...new Set(Array.isArray(participants) ? participants : [])]
-          .filter((id) => state.users.some((user) => user.id === id && !isFacultyUser(user)));
+          .filter((id) => state.users.some((user) => user.id === id && !isFacultyUser(user) && isUserActive(user)));
     if (!isSetup && type !== 'general' && cleanParticipants !== 'all' && cleanParticipants.length === 0) {
       return res.status(400).json({ error: 'Выбери хотя бы одного участника собрания' });
     }
@@ -4913,11 +6147,13 @@ async function startServer() {
       return res.status(403).json({ error: 'Редактировать встречу может автор или админ' });
     }
 
-    const previousRecipientIds = meetingRecipientIds(state, meeting.participants, meeting.hostId);
+    const previousRecipientIds = meetingRecipientIds(state, meeting);
     const previousMeeting: Meeting = {
       ...meeting,
       participants: meeting.participants === 'all' ? 'all' : [...meeting.participants],
+      audienceUserIds: [...(meeting.audienceUserIds || [])],
       attendeeIds: [...(meeting.attendeeIds || [])],
+      rsvpByUser: { ...(meeting.rsvpByUser || {}) },
     };
     const nextKind = normalizeMeetingKind(kind === undefined ? meeting.kind : kind);
     const isSetup = nextKind === 'setup';
@@ -4928,6 +6164,17 @@ async function startServer() {
     const nextDuration = isSetup ? 1 : duration === undefined ? meeting.duration : Number(duration);
     const nextDate = String(date || meeting.date);
     const nextTime = String(time || meeting.time);
+    const nextTitle = title === undefined ? meeting.title : title;
+    const nextType = isSetup ? 'general' : type === undefined ? meeting.type : type;
+    const nextParticipants = isSetup ? 'all' : participants === undefined ? meeting.participants : participants;
+    const validationErrors = meetingPayloadFieldErrors({
+      title: nextTitle, kind: nextKind, eventId: nextEventId, type: nextType,
+      date: nextDate, time: nextTime, duration: nextDuration, participants: nextParticipants,
+      topic: isSetup ? '' : topic === undefined ? meeting.topic : topic,
+      description: isSetup ? '' : description === undefined ? meeting.description : description,
+      competency: isSetup ? '' : competency === undefined ? meeting.competency : competency,
+    });
+    if (Object.keys(validationErrors).length) return validationErrorResponse(res, validationErrors);
     if (!Number.isFinite(nextDuration) || nextDuration < 0.5 || nextDuration > 6) {
       return res.status(400).json({ error: 'Длительность собрания должна быть от 30 минут до 6 часов' });
     }
@@ -4947,8 +6194,16 @@ async function startServer() {
       meeting.participants = participants === 'all'
         ? 'all'
         : [...new Set(Array.isArray(participants) ? participants : [])]
-            .filter((id) => state.users.some((user) => user.id === id && !isFacultyUser(user)));
+            .filter((id) => state.users.some((user) => user.id === id && !isFacultyUser(user) && isUserActive(user)));
     }
+    if (isSetup || participants !== undefined || meeting.audiencePolicy !== 'snapshot') {
+      meeting.audiencePolicy = 'snapshot';
+      meeting.audienceUserIds = snapshotMeetingAudienceUserIds(state.users, meeting.participants, meeting.hostId);
+    }
+    const nextRecipientIds = meetingRecipientIds(state, meeting);
+    meeting.rsvpByUser = Object.fromEntries(Object.entries(normalizedMeetingRsvps(meeting)).filter(([userId]) => nextRecipientIds.has(userId)));
+    meeting.rsvpByUser[meeting.hostId] = 'yes';
+    meeting.attendeeIds = Object.entries(meeting.rsvpByUser).filter(([, response]) => response === 'yes').map(([userId]) => userId);
     if (isSetup) {
       meeting.topic = '';
       meeting.description = '';
@@ -4959,10 +6214,10 @@ async function startServer() {
       if (competency !== undefined) meeting.competency = competency || '';
     }
 
-    const recipients = meetingRecipientIds(state, meeting.participants, meeting.hostId);
+    const recipients = meetingRecipientIds(state, meeting);
     previousRecipientIds.forEach((id) => recipients.add(id));
     const updateText = meetingUpdateText(previousMeeting, meeting, state);
-    saveDatabase(state, { changedMeetingIds: [meeting.id] });
+    if (!saveDatabase(state, { changedMeetingIds: [meeting.id] })) return res.status(503).json({ error: 'Не удалось надёжно сохранить встречу. Повторите позже.' });
     if (!updateText.endsWith('*Что изменилось:*\n')) {
       await notifyMeetingRecipients(
         state,
@@ -4986,9 +6241,9 @@ async function startServer() {
       return res.status(403).json({ error: 'Удалить встречу может автор или админ' });
     }
 
-    const recipients = meetingRecipientIds(state, meeting.participants, meeting.hostId);
+    const recipients = meetingRecipientIds(state, meeting);
     meeting.status = 'cancelled';
-    saveDatabase(state, { changedMeetingIds: [meeting.id] });
+    if (!saveDatabase(state, { changedMeetingIds: [meeting.id] })) return res.status(503).json({ error: 'Не удалось надёжно сохранить встречу. Повторите позже.' });
     await notifyMeetingRecipients(
       state,
       recipients,
@@ -5000,179 +6255,202 @@ async function startServer() {
   });
 
   app.post('/api/meeting/rsvp', async (req, res) => {
-    const { requesterId, meetingId, attending = true } = req.body || {};
-    const state = loadDatabase();
-    const requester = state.users.find((user) => user.id === requesterId && user.registered && !isFacultyUser(user));
-    if (!requester) return res.status(403).json({ error: 'Нет доступа к собранию' });
-    const meeting = state.meetings.find((item) => item.id === meetingId && item.status === 'scheduled');
-    if (!meeting) return res.status(404).json({ error: 'Собрание не найдено' });
-
-    const result = updateMeetingAttendance(meeting, requester.id, Boolean(attending));
-    saveDatabase(state, { changedMeetingIds: [meeting.id] });
-    if (result.changed) await syncPersistedMeetingCalendar(meeting.id);
-    return res.json({ success: true, meeting: loadDatabase().meetings.find((item) => item.id === meeting.id) || meeting, attending: result.attending });
+    const { requesterId, meetingId, response, attending } = req.body || {};
+    const requestedResponse = response === 'yes' || response === 'no' || response === 'unanswered'
+      ? response
+      : Boolean(attending) ? 'yes' : 'no';
+    let committed: ReturnType<typeof mutateDatabaseAtomically<{ meeting: Meeting; changed: boolean }>>;
+    try {
+      committed = mutateDatabaseAtomically((state) => {
+        const requester = state.users.find((user) => user.id === requesterId && user.registered && !isFacultyUser(user) && isUserActive(user));
+        if (!requester) throw new DatabaseMutationError(403, 'Нет доступа к собранию');
+        const meeting = state.meetings.find((item) => item.id === meetingId && item.status === 'scheduled');
+        if (!meeting) throw new DatabaseMutationError(404, 'Собрание не найдено');
+        if (!meetingRecipientIds(state, meeting).has(requester.id)) {
+          throw new DatabaseMutationError(403, 'Вы не приглашены на эту встречу');
+        }
+        if (meetingPhase(meeting) === 'past') throw new DatabaseMutationError(409, 'Встреча уже завершилась');
+        const result = setMeetingRsvp(meeting, requester.id, requestedResponse);
+        return { meeting, changed: result.changed };
+      });
+    } catch (error) {
+      return databaseMutationErrorResponse(res, error);
+    }
+    if (committed.value.changed) await syncPersistedMeetingCalendar(meetingId);
+    return res.json({ success: true, meeting: committed.value.meeting, response: requestedResponse });
   });
 
   // Create a new task
   app.post('/api/task/create', async (req, res) => {
     const { title, description, deadline, assignedTo, sow, tips, priority, creatorId, competency, competencies, reminders, eventId } = req.body;
-    const state = loadDatabase();
-
-    if (!isRegisteredUser(state, creatorId)) {
-      return res.status(403).json({ error: 'Сначала нужно зарегистрироваться в чате с ботом' });
-    }
-
-    const cleanPriority: Task['priority'] = ['normal', 'important', 'critical'].includes(priority) ? priority : 'normal';
-    const cleanEventId = String(eventId || '').trim();
-    if (cleanEventId && !state.events?.some((item) => item.id === cleanEventId && item.status === 'active')) {
-      return res.status(400).json({ error: 'Выбранное мероприятие не найдено или уже завершено' });
-    }
-    const requestedAssigneeIds = Array.isArray(assignedTo) ? assignedTo.filter(Boolean) : assignedTo ? [assignedTo] : [];
-    const assigneeIds = [...new Set(requestedAssigneeIds)]
-      .filter((id) => state.users.some((user) => user.id === id && !isFacultyUser(user)));
-    const now = new Date().toISOString();
-    const cleanCompetencies = [...new Set((Array.isArray(competencies) ? competencies : competency ? [competency] : [])
-      .map(String).filter((name) => state.competencies?.includes(name)))];
-    const newTask: Task = {
-      id: 't_' + Date.now(),
-      title: String(title || '').trim() || 'Без названия',
-      description: String(description || '').trim(),
-      deadline: String(deadline || '').trim(),
-      assignedTo: assigneeIds.length === 0 ? null : assigneeIds,
-      creatorId,
-      competency: cleanCompetencies[0] || '',
-      competencies: cleanCompetencies,
-      eventId: cleanEventId,
-      sow: sow || '',
-      tips: tips || [],
-      status: assigneeIds.length ? 'assigned' : 'open',
-      priority: cleanPriority,
-      createdAt: now,
-      completedAt: '',
-      reminders: normalizeTaskReminders(reminders),
-      assigneeNotes: {},
-      completionComments: {},
-    };
-
-    state.tasks.push(newTask);
-    const sendJobs: Promise<boolean>[] = [];
-
-    // If assigned to someone, notify them
-    if (assigneeIds.length) {
-      for (const assignedToId of assigneeIds) {
-      const assignedUser = state.users.find(u => u.id === assignedToId);
-      if (assignedUser) {
-        if (!state.messages[assignedToId]) state.messages[assignedToId] = [];
-        state.messages[assignedToId].push({
-          id: 'task_notify_' + Date.now(),
-          userId: assignedToId,
-          sender: 'bot',
-          text: `Тебе назначена новая задача!\n\n${taskDetailsText(newTask, state)}`,
-          timestamp: new Date().toISOString(),
-          buttons: [{ text: 'Открыть задачи', action: 'open_tasks' }]
-        });
-        if (assignedUser.telegramId) {
-          sendJobs.push(sendTaskTelegramMessage(
-            assignedUser.telegramId,
-            `Тебе назначена новая задача!\n\n${taskDetailsText(newTask, state)}`,
-            [{ text: 'Открыть задачи', action: 'open_tasks' }],
-          ));
+    const validationErrors = taskPayloadFieldErrors({ title, description, deadline, assignedTo, sow, tips, priority, competency, competencies, reminders, eventId }, true);
+    if (Object.keys(validationErrors).length) return validationErrorResponse(res, validationErrors);
+    let committed: ReturnType<typeof mutateDatabaseAtomically<{
+      task: Task;
+      notifications: Array<{ target: User; text: string }>;
+    }>>;
+    try {
+      committed = mutateDatabaseAtomically((state) => {
+        if (!isRegisteredUser(state, creatorId)) {
+          throw new DatabaseMutationError(403, 'Сначала нужно зарегистрироваться в чате с ботом');
         }
-      }
-      }
-    } else {
-      // General notification about a new public task
-      for (const u of state.users) {
-        if (!state.messages[u.id]) state.messages[u.id] = [];
-        state.messages[u.id].push({
-          id: 'task_open_notify_' + Date.now() + '_' + u.id,
-          userId: u.id,
-          sender: 'bot',
-          text: `На доске появилась свободная задача.\n\n${taskDetailsText(newTask, state)}`,
-          timestamp: new Date().toISOString(),
-          buttons: [{ text: 'Открыть задачи', action: 'open_tasks' }]
-        });
-        if (u.telegramId) {
-          sendJobs.push(sendTaskTelegramMessage(
-            u.telegramId,
-            `На доске появилась свободная задача.\n\n${taskDetailsText(newTask, state)}`,
-            [{ text: 'Открыть задачи', action: 'open_tasks' }],
-          ));
+        const cleanPriority: Task['priority'] = ['normal', 'important', 'critical'].includes(priority) ? priority : 'normal';
+        if (!parseProjectLocalDate(String(deadline || ''))) {
+          throw new DatabaseMutationError(400, 'Укажи существующую календарную дату дедлайна');
         }
-      }
+        const cleanEventId = String(eventId || '').trim();
+        if (cleanEventId && !state.events?.some((item) => item.id === cleanEventId && item.status === 'active')) {
+          throw new DatabaseMutationError(400, 'Выбранное мероприятие не найдено или уже завершено');
+        }
+        const requestedAssigneeIds = Array.isArray(assignedTo) ? assignedTo.filter(Boolean) : assignedTo ? [assignedTo] : [];
+        const assigneeIds = sanitizeTaskAssigneeIds(state.users, requestedAssigneeIds);
+        const cleanCompetencies = [...new Set((Array.isArray(competencies) ? competencies : competency ? [competency] : [])
+          .map(String).filter((name) => state.competencies?.includes(name)))];
+        const now = new Date().toISOString();
+        const task: Task = {
+          id: `t_${crypto.randomUUID()}`,
+          version: 1,
+          title: String(title || '').trim() || 'Без названия',
+          description: String(description || '').trim(),
+          deadline: String(deadline || '').trim(),
+          assignedTo: assigneeIds.length === 0 ? null : assigneeIds,
+          creatorId,
+          competency: cleanCompetencies[0] || '',
+          competencies: cleanCompetencies,
+          eventId: cleanEventId,
+          sow: sow || '',
+          tips: tips || [],
+          status: assigneeIds.length ? 'assigned' : 'open',
+          priority: cleanPriority,
+          createdAt: now,
+          completedAt: '',
+          assignmentMode: 'shared',
+          reminders: normalizeTaskReminders(reminders),
+          assigneeNotes: {},
+          completionComments: {},
+        };
+        state.tasks.push(task);
+        const targets = resolveTaskAudienceUsers(state.users, task);
+        const notifications = targets.map((target) => ({
+          target,
+          text: assigneeIds.length
+            ? `Тебе назначена новая задача!\n\n${taskDetailsText(task, state)}`
+            : `На доске появилась свободная задача.\n\n${taskDetailsText(task, state)}`,
+        }));
+        for (const { target, text } of notifications) {
+          if (!state.messages[target.id]) state.messages[target.id] = [];
+          state.messages[target.id].push({
+            id: `task_created_${crypto.randomUUID()}`,
+            userId: target.id,
+            sender: 'bot',
+            text,
+            timestamp: now,
+            buttons: [{ text: 'Открыть задачи', action: 'open_tasks' }],
+          });
+        }
+        return { task, notifications };
+      });
+    } catch (error) {
+      return databaseMutationErrorResponse(res, error);
     }
-
-    await Promise.allSettled(sendJobs);
-    saveDatabase(state);
-    res.json({ success: true, task: newTask });
+    await Promise.allSettled(committed.value.notifications
+      .filter(({ target }) => target.telegramId)
+      .map(({ target, text }) => sendTaskTelegramMessage(
+        target.telegramId!, text, [{ text: 'Открыть задачи', action: 'open_tasks' }], false, target,
+      )));
+    return res.json({ success: true, task: committed.value.task });
   });
 
   app.post('/api/task/update', async (req, res) => {
-    const { requesterId, taskId, title, description, deadline, assignedTo, sow, priority, competency, competencies, reminders, eventId } = req.body || {};
-    const state = loadDatabase();
-    const task = state.tasks.find((item) => item.id === taskId);
-    if (!task) return res.status(404).json({ error: 'Задача не найдена' });
-    if (task.status === 'cancelled') return res.status(409).json({ error: 'Отменённую задачу нельзя редактировать' });
-    if (task.creatorId !== requesterId && !isAdminUser(state, requesterId)) {
-      return res.status(403).json({ error: 'Редактировать задачу может автор или администратор' });
-    }
+    const { requesterId, taskId, version, title, description, deadline, assignedTo, sow, priority, competency, competencies, reminders, eventId } = req.body || {};
+    const validationErrors = taskPayloadFieldErrors({ title, description, deadline, assignedTo, sow, priority, competency, competencies, reminders, eventId }, false);
+    if (Object.keys(validationErrors).length) return validationErrorResponse(res, validationErrors);
+    let committed: { state: SimulationState; value: { task: Task; notifications: Array<{ target: User; text: string; assigned: boolean }> } };
+    try {
+      committed = mutateDatabaseAtomically((state) => {
+        const task = state.tasks.find((item) => item.id === taskId);
+        if (!task) throw new DatabaseMutationError(404, 'Задача не найдена');
+        if (task.status === 'cancelled') throw new DatabaseMutationError(409, 'Отменённую задачу нельзя редактировать');
+        if (task.creatorId !== requesterId && !isAdminUser(state, requesterId)) {
+          throw new DatabaseMutationError(403, 'Редактировать задачу может автор или администратор');
+        }
+        if (version !== undefined && Number(version) !== Number(task.version || 1)) {
+          throw new DatabaseMutationError(409, 'Задача уже изменилась. Обновите данные и повторите действие.');
+        }
 
-    const previousAssignees = new Set(assignedIds(task));
-    if (title !== undefined) task.title = String(title || '').trim() || 'Без названия';
-    if (description !== undefined) task.description = String(description || '').trim();
-    if (deadline !== undefined) task.deadline = String(deadline || '').trim();
-    if (competency !== undefined) task.competency = String(competency || '').trim();
-    if (competencies !== undefined) {
-      task.competencies = [...new Set((Array.isArray(competencies) ? competencies : []).map(String).filter((name) => state.competencies?.includes(name)))];
-      task.competency = task.competencies[0] || '';
-    }
-    if (eventId !== undefined) {
-      const cleanEventId = String(eventId || '').trim();
-      if (cleanEventId && !state.events?.some((item) => item.id === cleanEventId)) {
-        return res.status(400).json({ error: 'Мероприятие не найдено' });
-      }
-      task.eventId = cleanEventId;
-    }
-    if (sow !== undefined) task.sow = String(sow || '').trim();
-    if (priority !== undefined && ['normal', 'important', 'critical'].includes(priority)) task.priority = priority;
-    if (reminders !== undefined) task.reminders = normalizeTaskReminders(reminders);
-    if (assignedTo !== undefined) {
-      const cleanAssignees = [...new Set(Array.isArray(assignedTo) ? assignedTo : assignedTo ? [assignedTo] : [])]
-        .filter((id) => state.users.some((user) => user.id === id && !isFacultyUser(user)));
-      task.assignedTo = cleanAssignees.length ? cleanAssignees : null;
-      if (task.status !== 'completed') task.status = cleanAssignees.length ? 'assigned' : 'open';
-    }
+        const previousAssignees = new Set(assignedIds(task));
+        if (title !== undefined) task.title = String(title || '').trim() || 'Без названия';
+        if (description !== undefined) task.description = String(description || '').trim();
+        if (deadline !== undefined) {
+          if (!parseProjectLocalDate(String(deadline || ''))) {
+            throw new DatabaseMutationError(400, 'Укажи существующую календарную дату дедлайна');
+          }
+          task.deadline = String(deadline).trim();
+        }
+        if (competency !== undefined) task.competency = String(competency || '').trim();
+        if (competencies !== undefined) {
+          task.competencies = [...new Set((Array.isArray(competencies) ? competencies : []).map(String).filter((name) => state.competencies?.includes(name)))];
+          task.competency = task.competencies[0] || '';
+        }
+        if (eventId !== undefined) {
+          const cleanEventId = String(eventId || '').trim();
+          if (cleanEventId && !state.events?.some((item) => item.id === cleanEventId)) {
+            throw new DatabaseMutationError(400, 'Мероприятие не найдено');
+          }
+          task.eventId = cleanEventId;
+        }
+        if (sow !== undefined) task.sow = String(sow || '').trim();
+        if (priority !== undefined && ['normal', 'important', 'critical'].includes(priority)) task.priority = priority;
+        if (reminders !== undefined) task.reminders = normalizeTaskReminders(reminders);
+        if (assignedTo !== undefined) {
+          const cleanAssignees = sanitizeTaskAssigneeIds(
+            state.users,
+            Array.isArray(assignedTo) ? assignedTo : assignedTo ? [assignedTo] : [],
+          );
+          task.assignedTo = cleanAssignees.length ? cleanAssignees : null;
+          if (task.status !== 'completed') task.status = cleanAssignees.length ? 'assigned' : 'open';
+        }
+        task.version = Number(task.version || 1) + 1;
 
-    const currentAssignees = new Set(assignedIds(task));
-    const notificationTargets = new Set([...previousAssignees, ...currentAssignees]);
-    const sendJobs: Promise<boolean>[] = [];
-    for (const id of notificationTargets) {
-      const target = state.users.find((user) => user.id === id);
-      if (!target) continue;
-      const text = currentAssignees.has(id)
-        ? `Задача обновлена.\n\n${taskDetailsText(task, state)}`
-        : `Назначение снято.\n\nВы больше не исполнитель задачи «${task.title}».`;
-      if (!state.messages[target.id]) state.messages[target.id] = [];
-      state.messages[target.id].push({
-        id: `task_updated_${Date.now()}_${target.id}`,
-        userId: target.id,
-        sender: 'bot',
-        text,
-        timestamp: new Date().toISOString(),
-        buttons: currentAssignees.has(id) ? [{ text: 'Открыть задачи', action: 'open_tasks' }] : undefined,
+        const currentAssignees = new Set(assignedIds(task));
+        const notificationTargets = new Set([...previousAssignees, ...currentAssignees]);
+        const notifications: Array<{ target: User; text: string; assigned: boolean }> = [];
+        for (const id of notificationTargets) {
+          const target = state.users.find((user) => user.id === id);
+          if (!target || !isUserActive(target)) continue;
+          const assigned = currentAssignees.has(id);
+          const text = assigned
+            ? `Задача обновлена.\n\n${taskDetailsText(task, state)}`
+            : `Назначение снято.\n\nВы больше не исполнитель задачи «${task.title}».`;
+          if (!state.messages[target.id]) state.messages[target.id] = [];
+          state.messages[target.id].push({
+            id: `task_updated_${crypto.randomUUID()}`,
+            userId: target.id,
+            sender: 'bot',
+            text,
+            timestamp: new Date().toISOString(),
+            buttons: assigned ? [{ text: 'Открыть задачи', action: 'open_tasks' }] : undefined,
+          });
+          notifications.push({ target, text, assigned });
+        }
+        return { task, notifications };
       });
-      if (target.telegramId) sendJobs.push(sendTaskTelegramMessage(target.telegramId, text, currentAssignees.has(id) ? [{ text: 'Открыть задачи', action: 'open_tasks' }] : undefined, false, target));
+    } catch (error) {
+      return databaseMutationErrorResponse(res, error);
     }
-    saveDatabase(state);
-    await Promise.allSettled(sendJobs);
-    res.json({ success: true, task });
+    await Promise.allSettled(committed.value.notifications
+      .filter(({ target }) => target.telegramId)
+      .map(({ target, text, assigned }) => sendTaskTelegramMessage(
+        target.telegramId!, text, assigned ? [{ text: 'Открыть задачи', action: 'open_tasks' }] : undefined, false, target,
+      )));
+    return res.json({ success: true, task: committed.value.task });
   });
 
   app.post('/api/task/comment', (req, res) => {
     const { requesterId, taskId, assigneeId, side, text } = req.body || {};
     const state = loadDatabase();
     const task = state.tasks.find((item) => item.id === taskId);
-    const requester = state.users.find((user) => user.id === requesterId && user.registered);
+    const requester = state.users.find((user) => user.id === requesterId && user.registered && isUserActive(user));
     if (!task) return res.status(404).json({ error: 'Задача не найдена. Обнови страницу и попробуй снова.' });
     if (!requester) return res.status(403).json({ error: 'Пользователь не найден или доступ ещё не активирован' });
     if (task.status === 'completed') return res.status(409).json({ error: 'Выполненная задача доступна только для просмотра. Сначала верни её в работу.' });
@@ -5211,14 +6489,15 @@ async function startServer() {
       [side]: cleanText,
       updatedAt: createdAt,
       history: [...previousHistory, {
-        id: `task_comment_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        id: `task_comment_${crypto.randomUUID()}`,
         authorId: requester.id,
         side,
         text: cleanText,
         createdAt,
       }],
     };
-    saveDatabase(state);
+    task.version = Number(task.version || 1) + 1;
+    if (!saveDatabase(state)) return res.status(503).json({ error: 'Не удалось сохранить комментарий. Повторите позже.' });
     return res.json({ success: true, task });
   });
 
@@ -5226,7 +6505,7 @@ async function startServer() {
     const { requesterId, taskId } = req.body || {};
     const state = loadDatabase();
     const task = state.tasks.find((item) => item.id === taskId);
-    const requester = state.users.find((user) => user.id === requesterId && user.registered);
+    const requester = state.users.find((user) => user.id === requesterId && user.registered && isUserActive(user));
     if (!task) return res.status(404).json({ error: 'Задача не найдена' });
     if (!requester) return res.status(403).json({ error: 'Нет доступа к задаче' });
     if (task.creatorId !== requester.id && requester.role !== 'admin') {
@@ -5236,41 +6515,46 @@ async function startServer() {
 
     const recipientIds = assignedIds(task).filter((id) => id !== requester.id);
     task.status = 'cancelled';
+    task.version = Number(task.version || 1) + 1;
     task.cancelledAt = new Date().toISOString();
     task.cancelledBy = requester.id;
-    saveDatabase(state);
+    if (!saveDatabase(state)) return res.status(503).json({ error: 'Не удалось отменить задачу. Повторите позже.' });
 
     const notificationText = `Задача отменена автором.\n\n*${task.title}*`;
-    const sendJobs: Promise<boolean>[] = [];
+    const sendPlans: Array<{ target: User; messageId: string }> = [];
     for (const id of recipientIds) {
       const target = state.users.find((user) => user.id === id);
-      if (!target) continue;
+      if (!target || !isUserActive(target)) continue;
       if (!state.messages[target.id]) state.messages[target.id] = [];
+      const messageId = `task_cancelled_${crypto.randomUUID()}`;
       state.messages[target.id].push({
-        id: `task_cancelled_${Date.now()}_${target.id}`,
+        id: messageId,
         userId: target.id,
         sender: 'bot',
         text: notificationText,
         timestamp: task.cancelledAt,
       });
-      if (target.telegramId) sendJobs.push(sendTaskTelegramMessage(target.telegramId, notificationText, undefined, false, target));
+      if (target.telegramId) sendPlans.push({ target, messageId });
     }
-    if (recipientIds.length) saveDatabase(state);
-    await Promise.allSettled(sendJobs);
+    if (recipientIds.length && !saveDatabase(state)) return res.status(503).json({ error: 'Задача отменена, но уведомления не удалось надёжно сохранить. Обновите состояние.' });
+    await Promise.allSettled(sendPlans.map(({ target, messageId }) => sendTaskTelegramMessage(
+      target.telegramId!, notificationText, undefined, false, target,
+      { dedupeKey: messageId, category: 'task' },
+    )));
     return res.json({ success: true, task });
   });
 
   app.post('/api/team/broadcast', async (req, res) => {
     const { requesterId, recipientMode, availabilityWeekIndex, competencies, recipientIds, title, body } = req.body || {};
     const state = loadDatabase();
-    const author = state.users.find((user) => user.id === requesterId && user.registered && !isFacultyUser(user));
+    const author = state.users.find((user) => user.id === requesterId && user.registered && !isFacultyUser(user) && isUserActive(user));
     if (!author) return res.status(403).json({ error: 'Рассылки доступны участникам основной команды' });
     const cleanBody = String(body || '').trim().slice(0, 4_000);
     const cleanTitle = String(title || '').trim().slice(0, 120);
     if (!cleanBody) return res.status(400).json({ error: 'Текст рассылки обязателен' });
     if (!['all', 'blocks', 'people', 'missing_slots'].includes(recipientMode)) return res.status(400).json({ error: 'Выбери получателей рассылки' });
 
-    const teamUsers = state.users.filter((user) => !isFacultyUser(user));
+    const teamUsers = activeCoreTeamUsers(state.users);
     const availabilityConfig = normalizeAvailabilityConfig(state.settings);
     const requestedWeekIndex = Number(availabilityWeekIndex);
     const cleanWeekIndex = Number.isInteger(requestedWeekIndex) && requestedWeekIndex >= 0 && requestedWeekIndex < availabilityConfig.weekCount
@@ -5303,40 +6587,61 @@ async function startServer() {
         failed: 0,
       });
     }
+    const requestLimit = broadcastRateLimit(author.id);
+    if (!requestLimit.allowed) {
+      return rateLimitResponse(res, requestLimit, 'Лимит рассылок исчерпан. Повторите позже.');
+    }
+    const volumeLimit = broadcastVolumeRateLimit(author.id, sendableRecipients.length);
+    if (!volumeLimit.allowed) {
+      return rateLimitResponse(res, volumeLimit, 'Лимит получателей рассылок исчерпан. Уменьшите аудиторию или повторите позже.');
+    }
 
     const authorName = author.realName || author.username || 'Участник команды';
     const authorUsername = author.username ? ` (${author.username.startsWith('@') ? author.username : `@${author.username}`})` : '';
     const messageText = `${cleanTitle ? `*${cleanTitle}*\n\n` : ''}${cleanBody}\n\n*Автор:* ${authorName}${authorUsername}`;
     const timestamp = new Date().toISOString();
-    const sendJobs: Promise<boolean>[] = [];
+    const sendPlans: Array<{ recipient: User; messageId: string }> = [];
     for (const recipient of recipients) {
       if (!state.messages[recipient.id]) state.messages[recipient.id] = [];
+      const messageId = `team_broadcast_${crypto.randomUUID()}`;
       state.messages[recipient.id].push({
-        id: `team_broadcast_${Date.now()}_${recipient.id}`,
+        id: messageId,
         userId: recipient.id,
         sender: 'bot',
         text: messageText,
         timestamp,
         buttons: [{ text: 'Открыть Mini App', action: 'open_tma' }],
       });
-      if (recipient.telegramId) sendJobs.push(sendTelegramMessage(recipient.telegramId, messageText, [{ text: 'Открыть Mini App', action: 'open_tma' }], false, recipient));
+      if (recipient.telegramId) sendPlans.push({ recipient, messageId });
     }
-    saveDatabase(state);
-    const delivery = await Promise.allSettled(sendJobs);
+    if (!saveDatabase(state)) return res.status(503).json({ error: 'Не удалось надёжно сохранить рассылку. Повторите позже.' });
+    const delivery = await Promise.allSettled(sendPlans.map(({ recipient, messageId }) => sendTelegramMessage(
+      recipient.telegramId!, messageText, [{ text: 'Открыть Mini App', action: 'open_tma' }], false, recipient, false,
+      { dedupeKey: messageId, category: 'broadcast' },
+    )));
     const delivered = delivery.filter((result) => result.status === 'fulfilled' && result.value).length;
-    const failed = sendJobs.length - delivered;
-    console.log(`[Team Broadcast] author=${author.id} recipients=${recipients.length} queued=${sendJobs.length} delivered=${delivered} unavailable=${unavailable} failed=${failed}`);
+    const deliveryRecords = loadDatabase().settings?.notificationDeliveries || [];
+    const statuses = sendPlans.map(({ messageId }) => deliveryRecords.find((item) => item.dedupeKey === messageId)?.status);
+    const pending = statuses.filter((status) => status === 'planned' || status === 'sending' || status === 'retry').length;
+    const attention = statuses.filter((status) => status === 'failed' || status === 'unknown').length;
+    const failed = sendPlans.length - delivered - pending;
+    console.log(`[Team Broadcast] author=${author.id} recipients=${recipients.length} queued=${sendPlans.length} delivered=${delivered} unavailable=${unavailable} pending=${pending} attention=${attention}`);
+    if (!delivered && pending) {
+      return res.status(202).json({ success: true, recipients: recipients.length, queued: sendPlans.length, delivered, unavailable, failed, pending, attention, availabilityWeekIndex: cleanWeekIndex });
+    }
     if (!delivered) {
       return res.status(502).json({
         error: 'Telegram не доставил рассылку. Участникам нужно открыть MegaBot и нажать /start, затем повторить отправку.',
         recipients: recipients.length,
-        queued: sendJobs.length,
+        queued: sendPlans.length,
         delivered,
         unavailable,
         failed,
+        pending,
+        attention,
       });
     }
-    return res.json({ success: true, recipients: recipients.length, queued: sendJobs.length, delivered, unavailable, failed, availabilityWeekIndex: cleanWeekIndex });
+    return res.json({ success: true, recipients: recipients.length, queued: sendPlans.length, delivered, unavailable, failed, pending, attention, availabilityWeekIndex: cleanWeekIndex });
   });
 
   app.post('/api/task/notify', async (req, res) => {
@@ -5351,204 +6656,269 @@ async function startServer() {
     const recipientIds = assignedIds(task);
     if (!recipientIds.length) return res.status(400).json({ error: 'Сначала назначь исполнителей' });
     const text = `Напоминание по задаче:\n\n${taskDetailsText(task, state)}`;
-    const sendJobs: Promise<boolean>[] = [];
+    const sendPlans: Array<{ target: User; messageId: string }> = [];
     for (const id of recipientIds) {
       const target = state.users.find((user) => user.id === id);
-      if (!target) continue;
+      if (!target || !isUserActive(target)) continue;
       if (!state.messages[target.id]) state.messages[target.id] = [];
+      const messageId = `task_manual_reminder_${crypto.randomUUID()}`;
       state.messages[target.id].push({
-        id: `task_manual_reminder_${Date.now()}_${target.id}`,
+        id: messageId,
         userId: target.id,
         sender: 'bot',
         text,
         timestamp: new Date().toISOString(),
         buttons: [{ text: 'Открыть задачи', action: 'open_tasks' }],
       });
-      if (target.telegramId) sendJobs.push(sendTaskTelegramMessage(target.telegramId, text, [{ text: 'Открыть задачи', action: 'open_tasks' }], false, target));
+      if (target.telegramId) sendPlans.push({ target, messageId });
     }
-    saveDatabase(state);
-    const delivery = await Promise.allSettled(sendJobs);
+    if (!saveDatabase(state)) return res.status(503).json({ error: 'Не удалось надёжно сохранить уведомления. Повторите позже.' });
+    const delivery = await Promise.allSettled(sendPlans.map(({ target, messageId }) => sendTaskTelegramMessage(
+      target.telegramId!, text, [{ text: 'Открыть задачи', action: 'open_tasks' }], false, target,
+      { dedupeKey: messageId, category: 'task_reminder' },
+    )));
     const delivered = delivery.filter((result) => result.status === 'fulfilled' && result.value).length;
-    res.json({ success: true, queued: sendJobs.length, delivered });
+    res.json({ success: true, queued: sendPlans.length, delivered });
   });
 
   // Claim a public task
   app.post('/api/task/claim', async (req, res) => {
     const { taskId, userId } = req.body;
-    const state = loadDatabase();
-
-    if (!isRegisteredUser(state, userId)) {
-      return res.status(403).json({ error: 'Сначала нужно зарегистрироваться в чате с ботом' });
+    let committed: { state: SimulationState; value: { task: Task; user: User; recipients: User[]; notificationText: string } };
+    try {
+      committed = mutateDatabaseAtomically((state) => {
+        if (!isRegisteredUser(state, userId)) throw new DatabaseMutationError(403, 'Сначала нужно зарегистрироваться в чате с ботом');
+        const task = state.tasks.find((item) => item.id === taskId);
+        const user = state.users.find((item) => item.id === userId);
+        if (!task) throw new DatabaseMutationError(404, 'Задача не найдена');
+        if (!user) throw new DatabaseMutationError(404, 'Пользователь не найден');
+        if (task.status !== 'open') throw new DatabaseMutationError(409, 'Задача уже занята');
+        task.assignedTo = [userId];
+        task.status = 'assigned';
+        task.version = Number(task.version || 1) + 1;
+        if (!state.messages[userId]) state.messages[userId] = [];
+        state.messages[userId].push({
+          id: `task_claim_bot_${crypto.randomUUID()}`, userId, sender: 'bot',
+          text: `Ты закрепил за собой задачу: *"${task.title}"*\nБлоки: ${taskCompetencyNames(task).join(', ') || 'не указаны'}\nДедлайн: ${formatShortDate(task.deadline)}.\nТЗ можно проверить в Mini App.`,
+          timestamp: new Date().toISOString(),
+        });
+        const creator = state.users.find((item) => item.id === task.creatorId);
+        const notificationText = `${user.realName} взял задачу с доски:\n"${task.title}"\n\nСвязаться: ${user.username}`;
+        const recipients = [
+          ...(creator && creator.id !== userId ? [creator] : []),
+          ...state.users.filter((item) => item.role === 'admin' && item.id !== userId && item.id !== creator?.id),
+        ];
+        recipients.forEach((recipient) => {
+          if (!state.messages[recipient.id]) state.messages[recipient.id] = [];
+          state.messages[recipient.id].push({ id: `task_claim_notice_${crypto.randomUUID()}`, userId: recipient.id, sender: 'bot', text: notificationText, timestamp: new Date().toISOString() });
+        });
+        return { task, user, recipients, notificationText };
+      });
+    } catch (error) {
+      return databaseMutationErrorResponse(res, error);
     }
-
-    const task = state.tasks.find(t => t.id === taskId);
-    const user = state.users.find(u => u.id === userId);
-
-    if (!task) return res.status(404).json({ error: 'Задача не найдена' });
-    if (!user) return res.status(404).json({ error: 'Пользователь не найден' });
-    if (task.status !== 'open') return res.status(400).json({ error: 'Задача уже занята' });
-
-    task.assignedTo = [userId];
-    task.status = 'assigned';
+    const { state } = committed;
+    const { task, user, recipients, notificationText } = committed.value;
     const claimSendJobs: Promise<boolean>[] = [];
-
-    // Notify everyone who took the task
-    if (!state.messages[userId]) state.messages[userId] = [];
-    state.messages[userId].push({
-      id: 'task_claim_bot_' + Date.now(),
-      userId,
-      sender: 'bot',
-      text: `Ты закрепил за собой задачу: *"${task.title}"*\nБлоки: ${taskCompetencyNames(task).join(', ') || 'не указаны'}\nДедлайн: ${formatShortDate(task.deadline)}.\nТЗ можно проверить в Mini App.`,
-      timestamp: new Date().toISOString()
-    });
-    if (user.telegramId) {
-      claimSendJobs.push(sendTaskTelegramMessage(
-        user.telegramId,
-        `Ты взял задачу в работу:\n\n${taskDetailsText(task, state)}`,
-        [{ text: 'Открыть задачи', action: 'open_tasks' }],
-        false,
-        user,
-      ));
-    }
-
-    const creator = state.users.find(u => u.id === task.creatorId);
-    const text = `${user.realName} взял задачу с доски:\n"${task.title}"\n\nСвязаться: ${user.username}`;
-    if (creator && creator.id !== userId) {
-      if (!state.messages[creator.id]) state.messages[creator.id] = [];
-      state.messages[creator.id].push({
-        id: 'task_claim_creator_' + Date.now() + '_' + creator.id,
-        userId: creator.id,
-        sender: 'bot',
-        text,
-        timestamp: new Date().toISOString()
-      });
-      if (creator.telegramId) {
-        claimSendJobs.push(sendTaskTelegramMessage(creator.telegramId, text, undefined, false, creator));
-      }
-    }
-    for (const admin of state.users.filter(u => u.role === 'admin' && u.id !== userId && u.id !== creator?.id)) {
-      if (!state.messages[admin.id]) state.messages[admin.id] = [];
-      state.messages[admin.id].push({
-        id: 'task_claim_admin_' + Date.now() + '_' + admin.id,
-        userId: admin.id,
-        sender: 'bot',
-        text,
-        timestamp: new Date().toISOString()
-      });
-      if (admin.telegramId) claimSendJobs.push(sendTaskTelegramMessage(admin.telegramId, text, undefined, false, admin));
-    }
-
-    saveDatabase(state);
+    if (user.telegramId) claimSendJobs.push(sendTaskTelegramMessage(user.telegramId, `Ты взял задачу в работу:\n\n${taskDetailsText(task, state)}`, [{ text: 'Открыть задачи', action: 'open_tasks' }], false, user));
+    recipients.filter((recipient) => recipient.telegramId).forEach((recipient) => claimSendJobs.push(sendTaskTelegramMessage(recipient.telegramId!, notificationText, undefined, false, recipient)));
     await Promise.allSettled(claimSendJobs);
     res.json({ success: true, task });
   });
 
   app.post('/api/task/release', async (req, res) => {
     const { taskId, userId } = req.body;
-    const state = loadDatabase();
-    const task = state.tasks.find(t => t.id === taskId);
-    const user = state.users.find(u => u.id === userId);
-
-    if (!task) return res.status(404).json({ error: 'Задача не найдена' });
-    if (!user) return res.status(404).json({ error: 'Пользователь не найден' });
-    if (task.status === 'cancelled') return res.status(409).json({ error: 'Задача отменена' });
-    if (!assignedIds(task).includes(userId)) {
-      return res.status(403).json({ error: 'Эта задача не закреплена за тобой' });
+    let committed: { state: SimulationState; value: { task: Task; user: User; changed: boolean; becameOpen: boolean; remainingAssigneeIds: string[] } };
+    try {
+      committed = mutateDatabaseAtomically((state) => {
+        const task = state.tasks.find((item) => item.id === taskId);
+        const user = state.users.find((item) => item.id === userId && item.registered);
+        if (!task) throw new DatabaseMutationError(404, 'Задача не найдена');
+        if (!user) throw new DatabaseMutationError(404, 'Пользователь не найден');
+        if (task.status === 'cancelled') throw new DatabaseMutationError(409, 'Задача отменена');
+        if (task.status === 'completed') throw new DatabaseMutationError(409, 'Задача уже завершена');
+        try {
+          return { task, user, ...releaseTaskCommand(task, user.id) };
+        } catch (error) {
+          if (error instanceof TaskCommandError) throw new DatabaseMutationError(409, error.message);
+          throw error;
+        }
+      });
+    } catch (error) {
+      return databaseMutationErrorResponse(res, error);
     }
-
-    task.assignedTo = null;
-    task.status = 'open';
-    task.completedAt = '';
-    task.timeSpentMinutes = undefined;
-    saveDatabase(state);
+    const { state } = committed;
+    const { task, user, changed, becameOpen, remainingAssigneeIds } = committed.value;
+    if (!changed) return res.json({ success: true, task, alreadyReleased: true, becameOpen: task.status === 'open' });
 
     const sendJobs: Promise<boolean>[] = [];
     const creator = state.users.find(u => u.id === task.creatorId);
-    if (creator?.telegramId && creator.id !== user.id) {
-      sendJobs.push(sendTaskTelegramMessage(creator.telegramId, `${userMention(user)} отказался от задачи *"${task.title}"*. Она снова на бирже.`));
+        if (creator?.telegramId && isUserActive(creator) && creator.id !== user.id) {
+      const remainingNames = remainingAssigneeIds.map((id) => state.users.find((item) => item.id === id)?.realName || id).join(', ');
+      sendJobs.push(sendTaskTelegramMessage(creator.telegramId, becameOpen
+        ? `${userMention(user)} отказался от задачи *"${task.title}"*. Она снова на бирже.`
+        : `${userMention(user)} отказался от задачи *"${task.title}"*. Остались: ${remainingNames}.`));
     }
 
-    for (const target of state.users.filter(u => u.telegramId && u.id !== user.id)) {
+    for (const target of becameOpen ? state.users.filter(u => isUserActive(u) && u.telegramId && u.id !== user.id && u.id !== creator?.id) : []) {
       sendJobs.push(sendTaskTelegramMessage(target.telegramId!, `Задача снова свободна:\n\n${taskDetailsText(task, state)}`, [{ text: 'Посмотреть задачу', action: 'open_tasks' }], false, target));
     }
     await Promise.allSettled(sendJobs);
 
-    res.json({ success: true, task });
+    res.json({ success: true, task, becameOpen, remainingAssigneeIds });
   });
 
   // Update task status (complete)
   app.post('/api/task/status', async (req, res) => {
-    const { taskId, status, requesterId, timeSpentMinutes, completionComment } = req.body;
-    const state = loadDatabase();
-
-    const task = state.tasks.find(t => t.id === taskId);
-    if (!task) return res.status(404).json({ error: 'Задача не найдена' });
-    if (task.status === 'cancelled') return res.status(409).json({ error: 'Отменённую задачу нельзя возобновить' });
-    if (!['open', 'assigned', 'completed', 'waiting', 'in_progress'].includes(status)) {
-      return res.status(400).json({ error: 'Неизвестный статус задачи' });
-    }
-    const requester = state.users.find((user) => user.id === requesterId && user.registered);
-    if (!requester) return res.status(403).json({ error: 'Нет доступа к задаче' });
-    if (requester.role !== 'admin' && !assignedIds(task).includes(requester.id)) {
-      return res.status(403).json({ error: 'Изменить статус может исполнитель или администратор' });
-    }
-
-    const parsedTimeSpent = Number(timeSpentMinutes);
-    if (timeSpentMinutes !== undefined && (!Number.isFinite(parsedTimeSpent) || parsedTimeSpent <= 0 || parsedTimeSpent > 60000)) {
-      return res.status(400).json({ error: 'Время выполнения должно быть больше нуля' });
-    }
-    task.status = status;
-    if (status === 'completed') {
-      task.completedAt = new Date().toISOString();
-      task.timeSpentMinutes = timeSpentMinutes === undefined ? undefined : Math.round(parsedTimeSpent);
-      task.completionComments = task.completionComments || {};
-      const cleanComment = String(completionComment || '').trim();
-      if (cleanComment) task.completionComments[requester.id] = cleanComment;
-      else delete task.completionComments[requester.id];
-    }
-    if (status !== 'completed') {
-      task.completedAt = '';
-      task.timeSpentMinutes = undefined;
-    }
-
-    // Completion is relevant to the task creator, not to every administrator.
-    if (status === 'completed' && task.assignedTo) {
-      const workerName = assignedIds(task)
-        .map((id) => state.users.find(u => u.id === id)?.realName)
-        .filter(Boolean)
-        .join(', ') || 'Участник';
-      const sendJobs: Promise<boolean>[] = [];
-      const creator = state.users.find((user) => user.id === task.creatorId && user.id !== requester.id);
-      if (creator) {
-        const text = `Задача выполнена!\nБлоки: ${taskCompetencyNames(task).join(', ') || 'не указаны'}\nИсполнитель: ${workerName}\nЗадача: "${task.title}"${task.timeSpentMinutes ? `\nЗатрачено: ${taskDurationLabel(task.timeSpentMinutes)}` : ''}${String(completionComment || '').trim() ? `\nКомментарий: ${String(completionComment).trim()}` : ''}`;
-        if (!state.messages[creator.id]) state.messages[creator.id] = [];
-        state.messages[creator.id].push({
-          id: 'task_comp_creator_' + Date.now() + '_' + creator.id,
-          userId: creator.id,
-          sender: 'bot',
-          text,
-          timestamp: new Date().toISOString()
-        });
-        if (creator.telegramId) {
-          sendJobs.push(sendTaskTelegramMessage(creator.telegramId, text, undefined, false, creator));
+    const { taskId, version, status, requesterId, timeSpentMinutes, completionComment } = req.body;
+    let committed: { state: SimulationState; value: { task: Task; notification?: { target: User; text: string }; alreadyApplied?: boolean } };
+    try {
+      committed = mutateDatabaseAtomically((state) => {
+        const task = state.tasks.find((item) => item.id === taskId);
+        if (!task) throw new DatabaseMutationError(404, 'Задача не найдена');
+        if (task.status === 'cancelled') throw new DatabaseMutationError(409, 'Отменённую задачу нельзя возобновить');
+        if (!['open', 'assigned', 'completed', 'waiting', 'in_progress'].includes(status)) {
+          throw new DatabaseMutationError(400, 'Неизвестный статус задачи');
         }
-      }
-      await Promise.allSettled(sendJobs);
-    }
+        const requester = state.users.find((user) => user.id === requesterId && user.registered && isUserActive(user));
+        if (!requester) throw new DatabaseMutationError(403, 'Нет доступа к задаче');
+        if (requester.role !== 'admin' && !assignedIds(task).includes(requester.id)) {
+          throw new DatabaseMutationError(403, 'Изменить статус может исполнитель или администратор');
+        }
+        const parsedTimeSpent = Number(timeSpentMinutes);
+        if (timeSpentMinutes !== undefined && (!Number.isFinite(parsedTimeSpent) || parsedTimeSpent <= 0 || parsedTimeSpent > 60000)) {
+          throw new DatabaseMutationError(400, 'Время выполнения должно быть больше нуля');
+        }
+        const cleanComment = String(completionComment || '').trim();
+        const unchangedCompletion = status === 'completed'
+          && task.status === 'completed'
+          && task.timeSpentMinutes === (timeSpentMinutes === undefined ? undefined : Math.round(parsedTimeSpent))
+          && String(task.completionComments?.[requester.id] || '') === cleanComment;
+        if ((status !== 'completed' && task.status === status) || unchangedCompletion) {
+          return { task, alreadyApplied: true };
+        }
+        if (version !== undefined && Number(version) !== Number(task.version || 1)) {
+          throw new DatabaseMutationError(409, 'Задача уже изменилась. Обновите данные и повторите действие.');
+        }
+        const wasCompleted = task.status === 'completed';
+        task.status = status;
+        task.assignmentMode = 'shared';
+        if (status === 'completed') {
+          task.completedAt = new Date().toISOString();
+          if (!wasCompleted) task.completedBy = requester.id;
+          task.timeSpentMinutes = timeSpentMinutes === undefined ? undefined : Math.round(parsedTimeSpent);
+          task.completionComments = task.completionComments || {};
+          if (cleanComment) task.completionComments[requester.id] = cleanComment;
+          else delete task.completionComments[requester.id];
+        } else {
+          task.completedAt = '';
+          task.completedBy = undefined;
+          task.timeSpentMinutes = undefined;
+        }
+        task.version = Number(task.version || 1) + 1;
 
-    saveDatabase(state);
-    res.json({ success: true, task });
+        let notification: { target: User; text: string } | undefined;
+        if (status === 'completed' && task.assignedTo) {
+          const target = state.users.find((user) => user.id === task.creatorId && user.id !== requester.id);
+          if (target) {
+            const completionActor = state.users.find((user) => user.id === task.completedBy);
+            const text = `Задача выполнена!\nБлоки: ${taskCompetencyNames(task).join(', ') || 'не указаны'}\nЗавершил: ${completionActor?.realName || 'не указан'}\nЗадача: "${task.title}"${task.timeSpentMinutes ? `\nЗатрачено: ${taskDurationLabel(task.timeSpentMinutes)}` : ''}${String(completionComment || '').trim() ? `\nКомментарий: ${String(completionComment).trim()}` : ''}`;
+            if (!state.messages[target.id]) state.messages[target.id] = [];
+            state.messages[target.id].push({
+              id: `task_completed_${crypto.randomUUID()}`,
+              userId: target.id,
+              sender: 'bot',
+              text,
+              timestamp: new Date().toISOString(),
+            });
+            notification = { target, text };
+          }
+        }
+        return { task, notification };
+      });
+    } catch (error) {
+      return databaseMutationErrorResponse(res, error);
+    }
+    const notification = committed.value.notification;
+    if (notification?.target.telegramId) {
+      await Promise.allSettled([sendTaskTelegramMessage(
+        notification.target.telegramId, notification.text, undefined, false, notification.target,
+      )]);
+    }
+    return res.json({ success: true, task: committed.value.task, alreadyApplied: Boolean(committed.value.alreadyApplied) });
   });
 
   app.post('/api/task/log/clear', (req, res) => {
     const { requesterId } = req.body;
     const state = loadDatabase();
     if (!isAdminUser(state, requesterId)) {
-      return res.status(403).json({ error: 'Только админ может удалить бэклог задач' });
+      return res.status(403).json({ error: 'Только админ может управлять архивом задач' });
     }
-    state.tasks = [];
-    saveDatabase(state);
-    res.json({ success: true });
+    return res.status(410).json({ error: 'Полная очистка журнала отключена. Используйте очистку архива или сезонный сброс с предварительным просмотром.' });
+  });
+
+  app.post('/api/task/archive/preview', (req, res) => {
+    const state = loadDatabase();
+    if (!isAdminUser(state, req.body.requesterId)) return res.status(403).json({ error: 'Только админ может управлять архивом задач' });
+    const archived = state.tasks.filter((task) => task.status === 'completed' || task.status === 'cancelled');
+    return res.json({
+      success: true,
+      taskIds: archived.map((task) => task.id).sort(),
+      count: archived.length,
+      completedCount: archived.filter((task) => task.status === 'completed').length,
+      cancelledCount: archived.filter((task) => task.status === 'cancelled').length,
+    });
+  });
+
+  app.post('/api/task/archive/clear', (req, res) => {
+    const expectedIds = Array.isArray(req.body.taskIds) ? req.body.taskIds.map(String).sort() : [];
+    try {
+      const committed = mutateDatabaseAtomically((state) => {
+        if (!isAdminUser(state, req.body.requesterId)) throw new DatabaseMutationError(403, 'Только админ может управлять архивом задач');
+        const currentIds = state.tasks.filter((task) => task.status === 'completed' || task.status === 'cancelled').map((task) => task.id).sort();
+        if (JSON.stringify(currentIds) !== JSON.stringify(expectedIds)) {
+          throw new DatabaseMutationError(409, 'Состав архива изменился. Обновите предварительный просмотр и повторите действие.');
+        }
+        const backupPath = writeDatabaseRecoveryRecord(DATABASE_RECOVERY_DIRECTORY, state, DATABASE_RECOVERY_RETENTION);
+        const archivedIds = new Set(currentIds);
+        state.tasks = state.tasks.filter((task) => !archivedIds.has(task.id));
+        return { removedCount: currentIds.length, backupId: path.basename(backupPath), remainingCount: state.tasks.length };
+      });
+      return res.json({ success: true, ...committed.value, revision: committed.state.settings?.databaseRevision || 0 });
+    } catch (error) {
+      return databaseMutationErrorResponse(res, error);
+    }
+  });
+
+  app.post('/api/task/season-reset/preview', (req, res) => {
+    const state = loadDatabase();
+    if (!isAdminUser(state, req.body.requesterId)) return res.status(403).json({ error: 'Только админ может выполнять сезонный сброс' });
+    const statusCounts = state.tasks.reduce<Record<string, number>>((counts, task) => {
+      counts[task.status] = (counts[task.status] || 0) + 1;
+      return counts;
+    }, {});
+    return res.json({ success: true, taskIds: state.tasks.map((task) => task.id).sort(), count: state.tasks.length, statusCounts });
+  });
+
+  app.post('/api/task/season-reset', (req, res) => {
+    const expectedIds = Array.isArray(req.body.taskIds) ? req.body.taskIds.map(String).sort() : [];
+    try {
+      const committed = mutateDatabaseAtomically((state) => {
+        if (!isAdminUser(state, req.body.requesterId)) throw new DatabaseMutationError(403, 'Только админ может выполнять сезонный сброс');
+        if (req.body.confirmation !== 'СБРОСИТЬ СЕЗОН') throw new DatabaseMutationError(400, 'Введите точную фразу подтверждения: СБРОСИТЬ СЕЗОН');
+        const currentIds = state.tasks.map((task) => task.id).sort();
+        if (JSON.stringify(currentIds) !== JSON.stringify(expectedIds)) {
+          throw new DatabaseMutationError(409, 'Состав задач изменился. Обновите предварительный просмотр и повторите действие.');
+        }
+        const backupPath = writeDatabaseRecoveryRecord(DATABASE_RECOVERY_DIRECTORY, state, DATABASE_RECOVERY_RETENTION);
+        state.tasks = [];
+        return { operationId: crypto.randomUUID(), removedCount: currentIds.length, backupId: path.basename(backupPath) };
+      });
+      console.warn(`[task-season-reset] operation=${committed.value.operationId} removed=${committed.value.removedCount} backup=${committed.value.backupId}`);
+      return res.json({ success: true, ...committed.value, revision: committed.state.settings?.databaseRevision || 0 });
+    } catch (error) {
+      return databaseMutationErrorResponse(res, error);
+    }
   });
 
   app.get('/api/task/export', (req, res) => {
@@ -5619,7 +6989,7 @@ async function startServer() {
   // Suggest meeting windows with a pure algorithm.
   app.post('/api/meeting/suggest', async (req, res) => {
     const state = loadDatabase();
-    const teamUsers = state.users.filter((user) => !isFacultyUser(user));
+    const teamUsers = activeCoreTeamUsers(state.users);
     const availabilityConfig = normalizeAvailabilityConfig(state.settings);
     const requestedWeekIndex = Number(req.body?.weekIndex ?? 0);
     if (!Number.isInteger(requestedWeekIndex) || requestedWeekIndex < 0 || requestedWeekIndex >= availabilityConfig.weekCount) {
@@ -5718,6 +7088,18 @@ async function startServer() {
       topSuggestions: suggestions
     });
   });
+  app.use((error: unknown, req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (res.headersSent) return next(error);
+    const context = req as express.Request & { requestId?: string; operationId?: string };
+    console.error(JSON.stringify({
+      event: 'unhandled_request_error', requestId: context.requestId, operationId: context.operationId,
+      method: req.method, path: req.path, error: safeOperationalError(error),
+    }));
+    return res.status(500).json({
+      error: 'Внутренняя ошибка сервиса. Повторите запрос позже.',
+      requestId: context.requestId,
+    });
+  });
   // Serve static UI assets or let Vite do it in dev mode
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
@@ -5774,7 +7156,7 @@ async function startServer() {
       });
       await configureBotProfile();
       const menuState = loadDatabase();
-      const menuUsers = menuState.users.filter((user) => user.registered && user.telegramId);
+      const menuUsers = menuState.users.filter((user) => isUserActive(user) && user.registered && user.telegramId);
       await Promise.allSettled(menuUsers.map((user) => configureChatMenuButton(user.telegramId!, user)));
       console.log('Telegram commands configured. Mini App menu button configured.');
     } catch (err: any) {
@@ -5783,8 +7165,8 @@ async function startServer() {
   }
 
   async function startTelegramLongPolling() {
-    if (process.env.DISABLE_TELEGRAM_POLLING === 'true') {
-      console.log('Telegram long polling disabled by DISABLE_TELEGRAM_POLLING.');
+    if (telegramUpdateMode !== 'polling') {
+      console.log(`Telegram long polling disabled: TELEGRAM_UPDATE_MODE=${telegramUpdateMode}.`);
       return;
     }
 
@@ -5808,39 +7190,6 @@ async function startServer() {
       console.error('Failed to delete Telegram webhook:', err.message);
     }
 
-    await sendDueBirthdayReminders();
-    await sendTaskReminders();
-    await flushPendingImportantNotifications();
-    setInterval(() => {
-      sendDueBirthdayReminders().catch((err) => {
-        console.error('Birthday reminder check failed:', err.message);
-      });
-    }, 15 * 60 * 1000);
-    const scheduleNextAvailabilityReminderCheck = () => {
-      const delayMs = millisecondsUntilNextWholeHour();
-      setTimeout(() => {
-        sendSundayAvailabilityReminders().catch((err) => {
-          console.error('Sunday availability reminder check failed:', err.message);
-        }).finally(scheduleNextAvailabilityReminderCheck);
-      }, delayMs);
-    };
-    if (isAvailabilityReminderTime()) {
-      sendSundayAvailabilityReminders().catch((err) => {
-        console.error('Sunday availability reminder check failed:', err.message);
-      });
-    }
-    scheduleNextAvailabilityReminderCheck();
-    setInterval(() => {
-      sendTaskReminders().catch((err) => {
-        console.error('Task reminder check failed:', err.message);
-      });
-    }, 15 * 60 * 1000);
-    setInterval(() => {
-      flushPendingImportantNotifications().catch((err) => {
-        console.error('IMPORTANT topic notification retry failed:', err.message);
-      });
-    }, 60 * 1000);
-
     console.log('Telegram long polling started.');
     let offset = 0;
 
@@ -5853,21 +7202,10 @@ async function startServer() {
         }
         const data = (await response.json()) as { ok: boolean; result: any[] };
         if (data.ok && data.result.length > 0) {
-          for (const update of data.result) {
-            offset = update.update_id + 1;
-            console.log(`[Long Polling] Received update: ${update.update_id}`);
-
-            // Forward the update to the local webhook router.
-            try {
-              await fetch(`http://localhost:${PORT}/api/telegram-webhook`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(update)
-              });
-            } catch (err: any) {
-              console.error('Local update processing failed:', err.message);
-            }
-          }
+          data.result.forEach((update) => console.log(`[Long Polling] Received update: ${update.update_id}`));
+          persistTelegramUpdates(data.result);
+          offset = Math.max(...data.result.map((update) => Number(update.update_id))) + 1;
+          void flushTelegramInbox().catch((error) => console.error('Telegram inbox flush failed:', error));
         }
       } catch (err: any) {
         console.error('Telegram getUpdates request failed:', err.message);
@@ -5881,6 +7219,52 @@ async function startServer() {
     };
 
     poll();
+  }
+
+  function startBackgroundSchedulers() {
+    if (process.env.BACKGROUND_SCHEDULERS_ENABLED?.trim().toLowerCase() === 'false') {
+      console.log('Telegram background schedulers disabled by BACKGROUND_SCHEDULERS_ENABLED=false.');
+      return;
+    }
+    const botToken = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
+    if (!botToken) {
+      console.warn('Telegram background schedulers were not started because no bot token is configured.');
+      return;
+    }
+    sendDueBirthdayReminders().catch((error) => console.error('Birthday reminder check failed:', error));
+    sendTaskReminders().catch((error) => console.error('Task reminder check failed:', error));
+    flushPendingImportantNotifications().catch((error) => console.error('Notification delivery flush failed:', error));
+    setInterval(() => {
+      sendDueBirthdayReminders().catch((error) => console.error('Birthday reminder check failed:', error));
+    }, 15 * 60 * 1000);
+    const scheduleNextAvailabilityReminderCheck = () => {
+      if (isShuttingDown) return;
+      const delayMs = millisecondsUntilNextWholeHour();
+      setTimeout(() => {
+        sendSundayAvailabilityReminders().catch((error) => {
+          console.error('Sunday availability reminder check failed:', error);
+        }).finally(scheduleNextAvailabilityReminderCheck);
+      }, delayMs);
+    };
+    if (isAvailabilityReminderTime()) {
+      sendSundayAvailabilityReminders().catch((error) => console.error('Sunday availability reminder check failed:', error));
+    }
+    scheduleNextAvailabilityReminderCheck();
+    setInterval(() => {
+      sendTaskReminders().catch((error) => console.error('Task reminder check failed:', error));
+    }, 15 * 60 * 1000);
+    setInterval(() => {
+      flushPendingImportantNotifications().catch((error) => console.error('Notification delivery flush failed:', error));
+    }, 10 * 1000);
+    console.log(`Telegram background schedulers started independently of update transport (${PROJECT_TIME_ZONE}).`);
+  }
+
+  function startTelegramInboxWorker() {
+    flushTelegramInbox().catch((error) => console.error('Telegram inbox startup flush failed:', error));
+    setInterval(() => {
+      if (isShuttingDown) return;
+      flushTelegramInbox().catch((error) => console.error('Telegram inbox flush failed:', error));
+    }, Math.max(250, Number(process.env.TELEGRAM_INBOX_POLL_INTERVAL_MS || 1000)));
   }
 
   setInterval(() => {
@@ -5917,13 +7301,58 @@ async function startServer() {
     }, 60 * 1000);
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  const httpServer = app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on port ${PORT}`);
     configureTelegramBotUi().catch((error: any) => {
       console.error('Telegram UI configuration failed:', error.message || error);
     });
+    startTelegramInboxWorker();
+    startBackgroundSchedulers();
     startTelegramLongPolling();
   });
+
+  let shutdownPromise: Promise<void> | null = null;
+  const shutdown = (signal: NodeJS.Signals) => {
+    if (shutdownPromise) return;
+    isShuttingDown = true;
+    console.log(`${signal} received: stopping new requests and draining database persistence.`);
+    let serverCloseError: Error | undefined;
+    const serverClosed = new Promise<void>((resolve) => {
+      httpServer.close((error) => {
+        serverCloseError = error;
+        resolve();
+      });
+      httpServer.closeIdleConnections?.();
+    });
+
+    shutdownPromise = (async () => {
+      if (databaseSheetsFlushTimer) {
+        clearTimeout(databaseSheetsFlushTimer);
+        databaseSheetsFlushTimer = null;
+      }
+      const persistenceDrain = (async () => {
+        await flushDatabaseSheetsSnapshots();
+        return !pendingDatabaseSheetsState;
+      })();
+      const persistenceDrained = await Promise.race([
+        persistenceDrain,
+        new Promise<false>((resolve) => setTimeout(() => resolve(false), 10_000)),
+      ]);
+      if (persistenceDrained) {
+        console.log('Database persistence drained successfully.');
+      } else {
+        console.warn('Google Sheets replication did not drain before shutdown; the durable recovery journal will resume it on restart.');
+      }
+      await Promise.race([
+        serverClosed,
+        new Promise<void>((resolve) => setTimeout(resolve, 5_000)),
+      ]);
+      if (serverCloseError) console.error('HTTP server close failed:', serverCloseError);
+      process.exit(serverCloseError ? 1 : 0);
+    })();
+  };
+  process.once('SIGTERM', shutdown);
+  process.once('SIGINT', shutdown);
 }
 
 startServer().catch((error) => {

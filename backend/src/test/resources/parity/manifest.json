@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "generatedFrom": "synthetic-baseline",
+  "containsPersonalData": false,
+  "fixtures": [
+    "health-ready.response.json",
+    "telegram-auth.request.json",
+    "task-create.request.json",
+    "broadcast-scheduled.request.json"
+  ]
+}

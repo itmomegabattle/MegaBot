@@ -1,0 +1,12 @@
+spring:
+  datasource:
+    url: ${MEGABOT_DB_URL:jdbc:postgresql://127.0.0.1:5432/megabot}
+    username: ${MEGABOT_DB_USERNAME:megabot_app}
+    password: ${MEGABOT_DB_PASSWORD:megabot_local_only}
+
+megabot:
+  integrations:
+    telegram:
+      mode: fake
+    google:
+      mode: fake

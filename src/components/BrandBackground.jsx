@@ -314,6 +314,10 @@ function isLightTheme() {
   return !document.documentElement.classList.contains("dark-theme");
 }
 
+function isCalmBackground() {
+  return document.documentElement.classList.contains("mega-calm-background");
+}
+
 export default function Background() {
   const containerRef = useRef(null);
 
@@ -416,7 +420,7 @@ export default function Background() {
 
       const loop = (time) => {
         frameId = 0;
-        if (!visible || !pageVisible || reducedMotionQuery.matches) return;
+        if (!visible || !pageVisible || reducedMotionQuery.matches || isCalmBackground()) return;
 
         const fps = mobileQuery.matches ? MOBILE_FPS : DESKTOP_FPS;
         const frameDuration = 1000 / fps;
@@ -449,7 +453,7 @@ export default function Background() {
 
       const start = () => {
         stop();
-        if (visible && pageVisible && !reducedMotionQuery.matches) {
+        if (visible && pageVisible && !reducedMotionQuery.matches && !isCalmBackground()) {
           lastRenderTime = 0;
           frameId = requestAnimationFrame(loop);
         } else {
@@ -489,7 +493,7 @@ export default function Background() {
 
       const themeObserver = new MutationObserver(() => {
         applyTheme();
-        render(performance.now());
+        start();
       });
       themeObserver.observe(document.documentElement, {
         attributes: true,

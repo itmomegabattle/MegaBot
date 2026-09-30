@@ -76,6 +76,25 @@ const imported = { userId: 'u1', weekStart: '2030-01-14', updatedAt: '2030-01-13
 const merged = mergePrimarySheetAvailability(before.availabilities.u1, imported, '2030-01-14');
 assert.deepEqual(merged.slots, { 0: [20], 7: [19] }, 'import must align existing future weeks before merging');
 assert.deepEqual(merged.outWeekIndexes, [1]);
+const multiWeekMerged = mergePrimarySheetAvailability({
+  ...before.availabilities.u1,
+  slots: { ...before.availabilities.u1.slots, 16: [21] },
+}, {
+  userId: 'u1', weekStart: '2030-01-14', updatedAt: '2030-01-13T21:00:02Z',
+  slots: { 0: [20], 7: [], 14: [22] },
+  coveredOutWeekIndexes: [0, 1, 2], outWeekIndexes: [2],
+}, '2030-01-14');
+assert.deepEqual(multiWeekMerged.slots, { 0: [20], 9: [21], 14: [22] }, 'all covered future dates must update while an absent date column is preserved');
+assert.deepEqual(multiWeekMerged.hardUnavailableDays, [1, 8], 'an empty checkbox day must not silently become or erase hard unavailability');
+assert.deepEqual(multiWeekMerged.outWeekIndexes, [2], 'only explicitly covered out-week flags may replace stored values');
+const fiveWeekMerged = mergePrimarySheetAvailability({
+  userId: 'u1', weekStart: '2030-01-14', updatedAt: '2030-01-14T10:00:00Z',
+  slots: { 0: [17], 7: [18], 14: [19], 21: [20], 28: [21] },
+}, {
+  userId: 'u1', weekStart: '2030-01-14', updatedAt: '2030-01-14T10:01:00Z',
+  slots: { 28: [23] },
+}, '2030-01-14');
+assert.deepEqual(fiveWeekMerged.slots, { 0: [17], 7: [18], 14: [19], 21: [20], 28: [23] }, 'the last date of a five-week horizon must round-trip');
 const lateImport = mergePrimarySheetAvailability(after.availabilities.u1, { ...imported, weekStart: '2030-01-07' }, '2030-01-14');
 assert.deepEqual(lateImport.slots, after.availabilities.u1.slots, 'in-flight import from last week must not overwrite the new week');
 

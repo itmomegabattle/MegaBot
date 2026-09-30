@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import type { Meeting, SimulationState, User } from './types.js';
+import { resolveMeetingAudienceUsers } from './audiencePolicy.js';
 
 export type GoogleCalendarConfig = {
   calendarId: string;
@@ -121,8 +122,7 @@ export function buildGoogleCalendarEvent(meeting: Meeting, state: Pick<Simulatio
   const time = /^\d{2}:\d{2}$/.test(meeting.time) ? meeting.time : `0${meeting.time}`.slice(-5);
   const startDateTime = `${date}T${time}:00`;
   const duration = Number.isFinite(Number(meeting.duration)) && Number(meeting.duration) > 0 ? Number(meeting.duration) : 1;
-  const invitedIds = meeting.participants === 'all' ? state.users.map((user) => user.id) : meeting.participants;
-  const invited = invitedIds.map((id) => state.users.find((user) => user.id === id)).filter(Boolean) as User[];
+  const invited = resolveMeetingAudienceUsers(state.users, meeting);
   const workEvent = (state.events || []).find((item) => item.id === meeting.eventId);
   const isSetup = meeting.kind === 'setup';
   const description = [
@@ -134,7 +134,7 @@ export function buildGoogleCalendarEvent(meeting: Meeting, state: Pick<Simulatio
     meeting.competency && `Направление: ${meeting.competency}`,
     `Формат: ${isSetup ? 'монтаж, приглашена вся команда' : meeting.kind === 'vibe' ? 'неформальная встреча' : meeting.type === 'general' ? 'общее собрание' : 'выбранные участники'}`,
     `Организатор: ${userLabel(state.users.find((user) => user.id === meeting.hostId))}`,
-    `Участники: ${meeting.participants === 'all' ? 'вся команда' : invited.map(userLabel).join(', ') || 'не указаны'}`,
+    `Участники: ${meeting.participants === 'all' ? `вся команда (${invited.length})` : invited.map(userLabel).join(', ') || 'не указаны'}`,
     `MegaBot ID: ${meeting.id}`,
   ].filter(Boolean).join('\n');
   return {

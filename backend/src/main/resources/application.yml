@@ -1,0 +1,49 @@
+spring:
+  application:
+    name: megabot
+  lifecycle:
+    timeout-per-shutdown-phase: 10s
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+  flyway:
+    enabled: true
+
+server:
+  shutdown: graceful
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: never
+      group:
+        liveness:
+          include: livenessState
+        readiness:
+          include: readinessState,db
+
+megabot:
+  auth:
+    telegram:
+      bot-token: ${TELEGRAM_BOT_TOKEN:}
+      admin-telegram-ids: ${ADMIN_TELEGRAM_IDS:}
+      max-age: 5m
+      future-skew: 30s
+      session-ttl: 30d
+      rate-limit-window: 5m
+      rate-limit-per-ip: 30
+      rate-limit-per-user: 10
+  security:
+    allowed-origins: ${MEGABOT_ALLOWED_ORIGINS:}
+  integrations:
+    telegram:
+      mode: disabled
+    google:
+      mode: disabled

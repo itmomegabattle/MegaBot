@@ -50,7 +50,7 @@ export function birthdayReminder(user: Pick<User, 'birthday' | 'realName'>, now 
 export async function deliverBirthdayReminders(dependencies: {
   loadState: () => SimulationState;
   saveState: (state: SimulationState) => unknown;
-  send: (telegramId: string, text: string) => Promise<unknown>;
+  send: (telegramId: string, text: string, deliveryId: string) => Promise<unknown>;
 }, now = new Date(), environment: NodeJS.ProcessEnv = process.env) {
   const snapshot = dependencies.loadState();
   let delivered = 0;
@@ -67,7 +67,7 @@ export async function deliverBirthdayReminders(dependencies: {
       if (alreadySent(dependencies.loadState())) continue;
       if (recipient.telegramId) {
         try {
-          if (!await dependencies.send(recipient.telegramId, reminder.text)) continue;
+          if (!await dependencies.send(recipient.telegramId, reminder.text, id)) continue;
         } catch {
           // Leave the reminder pending for the next check.
           continue;

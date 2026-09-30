@@ -1,0 +1,11 @@
+spring:
+  jpa:
+    hibernate:
+      ddl-auto: validate
+
+megabot:
+  integrations:
+    telegram:
+      mode: fake
+    google:
+      mode: fake

@@ -1,6 +1,9 @@
-export const MOSCOW_TIME_ZONE = 'Europe/Moscow';
+import { PROJECT_TIME_ZONE, projectClock } from './projectTime.js';
+
+export const MOSCOW_TIME_ZONE = PROJECT_TIME_ZONE;
 export const AVAILABILITY_REMINDER_WEEKDAY = 0;
 export const AVAILABILITY_REMINDER_HOUR = 18;
+export const AVAILABILITY_REMINDER_GRACE_END_HOUR = 21;
 
 export type MoscowClock = {
   dateKey: string;
@@ -10,23 +13,14 @@ export type MoscowClock = {
 };
 
 export function moscowClock(date = new Date()): MoscowClock {
-  const parts = new Intl.DateTimeFormat('en-CA', {
-    timeZone: MOSCOW_TIME_ZONE,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    hourCycle: 'h23',
-  }).formatToParts(date);
-  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
-  const dateKey = `${values.year}-${values.month}-${values.day}`;
+  const clock = projectClock(date);
+  const dateKey = clock.dateKey;
   const weekday = new Date(`${dateKey}T12:00:00Z`).getUTCDay();
   return {
     dateKey,
     weekday,
-    hour: Number(values.hour),
-    minute: Number(values.minute),
+    hour: clock.hour,
+    minute: clock.minute,
   };
 }
 
@@ -34,8 +28,8 @@ export function isAvailabilityReminderTime(date = new Date()) {
   const clock = moscowClock(date);
   return (
     clock.weekday === AVAILABILITY_REMINDER_WEEKDAY
-    && clock.hour === AVAILABILITY_REMINDER_HOUR
-    && clock.minute === 0
+    && clock.hour >= AVAILABILITY_REMINDER_HOUR
+    && clock.hour < AVAILABILITY_REMINDER_GRACE_END_HOUR
   );
 }
 

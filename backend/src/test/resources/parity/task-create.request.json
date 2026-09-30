@@ -1,0 +1,7 @@
+{
+  "title": "Synthetic task",
+  "description": "No production data",
+  "priority": "medium",
+  "assigneeIds": ["u_synthetic_1"],
+  "deadline": "2030-01-02"
+}

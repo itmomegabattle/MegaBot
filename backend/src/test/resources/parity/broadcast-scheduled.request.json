@@ -1,0 +1,7 @@
+{
+  "text": "Synthetic scheduled message",
+  "audience": {"mode": "selected", "userIds": ["u_synthetic_1"]},
+  "scheduledLocal": "2030-01-02T12:00:00",
+  "zoneId": "Europe/Moscow",
+  "misfirePolicy": "send_within_grace"
+}

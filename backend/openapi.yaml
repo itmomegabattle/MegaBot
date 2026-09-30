@@ -1,0 +1,511 @@
+openapi: 3.1.0
+info:
+  title: MegaBot API
+  version: 0.1.0
+  description: Contract grows together with the Java migration. No business endpoint is declared before implementation and tests.
+servers:
+  - url: http://localhost:8080
+paths:
+  /api/state:
+    get:
+      summary: Temporary safe frontend state adapter for active core-team sessions
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200': { description: Safe compatibility state; meetings are backed by PostgreSQL, tasks remain empty until B-06 }
+        '403': { description: Faculty sessions cannot access core state }
+  /api/v1/auth/telegram:
+    post:
+      summary: Exchange verified Telegram Mini App initData for an opaque session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [initData]
+              properties:
+                initData:
+                  type: string
+      responses:
+        '200':
+          description: Authenticated; session is returned only as an HttpOnly cookie
+        '403':
+          description: Signature, age, user binding or active-user validation failed
+        '429':
+          description: Authentication rate limit exceeded
+  /api/v1/auth/logout:
+    post:
+      summary: Revoke the current server-side session
+      security:
+        - sessionCookie: []
+      responses:
+        '204':
+          description: Session revoked and cookie cleared
+        '401':
+          description: No active session
+  /api/v1/me:
+    get:
+      summary: Return the current safe user DTO
+      security:
+        - sessionCookie: []
+      responses:
+        '200':
+          description: Current authenticated user
+        '401':
+          description: No active session
+  /api/v1/profile:
+    get:
+      summary: Return the current full profile
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200': { description: Current profile }
+    patch:
+      summary: Update the current profile with optimistic version checking
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200': { description: Updated profile }
+        '409': { description: Stale profile version }
+  /api/v1/faculty/me:
+    get:
+      summary: Return only the current faculty profile and scope identifiers
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200': { description: Current faculty profile }
+        '403': { description: Faculty role required }
+  /api/v1/team:
+    get:
+      summary: List active core-team members without private birthday year
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200': { description: Active team }
+        '403': { description: Faculty sessions cannot read core-team state }
+  /api/v1/users:
+    post:
+      summary: Invite or create a team member
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '201': { description: User created }
+        '403': { description: Admin role required }
+        '409': { description: Telegram identity already exists }
+  /api/v1/users/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    patch:
+      summary: Update role and profile as admin
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200': { description: User updated }
+        '409': { description: Stale version or last-admin protection }
+    delete:
+      summary: Deactivate a user after dependency checks
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - name: expectedVersion
+          in: query
+          required: true
+          schema: { type: integer, format: int64 }
+      responses:
+        '204': { description: User deactivated and sessions revoked }
+        '409': { description: Reassignment required or last-admin protection }
+  /api/v1/events:
+    get:
+      summary: List work events
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200': { description: Events }
+    post:
+      summary: Create a work event as admin
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '201': { description: Event created }
+  /api/v1/events/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    patch:
+      summary: Update a work event as admin
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200': { description: Event updated }
+        '409': { description: Stale version }
+    delete:
+      summary: Archive a work event as admin
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - name: expectedVersion
+          in: query
+          required: true
+          schema: { type: integer, format: int64 }
+      responses:
+        '204': { description: Event archived }
+  /api/v1/availability:
+    get:
+      summary: Return 2–5 dated weeks from the current Moscow Monday
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - name: userId
+          in: query
+          required: false
+          description: Admin-only when different from the current user
+          schema: { type: string }
+      responses:
+        '200': { description: Settings, metadata and independently versioned weeks }
+  /api/v1/availability/weeks/{weekStart}:
+    put:
+      summary: Replace exactly one visible dated availability week
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - name: weekStart
+          in: path
+          required: true
+          schema: { type: string, format: date }
+      responses:
+        '200': { description: Saved week }
+        '409': { description: Stale version or week outside current horizon }
+  /api/v1/availability/weeks/{weekStart}/metadata:
+    parameters:
+      - name: weekStart
+        in: path
+        required: true
+        schema: { type: string, format: date }
+    patch:
+      summary: Set title and description bound to a Monday date
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200': { description: Saved metadata }
+  /api/v1/availability/settings:
+    patch:
+      summary: Configure horizon, active weekdays and hours as admin
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200': { description: Saved settings }
+        '409': { description: Stale settings version }
+  /api/v1/availability/suggestions:
+    post:
+      summary: Rank up to five dated meeting windows and explain each unavailable participant
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200': { description: Suggestions with out, not_marked and inconvenient reasons }
+  /api/v1/meetings:
+    get:
+      summary: List meetings with computed lifecycle phase and invitation snapshots
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200': { description: Ongoing, upcoming, past and cancelled meetings }
+    post:
+      summary: Create a meeting and atomically enqueue notification and Calendar work
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '201': { description: Meeting created with all invitations initially unanswered }
+        '400': { description: Invalid kind, Moscow slot, duration, event or audience }
+  /api/v1/meetings/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    patch:
+      summary: Replace meeting details as host or admin with optimistic version checking
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200': { description: Meeting updated; retained invitees keep their RSVP }
+        '409': { description: Stale version or meeting is no longer scheduled }
+  /api/v1/meetings/{id}/cancel:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      summary: Cancel a meeting as host or admin
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200': { description: Meeting cancelled, or existing cancellation returned as a no-op }
+        '409': { description: Stale version }
+  /api/v1/meetings/{id}/rsvp:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      summary: Set the current invited user's explicit yes, no or unanswered RSVP
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200': { description: RSVP stored, or returned as a no-op when unchanged }
+        '403': { description: Current user is not invited }
+        '409': { description: Meeting is cancelled or already finished }
+  /api/v1/catalogs:
+    get:
+      summary: List active competency and faculty dictionaries
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200': { description: Active catalogs }
+  /api/v1/competencies:
+    post:
+      summary: Create a core or faculty competency as admin
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '201': { description: Competency created }
+  /api/v1/competencies/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    patch:
+      summary: Rename a competency with optimistic version checking
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200': { description: Competency updated }
+    delete:
+      summary: Retire a competency without deleting historical references
+      security: [{ sessionCookie: [] }]
+      responses:
+        '204': { description: Competency retired }
+  /api/v1/faculties:
+    post:
+      summary: Create a faculty as admin
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '201': { description: Faculty created }
+  /api/v1/faculties/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    patch:
+      summary: Rename a faculty with optimistic version checking
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200': { description: Faculty updated }
+    delete:
+      summary: Retire an empty faculty
+      security: [{ sessionCookie: [] }]
+      responses:
+        '204': { description: Faculty retired }
+  /api/v1/tasks:
+    get:
+      summary: List tasks with faculty scope filtering
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - $ref: '#/components/parameters/PageLimit'
+        - $ref: '#/components/parameters/PageCursor'
+      responses:
+        '200': { description: Task list; next cursor is the final item id }
+    post:
+      summary: Create a shared task as core-team member
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TaskMutation' }
+      responses:
+        '201': { description: Task, history, audit and silent outbox committed together }
+  /api/v1/tasks/{id}:
+    parameters:
+      - $ref: '#/components/parameters/TaskId'
+    get:
+      summary: Read task details and scoped comments
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200': { description: Task details }
+        '403': { description: Not assigned or wrong faculty scope }
+    patch:
+      summary: Replace task details and assignments as author or admin
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TaskMutation' }
+      responses:
+        '200': { description: Task updated }
+        '409': { description: Stale version or closed task }
+  /api/v1/tasks/{id}/history:
+    parameters:
+      - $ref: '#/components/parameters/TaskId'
+    get:
+      summary: Read chronological task status history
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - $ref: '#/components/parameters/PageLimit'
+        - $ref: '#/components/parameters/PageCursor'
+      responses:
+        '200': { description: History from persisted task_status_history }
+  /api/v1/tasks/{id}/claim:
+    parameters:
+      - $ref: '#/components/parameters/TaskId'
+    post:
+      summary: Atomically claim an open core task
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TaskVersion' }
+      responses:
+        '200': { description: Current user assigned }
+        '409': { description: Another actor claimed first or stale version }
+  /api/v1/tasks/{id}/release:
+    parameters:
+      - $ref: '#/components/parameters/TaskId'
+    post:
+      summary: Release only the current user's assignment
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TaskVersion' }
+      responses:
+        '200': { description: Colleagues remain assigned; final release reopens task }
+  /api/v1/tasks/{id}/cancel:
+    parameters:
+      - $ref: '#/components/parameters/TaskId'
+    post:
+      summary: Cancel task as author or admin and disable future task reminders
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TaskVersion' }
+      responses:
+        '200': { description: Cancelled or already cancelled }
+  /api/v1/tasks/{id}/status:
+    parameters:
+      - $ref: '#/components/parameters/TaskId'
+    post:
+      summary: Transition shared task as assignee or admin
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TaskStatus' }
+      responses:
+        '200': { description: Status changed or unchanged no-op }
+        '409': { description: Invalid transition, cancelled task or stale version }
+  /api/v1/tasks/{id}/comments:
+    parameters:
+      - $ref: '#/components/parameters/TaskId'
+    post:
+      summary: Append a coordinator or executor comment
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TaskComment' }
+      responses:
+        '201': { description: Comment appended; replay does not duplicate it }
+        '409': { description: Closed task or stale version }
+  /api/v1/faculty/my-tasks:
+    get:
+      summary: Read only current faculty member's assigned tasks
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - $ref: '#/components/parameters/PageLimit'
+        - $ref: '#/components/parameters/PageCursor'
+      responses:
+        '200': { description: Faculty-scoped tasks without colleagues' targeted comments }
+components:
+  schemas:
+    TaskVersion:
+      type: object
+      required: [expectedVersion]
+      properties:
+        expectedVersion: { type: integer, format: int64, minimum: 0 }
+    TaskMutation:
+      type: object
+      required: [title, priority]
+      properties:
+        title: { type: string, minLength: 2, maxLength: 160 }
+        description: { type: string, maxLength: 4000 }
+        sow: { type: string, maxLength: 8000 }
+        priority: { type: string, enum: [normal, important, critical] }
+        eventId: { type: [string, 'null'] }
+        facultyId: { type: [string, 'null'] }
+        deadline: { type: [string, 'null'], format: date, description: End of selected Moscow day }
+        assigneeIds: { type: array, maxItems: 200, items: { type: string } }
+        competencyIds: { type: array, maxItems: 100, items: { type: string } }
+        expectedVersion: { type: integer, format: int64, minimum: 0 }
+    TaskStatus:
+      type: object
+      required: [status, expectedVersion]
+      properties:
+        status: { type: string, enum: [open, assigned, in_progress, waiting, completed] }
+        expectedVersion: { type: integer, format: int64, minimum: 0 }
+        timeSpentMinutes: { type: integer, minimum: 1, maximum: 60000 }
+        completionComment: { type: string, maxLength: 4000 }
+    TaskComment:
+      type: object
+      required: [side, text, expectedVersion]
+      properties:
+        side: { type: string, enum: [executor, coordinator] }
+        targetAssigneeId: { type: [string, 'null'] }
+        text: { type: string, minLength: 1, maxLength: 4000 }
+        expectedVersion: { type: integer, format: int64, minimum: 0 }
+  parameters:
+    TaskId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+    PageLimit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+    PageCursor:
+      name: cursor
+      in: query
+      schema: { type: string }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 128
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: megabot_session

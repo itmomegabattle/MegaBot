@@ -214,8 +214,11 @@ try {
   assert.ok(fixedValuesWrite?.body.data.some((item: any) => item.range.includes('!AR3')));
   raw[4][2] = true;
   formatted[4][2] = 'TRUE';
+  raw[4][73] = true;
+  formatted[4][73] = 'TRUE';
   const importedOut = await importAvailabilitiesFromSheet(config, users);
   assert.deepEqual(importedOut.imported.find((item) => item.userId === 'u_alice')?.outWeekIndexes, [0]);
+  assert.deepEqual(importedOut.imported.find((item) => item.userId === 'u_alice')?.slots[7], [17], 'future-week cells must survive import');
   assert.ok(Object.entries(importedOut.imported.find((item) => item.userId === 'u_alice')?.slots || {})
     .filter(([dayIndex]) => Number(dayIndex) < 7)
     .every(([, hours]) => hours.length === 0));
