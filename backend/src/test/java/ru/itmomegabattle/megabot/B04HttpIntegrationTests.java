@@ -122,6 +122,8 @@ class B04HttpIntegrationTests {
 			mvc.perform(get("/api/state").cookie(cookieFor(user)))
 					.andExpect(status().isOk())
 					.andExpect(jsonPath("$.timeZone").value("Europe/Moscow"))
+					.andExpect(jsonPath("$.capabilities.durableBroadcasts").value(true))
+					.andExpect(jsonPath("$.users[0].telegramConnected").isBoolean())
 					.andExpect(jsonPath("$.users[0].telegramId").doesNotExist());
 			mvc.perform(get("/api/v1/catalogs").cookie(cookieFor(user))).andExpect(status().isOk());
 			mvc.perform(get("/api/v1/profile").cookie(cookieFor(user))).andExpect(status().isOk());

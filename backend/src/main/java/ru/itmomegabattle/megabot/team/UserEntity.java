@@ -2,6 +2,8 @@ package ru.itmomegabattle.megabot.team;
 
 import java.time.Instant;
 import java.util.UUID;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
@@ -37,12 +39,15 @@ public class UserEntity {
 	private boolean active = true;
 
 	@Column(name = "birthday_day")
+	@JdbcTypeCode(SqlTypes.SMALLINT)
 	private Integer birthdayDay;
 
 	@Column(name = "birthday_month")
+	@JdbcTypeCode(SqlTypes.SMALLINT)
 	private Integer birthdayMonth;
 
 	@Column(name = "birthday_year")
+	@JdbcTypeCode(SqlTypes.SMALLINT)
 	private Integer birthdayYear;
 
 	@Column(name = "deactivated_at")

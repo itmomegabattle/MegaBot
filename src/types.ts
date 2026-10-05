@@ -10,6 +10,7 @@ export interface User {
   birthday?: string;
   telegramId?: string;
   registered?: boolean;
+  telegramConnected?: boolean;
   competencies?: string[];
   primaryCompetency?: string;
   facultyId?: string;
@@ -136,6 +137,7 @@ export interface BotMessage {
 }
 
 export interface SimulationState {
+  capabilities?: { durableBroadcasts?: boolean };
   serverNow?: string;
   timeZone?: string;
   users: User[];

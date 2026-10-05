@@ -70,7 +70,7 @@ public class IdempotencyService {
 				values (:id, :actorId, :operation, :requestKey, :requestHash, 'processing', :expiresAt)
 				""").param("id", id).param("actorId", actorId).param("operation", operation)
 				.param("requestKey", requestKey).param("requestHash", requestHash)
-				.param("expiresAt", clock.instant().plus(RETENTION)).update();
+				.param("expiresAt", SqlTime.of(clock.instant().plus(RETENTION))).update();
 		var result = mutation.get();
 		var resultJson = encode(result);
 		jdbc.sql("""

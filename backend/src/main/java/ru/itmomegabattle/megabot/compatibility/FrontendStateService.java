@@ -14,8 +14,10 @@ import java.util.Map;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.annotation.Isolation;
 
 import ru.itmomegabattle.megabot.auth.AuthenticatedUser;
+import ru.itmomegabattle.megabot.tasks.TaskService;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
@@ -27,14 +29,16 @@ class FrontendStateService {
 	private final JdbcClient jdbc;
 	private final ObjectMapper json;
 	private final Clock clock;
+	private final TaskService tasks;
 
-	FrontendStateService(JdbcClient jdbc, ObjectMapper json, Clock clock) {
+	FrontendStateService(JdbcClient jdbc, ObjectMapper json, Clock clock, TaskService tasks) {
 		this.jdbc = jdbc;
 		this.json = json;
 		this.clock = clock;
+		this.tasks = tasks;
 	}
 
-	@Transactional(readOnly = true)
+	@Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
 	Map<String, Object> state(AuthenticatedUser viewer) {
 		var settings = readSettings();
 		var monday = LocalDate.now(clock.withZone(PROJECT_ZONE)).with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY));
@@ -45,6 +49,7 @@ class FrontendStateService {
 		var result = new LinkedHashMap<String, Object>();
 		result.put("serverNow", clock.instant());
 		result.put("timeZone", PROJECT_ZONE.getId());
+		result.put("capabilities", Map.of("durableBroadcasts", true));
 		result.put("users", users);
 		result.put("faculties", faculties());
 		result.put("facultyCompetencies", competencyNames("faculty"));
@@ -52,7 +57,7 @@ class FrontendStateService {
 		result.put("availabilities", availabilities(coreUserIds, monday, settings.weekCount()));
 		result.put("meetings", meetings());
 		result.put("events", events());
-		result.put("tasks", List.of());
+		result.put("tasks", tasks.frontendTasks(viewer));
 		result.put("messages", Map.of(viewer.id(), List.of()));
 		result.put("settings", settings.view(monday, metadata(monday, settings.weekCount())));
 		return result;
@@ -60,7 +65,7 @@ class FrontendStateService {
 
 	private List<Map<String, Object>> users(AuthenticatedUser viewer) {
 		var baseUsers = jdbc.sql("""
-				select u.id, u.username, u.real_name, u.role, u.registered, u.active,
+				select u.id, u.username, u.real_name, u.role, u.registered, u.active, u.telegram_id is not null as telegram_connected,
 				       u.birthday_day, u.birthday_month, u.birthday_year, u.deactivated_at,
 				       fm.faculty_id
 				from users u left join faculty_memberships fm on fm.user_id = u.id
@@ -76,6 +81,7 @@ class FrontendStateService {
 			map.put("birthday", birthday((Integer) row.getObject("birthday_day"), (Integer) row.getObject("birthday_month"),
 					(Integer) row.getObject("birthday_year"), "admin".equals(viewer.role()) || viewer.id().equals(id)));
 			map.put("registered", row.getBoolean("registered"));
+			map.put("telegramConnected", row.getBoolean("telegram_connected"));
 			map.put("active", row.getBoolean("active"));
 			map.put("facultyId", valueOrEmpty(row.getString("faculty_id")));
 			if ("admin".equals(viewer.role()) && row.getTimestamp("deactivated_at") != null) {

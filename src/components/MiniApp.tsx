@@ -36,6 +36,9 @@ import { readFormDraft, readLatestFormDraft, removeFormDraft, writeFormDraft } f
 import { drawAvatarCrop } from '../avatarCrop';
 import { projectDateDeadlineInstant } from '../projectTime';
 import { idempotentPost } from '../idempotentRequest';
+import { broadcastJson, broadcastRequestKey, broadcastScheduledAt, broadcastTimeLabel } from '../broadcastClient';
+import BroadcastHistory from './BroadcastHistory';
+import BroadcastGroupPicker, { BroadcastGroupOption } from './BroadcastGroupPicker';
 import {
   TASK_EVENT_SCOPE_ALL,
   TASK_EVENT_SCOPE_ARCHIVED,
@@ -192,7 +195,12 @@ type MeetingFormDraft = {
 };
 
 type BroadcastFormDraft = {
-  mode: 'all' | 'blocks' | 'people' | 'missing_slots';
+  dispatchMode?: 'now' | 'scheduled';
+  date?: string;
+  time?: string;
+  misfirePolicy?: 'send_late' | 'skip';
+  mode: 'all' | 'blocks' | 'people' | 'missing_slots' | 'groups';
+  groupTargetIds?: string[];
   weekIndex: number;
   title: string;
   body: string;
@@ -477,7 +485,10 @@ export default function MiniApp({
   const [showAllCompetencies, setShowAllCompetencies] = useState(false);
   const [teamError, setTeamError] = useState('');
   const [broadcastOpen, setBroadcastOpen] = useState(false);
-  const [broadcastMode, setBroadcastMode] = useState<'all' | 'blocks' | 'people' | 'missing_slots'>('all');
+  const [broadcastMode, setBroadcastMode] = useState<BroadcastFormDraft['mode']>('all');
+  const [broadcastGroupIds, setBroadcastGroupIds] = useState<string[]>([]);
+  const [broadcastGroupOptions, setBroadcastGroupOptions] = useState<BroadcastGroupOption[]>([]);
+  const [broadcastGroupsLoading, setBroadcastGroupsLoading] = useState(false);
   const [broadcastWeekIndex, setBroadcastWeekIndex] = useState(0);
   const [broadcastTitle, setBroadcastTitle] = useState('');
   const [broadcastBody, setBroadcastBody] = useState('');
@@ -490,6 +501,12 @@ export default function MiniApp({
   const [broadcastNotice, setBroadcastNotice] = useState('');
   const [broadcastError, setBroadcastError] = useState('');
   const [broadcastDraftNotice, setBroadcastDraftNotice] = useState('');
+  const [broadcastDispatchMode, setBroadcastDispatchMode] = useState<'now' | 'scheduled'>('now');
+  const [broadcastDate, setBroadcastDate] = useState('');
+  const [broadcastTime, setBroadcastTime] = useState('12:00');
+  const [broadcastMisfirePolicy, setBroadcastMisfirePolicy] = useState<'send_late' | 'skip'>('send_late');
+  const [broadcastHistoryRevision, setBroadcastHistoryRevision] = useState(0);
+  const durableBroadcasts = state.capabilities?.durableBroadcasts === true;
   const [deliveryJournalOpen, setDeliveryJournalOpen] = useState(false);
   const [deliveryIssues, setDeliveryIssues] = useState<DeliveryIssue[]>([]);
   const [selectedDeliveryIds, setSelectedDeliveryIds] = useState<string[]>([]);
@@ -652,23 +669,26 @@ export default function MiniApp({
   const visibleTaskAssignees = normalizedTaskAssigneeSearch || showAllTaskAssignees
     ? matchedTaskAssignees
     : matchedTaskAssignees.slice(0, 3);
+  const broadcastEligibleUsers = coreTeamUsers.filter(user => !durableBroadcasts || user.registered);
   const normalizedBroadcastSearch = broadcastSearch.trim().toLowerCase();
   const matchedBroadcastUsers = normalizedBroadcastSearch
-    ? coreTeamUsers.filter((user) => `${user.realName} ${user.username} ${(user.competencies || []).join(' ')}`.toLowerCase().includes(normalizedBroadcastSearch))
-    : coreTeamUsers;
-  const missingSlotBroadcastUsers = coreTeamUsers.filter((user) => (
+    ? broadcastEligibleUsers.filter((user) => `${user.realName} ${user.username} ${(user.competencies || []).join(' ')}`.toLowerCase().includes(normalizedBroadcastSearch))
+    : broadcastEligibleUsers;
+  const missingSlotBroadcastUsers = broadcastEligibleUsers.filter((user) => (
     !hasSubmittedAvailabilityWeek(state.availabilities[user.id], activeDays, broadcastWeekIndex)
   ));
-  const broadcastAudienceUsers = broadcastMode === 'all'
-    ? coreTeamUsers
+  const broadcastAudienceUsers = broadcastMode === 'groups' ? [] : broadcastMode === 'all'
+    ? broadcastEligibleUsers
     : broadcastMode === 'missing_slots'
       ? missingSlotBroadcastUsers
-      : coreTeamUsers.filter((user) => broadcastRecipients.includes(user.id));
-  const broadcastAvailableUsers = broadcastAudienceUsers.filter((user) => user.registered);
-  const broadcastUnavailableUsers = broadcastAudienceUsers.filter((user) => !user.registered);
+      : broadcastEligibleUsers.filter((user) => broadcastRecipients.includes(user.id));
+  const broadcastAvailableUsers = broadcastAudienceUsers.filter((user) => user.registered && (!durableBroadcasts || user.telegramConnected === true));
+  const broadcastUnavailableUsers = broadcastAudienceUsers.filter((user) => !broadcastAvailableUsers.includes(user));
+  const broadcastGroupsReady = durableBroadcasts && !broadcastGroupsLoading && broadcastGroupIds.length > 0 && broadcastGroupIds.length <= 100 && broadcastGroupIds.every(id => broadcastGroupOptions.some(item => item.id === id));
   const broadcastDraftDirty = broadcastOpen && (
     broadcastMode !== 'all'
     || broadcastWeekIndex !== 0
+    || broadcastDispatchMode !== 'now' || Boolean(broadcastDate) || broadcastMisfirePolicy !== 'send_late'
     || Boolean(broadcastTitle.trim() || broadcastBody.trim() || broadcastBlocks.length || broadcastRecipients.length)
   );
   const filterTasksBySelectedEvent = (tasks: Task[]) => filterTasksByEventScope(tasks, allEvents, selectedTaskEventId);
@@ -780,6 +800,11 @@ export default function MiniApp({
       setBroadcastBody(draft.body);
       setBroadcastBlocks(draft.blocks);
       setBroadcastRecipients(draft.recipients);
+      setBroadcastGroupIds(draft.groupTargetIds || []);
+      setBroadcastDispatchMode(draft.dispatchMode || 'now');
+      setBroadcastDate(draft.date || '');
+      setBroadcastTime(draft.time || '12:00');
+      setBroadcastMisfirePolicy(draft.misfirePolicy || 'send_late');
       setBroadcastDraftNotice('Восстановлен несохранённый черновик рассылки.');
       setBroadcastOpen(true);
     }
@@ -829,9 +854,11 @@ export default function MiniApp({
         body: broadcastBody,
         blocks: broadcastBlocks,
         recipients: broadcastRecipients,
+        groupTargetIds: broadcastGroupIds,
+        dispatchMode: broadcastDispatchMode, date: broadcastDate, time: broadcastTime, misfirePolicy: broadcastMisfirePolicy,
       } satisfies BroadcastFormDraft,
     });
-  }, [broadcastBlocks, broadcastBody, broadcastDraftDirty, broadcastMode, broadcastOpen, broadcastRecipients, broadcastTitle, broadcastWeekIndex, currentUser.id]);
+  }, [broadcastBlocks, broadcastBody, broadcastDraftDirty, broadcastMode, broadcastOpen, broadcastRecipients, broadcastTitle, broadcastWeekIndex, broadcastDispatchMode, broadcastDate, broadcastTime, broadcastMisfirePolicy, broadcastGroupIds, currentUser.id]);
   const profileAssignedTasks = state.tasks.filter((task) => taskAssigneeIds(task).includes(currentUser.id));
   const profileCompletedTasks = allCompletedTasks.filter((task) => taskAssigneeIds(task).includes(currentUser.id));
   const profileDatedCompletedTasks = profileCompletedTasks.filter((task) => (
@@ -1688,7 +1715,7 @@ export default function MiniApp({
     window.setTimeout(() => setRefreshNotice(''), 2500);
   };
 
-  const setBroadcastRecipientMode = (mode: 'all' | 'blocks' | 'people' | 'missing_slots') => {
+  const setBroadcastRecipientMode = (mode: BroadcastFormDraft['mode']) => {
     setBroadcastMode(mode);
     setBroadcastSearch('');
     setShowBroadcastBlocks(false);
@@ -1704,7 +1731,7 @@ export default function MiniApp({
   const toggleBroadcastBlock = (name: string) => {
     setBroadcastBlocks((current) => {
       const next = current.includes(name) ? current.filter((item) => item !== name) : [...current, name];
-      setBroadcastRecipients(coreTeamUsers
+      setBroadcastRecipients(broadcastEligibleUsers
         .filter((user) => next.some((block) => user.primaryCompetency === block || user.competencies?.includes(block)))
         .map((user) => user.id));
       return next;
@@ -1732,13 +1759,28 @@ export default function MiniApp({
       setBroadcastError('Все участники уже отметили слоты на выбранную неделю.');
       return;
     }
-    if (!broadcastAvailableUsers.length) {
+    if (broadcastMode === 'groups' && !broadcastGroupsReady) {
+      setBroadcastError('Выбери разрешённые группы или топики и проверь загруженный список. Черновик сохранён.'); return;
+    }
+    if (broadcastMode !== 'groups' && !broadcastAvailableUsers.length) {
       setBroadcastError('Среди выбранных людей нет доступных адресатов. Им нужно открыть MegaBot и отправить /start.');
+      return;
+    }
+    const scheduledAt = broadcastDispatchMode === 'scheduled' ? broadcastScheduledAt(broadcastDate, broadcastTime) : null;
+    if (broadcastDispatchMode === 'scheduled' && (!durableBroadcasts || !scheduledAt)) {
+      setBroadcastError(durableBroadcasts ? 'Укажи корректные дату и время МСК.' : 'Этот сервер ещё не поддерживает расписание. Черновик сохранён.');
+      return;
+    }
+    if (durableBroadcasts && `${broadcastTitle.trim()}${broadcastTitle.trim() ? '\n\n' : ''}${broadcastBody.trim()}`.length > 40000) {
+      setBroadcastError('Заголовок и текст вместе должны быть не длиннее 40000 символов.');
       return;
     }
     setBroadcastSaving(true);
     try {
-      const response = await idempotentPost('/api/team/broadcast', {
+      const timing = durableBroadcasts ? { dispatchMode: broadcastDispatchMode, ...(scheduledAt ? { scheduledAt } : {}), zoneId: 'Europe/Moscow', misfirePolicy: broadcastMisfirePolicy } : {};
+      const request = broadcastMode === 'groups' ? {
+        recipientMode: 'groups', groupTargetIds: broadcastGroupIds, title: broadcastTitle, body: broadcastBody, ...timing,
+      } : {
           requesterId: currentUser.id,
           recipientMode: broadcastMode,
           availabilityWeekIndex: broadcastWeekIndex,
@@ -1746,10 +1788,24 @@ export default function MiniApp({
           recipientIds: broadcastRecipients,
           title: broadcastTitle,
           body: broadcastBody,
-        });
-      const result = await response.json();
-      if (!response.ok) throw new Error(result.error || 'Не удалось отправить рассылку');
-      setBroadcastNotice([
+          ...timing,
+        };
+      const result = durableBroadcasts
+        ? await broadcastJson(broadcastMode === 'groups' ? '/api/v1/broadcasts' : '/api/team/broadcast', { body: request, key: broadcastRequestKey(window.sessionStorage, currentUser.id, request, () => window.confirm('Поля изменены после запроса без подтверждённого результата. Сервер мог уже сохранить предыдущую рассылку. Проверь историю. Создать отдельную новую рассылку с изменёнными полями?')) })
+        : await (async () => {
+          const response = await idempotentPost('/api/team/broadcast', request);
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.error || 'Не удалось отправить рассылку');
+          return data;
+        })();
+      const broadcastId = broadcastMode === 'groups' ? result.id : result.broadcastId;
+      if (broadcastMode === 'groups' && (!Number.isSafeInteger(result.targetCount) || result.targetCount < 1)) throw new Error('Сервер не подтвердил адресатов. Проверь историю и повтори запрос; черновик сохранён.');
+      if (durableBroadcasts && (typeof broadcastId !== 'string' || !broadcastId)) {
+        throw new Error('Сервер не подтвердил создание. Повтори запрос с тем же текстом; черновик сохранён.');
+      }
+      setBroadcastNotice(durableBroadcasts
+        ? `Рассылка сохранена в очереди${scheduledAt ? ': ' + broadcastTimeLabel(scheduledAt) : ' для отправки сейчас'}. ${broadcastMode === 'groups' ? result.targetCount + ' разрешённых адресатов. Доступность бота проверяется при отправке.' : result.recipients + ' адресатов, недоступно: ' + (result.unavailable || 0) + '.'} Это ещё не подтверждение Telegram. Результат — в истории рассылок.`
+        : [
         `Telegram подтвердил отправку: ${result.delivered || 0} из ${result.recipients || 0}. Это не означает прочтение.`,
         result.unavailable ? `Недоступно без /start: ${result.unavailable}.` : '',
         result.pending ? `Ожидают автоматического повтора: ${result.pending}.` : '',
@@ -1760,12 +1816,17 @@ export default function MiniApp({
       setBroadcastBody('');
       setBroadcastBlocks([]);
       setBroadcastRecipients([]);
+      setBroadcastGroupIds([]);
       setBroadcastSearch('');
       setShowBroadcastBlocks(false);
       setShowBroadcastPeople(false);
       setBroadcastDraftNotice('');
+      setBroadcastDispatchMode('now'); setBroadcastDate(''); setBroadcastTime('12:00'); setBroadcastMisfirePolicy('send_late');
+      setBroadcastHistoryRevision(value => value + 1);
       removeFormDraft(window.sessionStorage, currentUser.id, 'broadcast');
-      await onRefreshState();
+      removeFormDraft(window.sessionStorage, currentUser.id, 'broadcast-request');
+      // Queue acceptance is already confirmed. A state refresh cannot undo it.
+      void Promise.resolve().then(() => onRefreshState()).catch(() => {});
     } catch (error: any) {
       const message = error instanceof TypeError || /failed to fetch|network/i.test(String(error?.message || ''))
         ? 'Нет соединения с сервером. Проверь интернет и повтори отправку — черновик сохранён.'
@@ -3840,6 +3901,7 @@ export default function MiniApp({
                 </button>
                 {broadcastOpen && (
                   <form id="broadcast-form" onSubmit={submitBroadcast} className="mt-4 space-y-3">
+                    <fieldset disabled={broadcastSaving} className="min-w-0 space-y-3">
                     {broadcastDraftNotice && <InlineNotice>{broadcastDraftNotice}</InlineNotice>}
                     <Field label="Получатели">
                       <div className="grid grid-cols-2 gap-1.5 rounded-2xl bg-slate-100 p-1.5">
@@ -3851,6 +3913,8 @@ export default function MiniApp({
                       </div>
                     </Field>
 
+                    {durableBroadcasts && <Button type="button" variant={broadcastMode === 'groups' ? 'primary' : 'secondary'} aria-pressed={broadcastMode === 'groups'} onClick={() => setBroadcastRecipientMode('groups')}>{broadcastMode === 'groups' && <span aria-hidden="true">✓ </span>}Группы и топики</Button>}
+                    {broadcastMode === 'groups' && durableBroadcasts && <BroadcastGroupPicker userId={currentUser.id} selected={broadcastGroupIds} onChange={setBroadcastGroupIds} onOptions={setBroadcastGroupOptions} onLoading={setBroadcastGroupsLoading} />}
                     {broadcastMode === 'missing_slots' && (
                       <div className="space-y-2 rounded-2xl border border-amber-200 bg-amber-50 p-2">
                         <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Неделя для проверки слотов">
@@ -3912,14 +3976,14 @@ export default function MiniApp({
                               <MagnifyingGlass className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
                               <input type="search" value={broadcastSearch} onChange={(event) => setBroadcastSearch(event.target.value)} className={`${inputClass} pl-10`} placeholder="Поиск по имени" aria-label="Поиск получателя рассылки" />
                             </label>
-                            <button type="button" onClick={() => setBroadcastRecipients(broadcastRecipients.length === coreTeamUsers.length ? [] : coreTeamUsers.map((user) => user.id))} className={`${secondaryButtonClass} w-full`}>
-                              <UsersThree className="h-4 w-4" /> {broadcastRecipients.length === coreTeamUsers.length ? 'Снять всех' : 'Выбрать всех'}
+                            <button type="button" onClick={() => setBroadcastRecipients(broadcastRecipients.length === broadcastEligibleUsers.length ? [] : broadcastEligibleUsers.map((user) => user.id))} className={`${secondaryButtonClass} w-full`}>
+                              <UsersThree className="h-4 w-4" /> {broadcastRecipients.length === broadcastEligibleUsers.length ? 'Снять всех' : 'Выбрать всех'}
                             </button>
                             {matchedBroadcastUsers.map((user) => (
                               <label key={user.id} className="flex min-h-11 items-center justify-between gap-3 rounded-xl bg-white px-3 py-2 text-sm font-semibold">
                                 <span className="min-w-0">
                                   <strong className="block truncate">{user.realName}{user.id === currentUser.id ? ' · это вы' : ''}</strong>
-                                  {!user.registered && <span className="block truncate text-xs font-bold text-amber-700">Нужно открыть бота через /start</span>}
+                                  {(!user.registered || (durableBroadcasts && user.telegramConnected !== true)) && <span className="block truncate text-xs font-bold text-amber-700">Нужно открыть бота через /start</span>}
                                 </span>
                                 <input type="checkbox" checked={broadcastRecipients.includes(user.id)} onChange={() => setBroadcastRecipients((current) => current.includes(user.id) ? current.filter((id) => id !== user.id) : [...current, user.id])} />
                               </label>
@@ -3931,13 +3995,38 @@ export default function MiniApp({
                     )}
 
                     <Field label="Заголовок — необязательно"><input value={broadcastTitle} onChange={(event) => setBroadcastTitle(event.target.value)} className={inputClass} maxLength={120} placeholder="Например, Важное обновление" /></Field>
-                    <Field label="Текст рассылки"><textarea required value={broadcastBody} onChange={(event) => setBroadcastBody(event.target.value)} className={inputClass} rows={4} maxLength={4000} placeholder="Что нужно сообщить команде" /></Field>
+                    <Field label="Текст рассылки" hint={durableBroadcasts ? 'До 40000 символов вместе с заголовком. Длинный текст отправляется последовательными частями.' : undefined}><textarea required value={broadcastBody} onChange={(event) => setBroadcastBody(event.target.value)} className={inputClass} rows={4} maxLength={durableBroadcasts ? 40000 : 4000} placeholder="Что нужно сообщить команде" /></Field>
+
+                    {durableBroadcasts && <fieldset disabled={broadcastSaving} className="space-y-3">
+                      <legend className="mb-2 text-xs font-black uppercase text-slate-500">Время отправки · МСК</legend>
+                      <div className="grid grid-cols-1 gap-2 min-[400px]:grid-cols-2" role="radiogroup" aria-label="Время отправки">
+                        {(['now', 'scheduled'] as const).map(mode => <label key={mode} className="flex min-h-11 cursor-pointer items-center gap-2 rounded-[var(--mega-radius-control)] bg-slate-100 px-3 py-2 text-sm font-bold">
+                          <input type="radio" name="broadcast-dispatch" value={mode} checked={broadcastDispatchMode === mode} onChange={() => setBroadcastDispatchMode(mode)} />
+                          {mode === 'now' ? 'Сейчас' : 'Запланировать'}
+                        </label>)}
+                      </div>
+                      {broadcastDispatchMode === 'scheduled' && <>
+                        <div className="grid grid-cols-1 gap-3 min-[440px]:grid-cols-2">
+                          <Field label="Дата · МСК"><input type="date" required value={broadcastDate} onChange={event => setBroadcastDate(event.target.value)} className={inputClass} /></Field>
+                          <Field label="Время · МСК"><input type="time" required value={broadcastTime} onChange={event => setBroadcastTime(event.target.value)} className={inputClass} /></Field>
+                        </div>
+                        <Field label="Если время пропущено" hint="От 30 секунд в будущем до 365 дней. Точность расписания не означает одновременную доставку всей пачке.">
+                          <div role="radiogroup" aria-label="Если время пропущено" className="space-y-2">
+                            {([['send_late', 'Отправлять в течение 15 минут'], ['skip', 'Пропустить после 5 секунд задержки']] as const).map(([policy, label]) => <label key={policy} className="flex min-h-11 items-center gap-2 rounded-[var(--mega-radius-control)] bg-slate-100 px-3 py-2 text-sm font-bold">
+                              <input type="radio" name="broadcast-misfire" checked={broadcastMisfirePolicy === policy} onChange={() => setBroadcastMisfirePolicy(policy)} />
+                              <span className="min-w-0">{label}</span>
+                            </label>)}
+                          </div>
+                        </Field>
+                      </>}
+                    </fieldset>}
 
                     <section aria-labelledby="broadcast-summary-title" className="rounded-2xl border border-blue-100 bg-blue-50 p-3">
-                      <h3 id="broadcast-summary-title" className="font-black text-[#005BC4]">Отправка сейчас</h3>
+                      <h3 id="broadcast-summary-title" className="font-black text-[#005BC4]">{broadcastDispatchMode === 'scheduled' ? (broadcastScheduledAt(broadcastDate, broadcastTime) ? broadcastTimeLabel(broadcastScheduledAt(broadcastDate, broadcastTime)!) : 'Выбери дату и время МСК') : 'Отправка сейчас'}</h3>
                       <p className="mt-1 text-sm font-bold text-slate-700">
-                        {broadcastAudienceUsers.length} получателей · Telegram доступен у {broadcastAvailableUsers.length}
+                        {broadcastMode === 'groups' ? `Выбрано разрешений: ${broadcastGroupIds.length}. Доступность бота проверяется при отправке.` : `${broadcastAudienceUsers.length} получателей · Telegram доступен у ${broadcastAvailableUsers.length}`}
                       </p>
+                      {broadcastMode === 'groups' && <ul className="mt-2 space-y-1 text-sm font-bold">{broadcastGroupIds.map(id => <li key={id} className="break-words">{broadcastGroupOptions.find(item => item.id === id)?.label || 'Адресат ещё не загружен или больше не разрешён'}</li>)}</ul>}
                       <p className="mt-1 text-xs font-semibold text-slate-600">
                         Сообщения отправляются по одному. Подтверждение Telegram не означает, что человек прочитал сообщение.
                       </p>
@@ -3952,12 +4041,14 @@ export default function MiniApp({
                     </section>
 
                     {broadcastError && <InlineNotice variant="error" focusOnMount>{broadcastError}</InlineNotice>}
-                    <button disabled={broadcastSaving || !broadcastAvailableUsers.length || (broadcastMode === 'missing_slots' && !missingSlotBroadcastUsers.length)} className={`${primaryButtonClass} disabled:opacity-60`}>
-                      <PaperPlaneTilt className="h-4 w-4" /> {broadcastSaving ? 'Отправляю...' : broadcastError ? 'Повторить отправку' : 'Отправить сейчас'}
-                    </button>
+                    <Button type="submit" pending={broadcastSaving} disabled={broadcastMode === 'groups' ? !broadcastGroupsReady : !broadcastAvailableUsers.length || (broadcastMode === 'missing_slots' && !missingSlotBroadcastUsers.length)}>
+                      <PaperPlaneTilt className="h-4 w-4" /> {broadcastSaving ? (durableBroadcasts ? 'Сохраняю...' : 'Отправляю...') : broadcastError ? 'Повторить отправку' : broadcastDispatchMode === 'scheduled' ? 'Запланировать' : 'Отправить сейчас'}
+                    </Button>
                     {broadcastNotice && <InlineNotice variant="success">{broadcastNotice}</InlineNotice>}
+                    </fieldset>
                   </form>
                 )}
+                {durableBroadcasts && <BroadcastHistory userId={currentUser.id} users={state.users} revision={broadcastHistoryRevision} />}
             </div>
             {isAdminPanel && (
               <button onClick={() => setShowAddUserForm((value) => !value)} className={primaryButtonClass}>

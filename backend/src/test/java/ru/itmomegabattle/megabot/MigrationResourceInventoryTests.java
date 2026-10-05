@@ -15,7 +15,31 @@ class MigrationResourceInventoryTests {
 			"V003__tasks.sql",
 			"V004__messaging_and_integrations.sql",
 			"V005__migration_tracking.sql",
-			"V006__b04_catalog_versions.sql"
+			"V006__b04_catalog_versions.sql",
+			"V007__task_reminder_configuration.sql",
+			"V008__task_log_cursor_index.sql",
+			"V009__task_maintenance_recovery.sql",
+			"V010__all_faculty_task_scope.sql",
+			"V011__delivery_lease_lifecycle.sql",
+			"V012__broadcast_snapshot_metadata.sql",
+			"V013__delivery_rate_limits.sql",
+			"V014__manual_delivery_retry.sql",
+			"V015__task_reminder_occurrences.sql",
+			"V016__manual_task_delivery.sql",
+			"V017__meeting_notification_targets.sql",
+			"V018__task_creation_delivery.sql",
+			"V019__task_status_delivery.sql",
+			"V020__task_update_delivery.sql",
+			"V021__task_assignment_delivery.sql",
+			"V022__task_comment_cancel_delivery.sql",
+			"V023__broadcast_creation_limits.sql",
+			"V024__meeting_reminders.sql",
+			"V025__availability_reminder_occurrences.sql",
+			"V026__birthday_reminder_occurrences.sql",
+			"V027__broadcast_expiry_notices.sql",
+			"V028__broadcast_group_allowlist.sql",
+			"V029__broadcast_message_parts.sql",
+			"V030__telegram_command_replies.sql"
 	};
 
 	@Test
@@ -42,6 +66,7 @@ class MigrationResourceInventoryTests {
 				"CREATE TABLE migration_runs",
 				"notification_deliveries_claim_idx",
 				"integration_jobs_claim_idx",
-				"outbox_events_claim_idx");
+				"outbox_events_claim_idx",
+				"task_status_history_log_cursor_idx");
 	}
 }

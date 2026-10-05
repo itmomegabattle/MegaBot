@@ -67,7 +67,10 @@ class TaskController {
 	record Mutation(@NotBlank @Size(max=160) String title, @Size(max=4000) String description,
 			@Size(max=8000) String sow, @NotBlank String priority, String eventId, String facultyId,
 			LocalDate deadline, @Size(max=200) List<@NotBlank String> assigneeIds,
-			@Size(max=100) List<@NotBlank String> competencyIds, @Min(0) Long expectedVersion) {}
+			@Size(max=100) List<@NotBlank String> competencyIds, @Min(0) Long expectedVersion,
+			@Size(max=50) List<@NotBlank @Size(max=1000) String> tips,
+			@Size(max=3) List<@NotNull @Valid ReminderInput> reminders) {}
+	record ReminderInput(@Size(max=128) String id, @NotBlank String type, @Min(1) int value, @NotBlank String unit) {}
 	record Version(@NotNull @Min(0) Long expectedVersion) {}
 	record Status(@NotBlank String status, @NotNull @Min(0) Long expectedVersion, @Min(1) @Max(60000) Integer timeSpentMinutes,
 			@Size(max=4000) String completionComment) {}

@@ -24,6 +24,7 @@ import ru.itmomegabattle.megabot.notifications.OutboxWriter;
 import ru.itmomegabattle.megabot.auth.SessionService;
 import ru.itmomegabattle.megabot.team.UserEntity;
 import ru.itmomegabattle.megabot.team.UserRepository;
+import ru.itmomegabattle.megabot.common.SqlTime;
 
 @Import(TestcontainersConfiguration.class)
 @SpringBootTest
@@ -64,6 +65,28 @@ class PersistenceIntegrationTests {
 	}
 
 	@Test
+	void birthdaySmallintsRoundTripThroughJpa() {
+		var user=new UserEntity(5001L,"birthday-user","Birthday","organizer");
+		user.updateProfile("Birthday","birthday-user",29,2,2000);
+		var id=users.saveAndFlush(user).getId();
+		var stored=users.findById(id).orElseThrow();
+		assertThat(stored.getBirthdayDay()).isEqualTo(29);
+		assertThat(stored.getBirthdayMonth()).isEqualTo(2);
+		assertThat(stored.getBirthdayYear()).isEqualTo(2000);
+	}
+
+	@Test
+	void jdbcTimeKeepsExactInstantAcrossDatabaseTimeZonesAndAcceptsNull() {
+		var instant=Instant.parse("2030-01-02T12:34:56.123456Z");
+		transactions.executeWithoutResult(status->{
+			jdbc.execute("SET LOCAL TIME ZONE 'America/Los_Angeles'");
+			var result=jdbc.queryForObject("select cast(? as timestamptz)",java.sql.Timestamp.class,SqlTime.of(instant));
+			assertThat(result.toInstant()).isEqualTo(instant);
+			assertThat(jdbc.queryForObject("select cast(? as timestamptz) is null",Boolean.class,SqlTime.of(null))).isTrue();
+		});
+	}
+
+	@Test
 	void uniqueTelegramIdIsEnforcedByPostgres() {
 		insertUser("u_one", 1001L);
 
@@ -77,6 +100,12 @@ class PersistenceIntegrationTests {
 				INSERT INTO work_events (id, name, starts_at, ends_at, status)
 				VALUES ('event_invalid', 'Invalid', ?::timestamptz, ?::timestamptz, 'active')
 				""", "2030-01-02T12:00:00Z", "2030-01-02T11:00:00Z")))
+				.isInstanceOf(DataIntegrityViolationException.class);
+	}
+
+	@Test
+	void missingTaskAndUserReferencesAreRejectedByPostgres() {
+		assertThatThrownBy(() -> jdbc.update("insert into task_assignees(task_id,user_id) values ('missing_task','missing_user')"))
 				.isInstanceOf(DataIntegrityViolationException.class);
 	}
 

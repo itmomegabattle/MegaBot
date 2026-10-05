@@ -43,6 +43,11 @@ import tools.jackson.databind.ObjectMapper;
 class AuthHttpIntegrationTests {
 
 	private static final String TOKEN = "123456:test-token";
+	@Test
+	void webhookIsDisabledByDefaultAndDoesNotAcceptUpdates() throws Exception {
+		mvc.perform(post("/api/v1/telegram/webhook").contentType(MediaType.APPLICATION_JSON).content("{\"update_id\":1}"))
+				.andExpect(status().isServiceUnavailable()).andExpect(jsonPath("code").value("telegram_webhook_disabled"));
+	}
 
 	@Autowired
 	private MockMvc mvc;

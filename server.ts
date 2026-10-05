@@ -3573,7 +3573,7 @@ async function startServer() {
   async function sendDueBirthdayReminders(now = new Date()) {
     markWorkerHeartbeat('birthday_reminders');
     if (birthdayReminderCheckRunning) return;
-    const firstHour = Math.min(23, positiveIntegerEnvironment('BIRTHDAY_REMINDER_HOUR', 10));
+    const firstHour = Math.min(23, positiveIntegerEnvironment('BIRTHDAY_REMINDER_HOUR', 12));
     if (projectClock(now).hour < firstHour) return;
     birthdayReminderCheckRunning = true;
     try {

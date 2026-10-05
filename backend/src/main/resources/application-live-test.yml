@@ -1,0 +1,17 @@
+# Separate owner-approved Telegram test sandbox. Never combine with local/test/prod profiles.
+spring:
+  datasource:
+    url: jdbc:postgresql://127.0.0.1:55432/megabot_live_test
+    username: megabot_live_test_app
+    password: megabot_live_test_local_only
+
+server:
+  address: 127.0.0.1
+  port: 18081
+
+megabot:
+  integrations:
+    telegram:
+      mode: ${MEGABOT_TELEGRAM_MODE:disabled}
+    google:
+      mode: disabled

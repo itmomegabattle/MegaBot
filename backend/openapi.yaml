@@ -6,12 +6,48 @@ info:
 servers:
   - url: http://localhost:8080
 paths:
+  /api/v1/telegram/webhook:
+    post:
+      summary: Disabled-by-default authenticated Telegram inbox intake
+      description: Separate incoming-mode webhook, configured bot ID, independent 32-256 character secret. Authenticates before bounded body read. 200 only after inbox COMMIT, including duplicates; not domain completion. No session or browser Origin required, no polling/outgoing calls. Do not register a live webhook before command worker readiness.
+      security: [{ telegramWebhookSecret: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [update_id]
+              properties:
+                update_id: { type: integer, format: int64, minimum: 0 }
+              additionalProperties: true
+      responses:
+        '200': { description: Empty no-store ack after durable receipt, including duplicate }
+        '400': { description: Invalid envelope or malformed/trailing JSON }
+        '401': { description: Missing or invalid or repeated secret header }
+        '413': { description: Body exceeds 1 MiB, including unknown Content-Length }
+        '415': { description: Requires application/json }
+        '503': { description: Disabled transport or safe body read/database/commit failure, never positive ack }
+  /api/v1/admin/delivery-diagnostics:
+    get:
+      summary: Admin-only read-only aggregate delivery diagnostics
+      description: Queue uses database time; timing samples cover attempts started in the last 24 hours. Worker progress is local to this application process and uses application UTC clock. No identities or message payloads. This is not a measured SLO or device push latency. NTP offset is not measured yet.
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200':
+          description: Aggregate snapshot, Cache-Control no-store
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DeliveryDiagnostics' }
+        '401': { description: No active session }
+        '403': { description: Current user is not an administrator }
+        '503': { description: Database diagnostics unavailable, safe delivery_diagnostics_unavailable code without raw database details }
   /api/state:
     get:
       summary: Temporary safe frontend state adapter for active core-team sessions
       security: [{ sessionCookie: [] }]
       responses:
-        '200': { description: Safe compatibility state; meetings are backed by PostgreSQL, tasks remain empty until B-06 }
+        '200': { description: 'Safe compatibility state with persisted meetings and tasks, tips, reminders and comment history' }
         '403': { description: Faculty sessions cannot access core state }
   /api/v1/auth/telegram:
     post:
@@ -304,6 +340,461 @@ paths:
       security: [{ sessionCookie: [] }]
       responses:
         '204': { description: Faculty retired }
+  /api/team/broadcast:
+    post:
+      summary: Legacy form adapter; core session, frozen audience and durable queue; never reports queued messages as delivered
+      security: [{ sessionCookie: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LegacyBroadcastCreate' }
+      responses:
+        '202': { description: success, broadcastId, version, recipients, queued, unavailable, delivered=0, pending, failed=0, attention=0, deliveryStatus and availabilityWeekIndex; immutable response on replay, inspect v1 detail for current delivery state }
+        '429': { description: Shared per-session-actor broadcast creation or recipient-volume fixed window exhausted; no partial write }
+        '400': { description: Invalid text, named core competency, recipient, visible week, time or missing idempotency key }
+        '401': { description: Session required; requesterId in body grants no authority }
+        '403': { description: Core session and allowed Origin required }
+        '409': { description: Idempotency conflict or atomic materialization failure }
+  /api/v1/broadcast-group-targets:
+    get:
+      summary: Core team reads approved active group target IDs and labels only
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/PageLimit' }
+        - { $ref: '#/components/parameters/PageCursor' }
+      responses:
+        '200': { description: 'items/nextCursor; no bot ID, chat ID or internal thread ID' }
+        '403': { description: Active core session required }
+  /api/v1/admin/broadcast-group-targets:
+    get:
+      summary: Administrator reads active and revoked group approvals with versions and transport addresses
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/PageLimit' }
+        - { $ref: '#/components/parameters/PageCursor' }
+      responses:
+        '200': { description: items/nextCursor with id/label/botId/chatId/messageThreadId/active/version }
+        '403': { description: Admin required }
+    post:
+      summary: Administrator explicitly approves a whole group or one topic; no Telegram request
+      security: [{ sessionCookie: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BroadcastGroupApproval' }
+      responses:
+        '201': { description: Persisted id/version with transactional audit and idempotent replay }
+        '400': { description: Invalid bot/group/topic or input }
+        '403': { description: Admin and same-origin Origin required }
+        '409': { description: Duplicate address or conflicting idempotency key }
+  /api/v1/admin/broadcast-group-targets/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema: { type: string }
+    patch:
+      summary: Full replacement with expectedVersion; every edit invalidates older broadcast snapshots
+      security: [{ sessionCookie: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - { $ref: '#/components/schemas/BroadcastGroupApproval' }
+                - { type: object, required: [expectedVersion] }
+      responses:
+        '200': { description: Updated id/version; active=false revokes future starts, not an already begun HTTP request }
+        '403': { description: Admin and same-origin Origin required }
+        '404': { description: Target not found }
+        '409': { description: Stale version or duplicate address }
+  /api/v1/broadcasts:
+    get:
+      summary: Author-scoped broadcasts; admin can list all; live delivery aggregates
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/PageLimit' }
+        - { $ref: '#/components/parameters/PageCursor' }
+      responses:
+        '200': { description: items and nextCursor; status is scheduled/sending/partial/sent/failed/unknown/cancelled/expired }
+        '400': { description: Invalid limit }
+        '403': { description: Core session required; foreign cursor not permitted }
+    post:
+      summary: Commit broadcast, immutable audience snapshot and per-target deliveries together; does not send HTTP
+      security: [{ sessionCookie: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BroadcastMutation' }
+      responses:
+        '201': { description: Persisted broadcast with version 0, contentRevision 1, targetCount, targets and deliveryCounts; unavailable targets never reported sent }
+        '429': { description: Shared per-session-actor broadcast creation or recipient-volume fixed window exhausted; no partial write }
+        '400': { description: Invalid text/zone/audience; scheduled time must be 30 seconds to 365 days ahead; serverNow in error }
+        '403': { description: Core session and same-origin mutation required }
+        '409': { description: Idempotency conflict or atomic materialization failed }
+  /api/v1/broadcasts/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema: { type: string }
+    get:
+      summary: Author/admin broadcast detail with current revision targets and aggregate delivery state
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200': { description: 'Persisted schedule plus per-recipient statuses; nullable expiryNotice exposes only id/status/createdAt/expiresAt of the current revision author notice, no payload/chat/token; sent is provider confirmation, not read receipt' }
+        '403': { description: Author/admin required }
+        '404': { description: Broadcast not found }
+    patch:
+      summary: Full replacement before any HTTP attempt; revoke old claimed leases and create a new revision
+      security: [{ sessionCookie: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - { $ref: '#/components/schemas/BroadcastMutation' }
+                - type: object
+                  required: [expectedVersion]
+      responses:
+        '200': { description: New version/revision and audience snapshot; historical targets/deliveries retained }
+        '429': { description: Replacement revision exceeds shared actor request or recipient-volume quota; original deliveries unchanged }
+        '400': { description: Missing version or invalid replacement }
+        '403': { description: Author/admin required }
+        '409': { description: Stale version, started/cancelled broadcast or conflicting key }
+  /api/v1/broadcasts/{id}/cancel:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema: { type: string }
+    post:
+      summary: Cancel pending/claimed recipients; preserve actual in-flight/sent/unknown outcomes
+      security: [{ sessionCookie: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [expectedVersion]
+              properties:
+                expectedVersion: { type: integer, format: int64, minimum: 0 }
+      responses:
+        '200': { description: Cancelled lifecycle with honest deliveryCounts; does not promise recall of Telegram messages }
+        '403': { description: Author/admin required }
+        '409': { description: Stale version or conflicting key }
+  /api/v1/broadcasts/{id}/reschedule:
+    parameters:
+      - { in: path, name: id, required: true, schema: { type: string } }
+    post:
+      summary: Transfer time only before first attempt; preserve frozen audience, text, policy, silent and group approvals
+      security: [{ sessionCookie: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [expectedVersion, scheduledAt]
+              properties:
+                expectedVersion: { type: integer, format: int64, minimum: 0 }
+                scheduledAt: { type: string, format: date-time, description: DB now plus 30 seconds to 365 days; displayed in Europe/Moscow }
+      responses:
+        '200': { description: New contentRevision/version; old claims invalidated, audience/settings unchanged }
+        '400': { description: Invalid schedule or missing version }
+        '403': { description: Author/admin and trusted Origin required }
+        '409': { description: Stale version, started/expired/cancelled delivery or conflicting key }
+        '429': { description: Shared creation quota exceeded; transfer rolls back }
+  /api/v1/broadcasts/{broadcastId}/deliveries:
+    parameters:
+      - { in: path, name: broadcastId, required: true, schema: { type: string } }
+    get:
+      summary: Author/admin paged journal across all broadcast revisions and manual retry chains
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/PageLimit' }
+        - { $ref: '#/components/parameters/PageCursor' }
+      responses:
+        '200': { description: items/nextCursor/version; partNumber/partCount, UTC timestamps, bounded attempt history, retryOf/replacedBy and duplicate risk warning; no raw payload, chat ID, lease/token or provider description }
+        '400': { description: Invalid limit or cursor outside this broadcast }
+        '403': { description: Author/admin required }
+        '404': { description: Broadcast not found }
+  /api/v1/broadcasts/{broadcastId}/deliveries/{deliveryId}/retry:
+    parameters:
+      - { in: path, name: broadcastId, required: true, schema: { type: string } }
+      - { in: path, name: deliveryId, required: true, schema: { type: string } }
+    post:
+      summary: Explicit linked retry of unknown outcome only; original evidence and successful recipients are never reset
+      security: [{ sessionCookie: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [expectedVersion, acknowledgeDuplicateRisk]
+              properties:
+                expectedVersion: { type: integer, format: int64, minimum: 0, description: Current broadcast version }
+                acknowledgeDuplicateRisk: { type: boolean, enum: [true], description: First message might have arrived; resend may duplicate it }
+      responses:
+        '201': { description: New planned delivery ID, retryOf, incremented broadcast version and duplicateRiskWarning; copied immutable payload/target and original expiry }
+        '400': { description: Risk acknowledgement or version missing }
+        '403': { description: Current author/admin and same-origin mutation required, including idempotent replay }
+        '404': { description: Delivery does not belong to this broadcast or broadcast missing }
+        '409': { description: Stale version, not unknown, already retried, cancelled/superseded/expired, changed binding or unavailable author/recipient; no partial enqueue }
+  /api/task/notify:
+    post:
+      summary: Persist a silent manual reminder intent; never report unconfirmed delivery
+      security: [{ sessionCookie: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LegacyTaskMutationBase' }
+      responses:
+        '200':
+          description: Durable outbox intent, not a Telegram send; exact retry replays the saved response
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TaskManualReminderQueued' }
+        '400': { description: Invalid version/key, no assignments or no active registered recipients }
+        '403': { description: Author/admin session required }
+        '404': { description: Missing or removed task }
+        '409': { description: Stale version, cancelled task or key conflict }
+  /api/task/archive/preview:
+    post:
+      summary: Admin legacy archive preview with IDs and version-sensitive fingerprint
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200':
+          description: success, taskIds, completedCount and cancelledCount plus canonical preview
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LegacyTaskMaintenancePreview' }
+        '403': { description: Admin and same-origin required }
+  /api/task/season-reset/preview:
+    post:
+      summary: Admin legacy reset preview includes all visible tasks
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200':
+          description: success and taskIds plus canonical preview with statusCounts
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LegacyTaskMaintenancePreview' }
+        '403': { description: Admin and same-origin required }
+  /api/task/archive/clear:
+    post:
+      summary: Recoverable archive removal; fingerprint required even when taskIds are supplied
+      security: [{ sessionCookie: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LegacyTaskMaintenanceClear' }
+      responses:
+        '200': { description: success, count/removedCount, changed, remainingCount and recoveryId/backupId/operationId when nonempty }
+        '400': { description: Missing or invalid fingerprint/key }
+        '403': { description: Admin and same-origin required }
+        '409': { description: Stale IDs/versions, key conflict or recovery write failed; no partial removal }
+  /api/task/season-reset:
+    post:
+      summary: Recoverable full season reset with exact confirmation and preview fingerprint
+      security: [{ sessionCookie: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LegacyTaskMaintenanceClear' }
+      responses:
+        '200': { description: success and recoverable removal result; exact replay does not clear twice }
+        '400': { description: Missing fingerprint/key or confirmation must equal СБРОСИТЬ СЕЗОН }
+        '403': { description: Admin and same-origin required }
+        '409': { description: Stale IDs/versions, key conflict or recovery write failed }
+  /api/task/log/clear:
+    post:
+      summary: Disabled destructive legacy command; never deletes history
+      security: [{ sessionCookie: [] }]
+      responses:
+        '403': { description: Admin and same-origin required }
+        '410': { description: task_log_clear_disabled; use archive/reset preview instead }
+  /api/task/export:
+    get:
+      summary: Admin paged CSV of current visible tasks, separate from v1 history export
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/PageLimit' }
+        - { $ref: '#/components/parameters/PageCursor' }
+      responses:
+        '200':
+          description: UTF-8 BOM tasks.csv; formula-safe cells, Moscow time, no-store and nosniff
+          headers:
+            X-Next-Cursor:
+              description: Last task ID; absent on final page
+              schema: { type: string }
+          content:
+            text/csv:
+              schema: { type: string }
+        '400': { description: Invalid limit or cursor }
+        '403': { description: Admin session required }
+  /api/task/claim:
+    post:
+      summary: Atomic legacy core claim; body userId is ignored
+      security: [{ sessionCookie: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LegacyTaskMutationBase' }
+      responses:
+        '200': { description: success and compatible task DTO; exact replay has no side effects }
+        '400': { description: Missing or invalid taskId/version/key }
+        '403': { description: Core session and matching competencies required }
+        '409': { description: Task taken, closed, stale version or key conflict }
+  /api/task/release:
+    post:
+      summary: Release only the session actor while preserving other assignees
+      security: [{ sessionCookie: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LegacyTaskMutationBase' }
+      responses:
+        '200': { description: success, compatible task DTO, becameOpen and remainingAssigneeIds }
+        '400': { description: Missing or invalid taskId/version/key }
+        '403': { description: Session actor must be an assigned participant }
+        '409': { description: Closed task, stale version or key conflict }
+  /api/task/delete:
+    post:
+      summary: Cancel without deleting history; author/admin session required
+      security: [{ sessionCookie: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LegacyTaskMutationBase' }
+      responses:
+        '200': { description: success and compatible cancelled task DTO; replay has no side effects }
+        '400': { description: Missing or invalid taskId/version/key }
+        '403': { description: Author/admin required; body requesterId is ignored }
+        '409': { description: Stale version or key conflict }
+  /api/task/update:
+    post:
+      summary: Legacy partial core update; omitted fields preserve persisted values
+      security: [{ sessionCookie: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LegacyTaskUpdate' }
+      responses:
+        '200': { description: success and compatible task DTO; exact replay returns saved response }
+        '400': { description: Invalid patch or wrong task scope }
+        '403': { description: Session actor is not allowed to edit task }
+        '409': { description: Stale version, closed task or conflicting idempotency payload }
+  /api/faculty/task/update:
+    post:
+      summary: Legacy partial faculty update by core actor; faculty scope is immutable
+      security: [{ sessionCookie: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LegacyTaskUpdate' }
+      responses:
+        '200': { description: success and compatible task DTO }
+        '400': { description: Invalid patch or wrong task scope }
+        '403': { description: Core session and edit permission required }
+        '409': { description: Stale version, closed task or conflicting idempotency payload }
+  /api/task/comment:
+    post:
+      summary: Append legacy comment; executor author and target come from session
+      security: [{ sessionCookie: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LegacyTaskComment' }
+      responses:
+        '200': { description: success and compatible task DTO; replay does not append again }
+        '400': { description: Invalid comment, missing version or coordinator target }
+        '403': { description: Assignment, membership or coordinator permission required }
+        '409': { description: Stale version, closed task or conflicting idempotency payload }
+  /api/task/status:
+    post:
+      summary: Legacy status transition with session actor and immutable closed result
+      security: [{ sessionCookie: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LegacyTaskStatus' }
+      responses:
+        '200': { description: success and compatible task DTO; replay does not complete twice }
+        '400': { description: Invalid status, version or integer duration }
+        '403': { description: Task access and transition permission required }
+        '409': { description: Stale version, invalid transition, completion_reopen_required or key conflict }
+  /api/task/create:
+    post:
+      summary: Legacy core create adapter using session actor, never body creatorId
+      security: [{ sessionCookie: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LegacyTaskCreate' }
+      responses:
+        '200': { description: success and compatible task DTO; exact retry returns saved response }
+        '400': { description: Invalid fields, unknown competency, calendar date or assignee scope }
+        '403': { description: Core session and same-origin mutation required }
+        '409': { description: Same idempotency key with different payload }
+  /api/faculty/task/create:
+    post:
+      summary: Legacy faculty create adapter; supports all scope and preserves initial waiting status
+      security: [{ sessionCookie: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - { $ref: '#/components/schemas/LegacyTaskCreate' }
+                - type: object
+                  required: [facultyId, assignedTo]
+                  properties:
+                    facultyId: { type: string, minLength: 1, description: Existing active faculty ID or all }
+      responses:
+        '200': { description: success and compatible shared faculty task DTO }
+        '400': { description: Missing faculty/assignees or invalid scope/date/competency }
+        '403': { description: Only admin/organizer; faculty cannot create tasks }
+        '409': { description: Same idempotency key with different payload }
   /api/v1/tasks:
     get:
       summary: List tasks with faculty scope filtering
@@ -325,6 +816,128 @@ paths:
             schema: { $ref: '#/components/schemas/TaskMutation' }
       responses:
         '201': { description: Task, history, audit and silent outbox committed together }
+  /api/v1/tasks/archive/preview:
+    get:
+      summary: Admin-only exact completed/cancelled task selection with versions and fingerprint
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200':
+          description: Preview does not remove tasks
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TaskMaintenancePreview' }
+        '403': { description: Admin required }
+  /api/v1/tasks/season-reset/preview:
+    get:
+      summary: Admin-only exact selection of all visible tasks
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200':
+          description: Includes active tasks; preview does not modify them
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TaskMaintenancePreview' }
+        '403': { description: Admin required }
+  /api/v1/tasks/archive/clear:
+    post:
+      summary: Admin-only recoverable soft removal of completed/cancelled tasks
+      security: [{ sessionCookie: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TaskMaintenanceClear' }
+      responses:
+        '200': { description: count, changed, recoveryId for nonempty selection; empty selection is no-op }
+        '400': { description: Invalid fingerprint }
+        '403': { description: Admin required }
+        '409': { description: Preview became stale; nothing removed }
+  /api/v1/tasks/season-reset:
+    post:
+      summary: Admin-only recoverable season reset with explicit Russian confirmation
+      security: [{ sessionCookie: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - { $ref: '#/components/schemas/TaskMaintenanceClear' }
+                - type: object
+                  required: [confirmation]
+                  properties:
+                    confirmation: { type: string, const: 'СБРОСИТЬ СЕЗОН' }
+      responses:
+        '200': { description: count, changed, recoveryId for nonempty selection; preserves history and recovery copy }
+        '400': { description: Confirmation missing or incorrect }
+        '403': { description: Admin required }
+        '409': { description: Preview stale; operation rolled back }
+  /api/v1/tasks/recovery/{id}:
+    get:
+      summary: Admin-only recovery snapshot of tasks and their related records
+      security: [{ sessionCookie: [] }]
+      parameters: [{ $ref: '#/components/parameters/TaskId' }]
+      responses:
+        '200': { description: id, mode, count, actorId, createdAt, snapshot, restoredAt and restoredBy }
+        '403': { description: Admin required }
+        '404': { description: Recovery operation not found }
+  /api/v1/tasks/recovery/{id}/restore:
+    post:
+      summary: Admin-only all-or-nothing restoration; versions stay monotonic and old outbox is not revived
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/TaskId' }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      responses:
+        '200': { description: recoveryId, restored, changed and count; already restored is no-op }
+        '403': { description: Admin required }
+        '404': { description: Recovery operation not found }
+        '409': { description: Task versions or operation membership changed; nothing restored }
+  /api/v1/tasks/log:
+    get:
+      summary: Core-team task log from immutable history snapshots
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/PageLimit' }
+        - { $ref: '#/components/parameters/PageCursor' }
+      responses:
+        '200':
+          description: Chronological keyset page ordered by occurredAt and id; nextCursor is null on last page
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, nextCursor]
+                properties:
+                  items:
+                    type: array
+                    items: { type: object, additionalProperties: true }
+                  nextCursor: { type: [string, 'null'] }
+        '400': { description: Invalid limit or unknown history cursor }
+        '403': { description: Faculty cannot read core task log }
+  /api/v1/tasks/export:
+    get:
+      summary: Admin-only paged history CSV with Moscow timestamps and formula neutralization
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 100 }
+        - { $ref: '#/components/parameters/PageCursor' }
+      responses:
+        '200':
+          description: UTF-8 BOM semicolon CSV page, not XLS; each page includes header; no-store
+          headers:
+            X-Next-Cursor:
+              description: Pass as cursor to fetch remaining records; absent on last page
+              schema: { type: string }
+          content:
+            text/csv:
+              schema: { type: string }
+        '400': { description: Invalid limit or unknown history cursor }
+        '403': { description: Admin required }
   /api/v1/tasks/{id}:
     parameters:
       - $ref: '#/components/parameters/TaskId'
@@ -445,8 +1058,242 @@ paths:
         - $ref: '#/components/parameters/PageCursor'
       responses:
         '200': { description: Faculty-scoped tasks without colleagues' targeted comments }
+  /api/faculty/my-tasks:
+    get:
+      summary: Temporary legacy task DTO for the current assigned faculty member
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200': { description: Legacy tasks envelope with serverNow and Europe/Moscow timeZone }
+        '403': { description: Faculty role required }
 components:
   schemas:
+    DeliveryDiagnostics:
+      type: object
+      required: [databaseNow, windowHours, queue, timings, databasePool, worker, signals, notMeasured]
+      properties:
+        databaseNow: { type: string, format: date-time }
+        windowHours: { type: integer, const: 24 }
+        queue:
+          type: object
+          required: [total, planned, retry, claimed, sending, sent, failed, unknown, cancelled, expired, due, oldestDueAgeSeconds, staleLeases]
+          properties:
+            total: { type: integer, format: int64, minimum: 0 }
+            planned: { type: integer, format: int64, minimum: 0 }
+            retry: { type: integer, format: int64, minimum: 0 }
+            claimed: { type: integer, format: int64, minimum: 0 }
+            sending: { type: integer, format: int64, minimum: 0 }
+            sent: { type: integer, format: int64, minimum: 0 }
+            failed: { type: integer, format: int64, minimum: 0 }
+            unknown: { type: integer, format: int64, minimum: 0 }
+            cancelled: { type: integer, format: int64, minimum: 0 }
+            expired: { type: integer, format: int64, minimum: 0 }
+            due: { type: integer, format: int64, minimum: 0 }
+            oldestDueAgeSeconds: { type: [number, 'null'], minimum: 0 }
+            staleLeases: { type: integer, format: int64, minimum: 0 }
+        timings:
+          type: object
+          required: [attempts, firstAttempts, earlyAttempts, firstStartLatenessP50Ms, firstStartLatenessP95Ms, firstStartLatenessP99Ms, firstStartLatenessMaxMs, finishedAttempts, attemptDurationP95Ms]
+          properties:
+            attempts: { type: integer, format: int64, minimum: 0 }
+            firstAttempts: { type: integer, format: int64, minimum: 0 }
+            earlyAttempts: { type: integer, format: int64, minimum: 0 }
+            firstStartLatenessP50Ms: { type: [number, 'null'] }
+            firstStartLatenessP95Ms: { type: [number, 'null'] }
+            firstStartLatenessP99Ms: { type: [number, 'null'] }
+            firstStartLatenessMaxMs: { type: [number, 'null'] }
+            finishedAttempts: { type: integer, format: int64, minimum: 0 }
+            attemptDurationP95Ms: { type: [number, 'null'] }
+        databasePool:
+          type: [object, 'null']
+          properties:
+            active: { type: integer, minimum: 0 }
+            idle: { type: integer, minimum: 0 }
+            total: { type: integer, minimum: 0 }
+            awaiting: { type: integer, minimum: 0 }
+            max: { type: integer, minimum: 1 }
+        worker:
+          type: object
+          required: [state, workInProgress, lastCycleStartedAt, lastCycleCompletedAt, lastProgressAgeSeconds, lastOutcome, consecutiveFailures]
+          properties:
+            state: { type: string, enum: [disabled, starting, healthy, error, stalled, stopping, stopped, clock_uncertain] }
+            workInProgress: { type: boolean }
+            lastCycleStartedAt: { type: [string, 'null'], format: date-time }
+            lastCycleCompletedAt: { type: [string, 'null'], format: date-time }
+            lastProgressAgeSeconds: { type: [number, 'null'] }
+            lastOutcome: { type: [string, 'null'], enum: [idle, processed, error, null] }
+            consecutiveFailures: { type: integer, format: int64, minimum: 0 }
+        signals:
+          type: array
+          description: Read-only advisory signals from this snapshot, not dispatched alerts or a health/SLO verdict. Backlog does not verify quota or domain eligibility. Empty does not prove NTP health. Historical unknown/early states persist until outside their respective state/window.
+          items:
+            type: object
+            required: [code, severity]
+            properties:
+              code: { type: string, enum: [worker_stalled, worker_clock_uncertain, worker_error, due_backlog_quota_unverified, stale_leases, unknown_outcomes, early_attempts, database_pool_waiters] }
+              severity: { type: string, enum: [warning, critical] }
+        notMeasured:
+          type: array
+          items: { type: string, enum: [ntpClockOffset, devicePushLatency] }
+    LegacyBroadcastCreate:
+      type: object
+      required: [body, recipientMode]
+      description: Old field names map to the shared broadcast domain. requesterId ignored; competencies are exact active core names. No arbitrary chat/thread target. Immediate by default; scheduling must be explicit. Combined stripped title plus body is limited to 40000 UTF-16 units and split into ordered plain-text parts of at most 4000 units. Formatting and Node message history are not migrated by this adapter.
+      properties:
+        title: { type: string, maxLength: 120 }
+        body: { type: string, minLength: 1, maxLength: 40000 }
+        recipientMode: { type: string, enum: [all, people, blocks, missing_slots] }
+        recipientIds: { type: array, maxItems: 2000, items: { type: string, minLength: 1 } }
+        competencies: { type: array, maxItems: 100, items: { type: string, minLength: 1, maxLength: 200 } }
+        availabilityWeekIndex: { type: integer, minimum: 0, maximum: 51, default: 0, description: For missing_slots, resolves Moscow Monday plus this index inside the idempotent transaction; actual configured visible horizon is also enforced }
+        dispatchMode: { type: string, enum: [now, scheduled], default: now }
+        scheduledAt: { type: string, format: date-time, description: Required only for explicit scheduled; same DB-clock validation as v1 }
+        zoneId: { type: string, enum: [Europe/Moscow] }
+        misfirePolicy: { type: string, enum: [send_late, skip] }
+        silent: { type: boolean, default: false }
+    BroadcastMutation:
+      type: object
+      required: [body]
+      description: Private core modes or groups referencing explicit admin-approved target IDs. Groups cannot mix with private audience fields; arbitrary bot/chat/thread overrides are not accepted as targets. Combined stripped title plus body must be at most 40000 UTF-16 units; ordered plain-text parts are at most 4000 units. Target sent requires confirmation of every part; target partCount/partCounts are separate from recipient-level deliveryCounts. Unknown blocks later parts pending explicit acknowledged retry.
+      properties:
+        title: { type: string, maxLength: 120 }
+        body: { type: string, minLength: 1, maxLength: 40000 }
+        recipientMode: { type: string, enum: [all, people, blocks, missing_slots, groups], default: people }
+        groupTargetIds: { type: array, maxItems: 100, items: { type: string, minLength: 1 }, description: Required nonempty only for groups; active admin approval IDs; frozen approval version is rechecked before HTTP }
+        recipientIds: { type: array, maxItems: 2000, items: { type: string, minLength: 1 }, description: Required for people; extra recipients for blocks; active registered core IDs only }
+        competencyIds: { type: array, maxItems: 100, items: { type: string, minLength: 1 }, description: Existing active core IDs, required for blocks }
+        weekStart: { type: string, format: date, description: Required only for missing_slots; visible Moscow Monday; rechecked before attempt }
+        dispatchMode: { type: string, enum: [scheduled, now], default: scheduled }
+        scheduledAt: { type: string, format: date-time, description: RFC3339 instant, required for scheduled; forbidden for now }
+        zoneId: { type: string, enum: [Europe/Moscow], default: Europe/Moscow }
+        misfirePolicy: { type: string, enum: [send_late, skip], default: send_late, description: send_late expires after 15 minutes; skip after 5 seconds. These are local policies, not latency guarantees. }
+        silent: { type: boolean, default: false }
+        expectedVersion: { type: integer, format: int64, minimum: 0, description: Required for patch }
+    BroadcastGroupApproval:
+      type: object
+      required: [label, botId, chatId, active]
+      properties:
+        label: { type: string, minLength: 1, maxLength: 120 }
+        botId: { type: string, pattern: '^[0-9]{1,20}$' }
+        chatId: { type: integer, format: int64, maximum: -1 }
+        messageThreadId: { type: [integer, 'null'], format: int64, minimum: 1, description: null selects the whole group; positive ID selects only this topic }
+        active: { type: boolean, description: Explicit administrator approval or revocation }
+        expectedVersion: { type: integer, format: int64, minimum: 0, description: Required on PATCH }
+    TaskManualReminderQueued:
+      type: object
+      required: [success, outboxId, queued, delivered, unavailable, deliveryStatus]
+      properties:
+        success: { type: boolean, const: true }
+        outboxId: { type: string }
+        queued: { type: integer, minimum: 0, description: Active registered recipients with Telegram ID in the durable intent }
+        delivered: { type: integer, const: 0, description: B-06 does not send Telegram }
+        unavailable: { type: integer, minimum: 0, description: Active registered recipients without Telegram ID }
+        deliveryStatus: { type: string, const: pending }
+    LegacyTaskMaintenancePreview:
+      allOf:
+        - { $ref: '#/components/schemas/TaskMaintenancePreview' }
+        - type: object
+          required: [success, taskIds]
+          properties:
+            success: { type: boolean, const: true }
+            taskIds: { type: array, items: { type: string } }
+            completedCount: { type: integer, minimum: 0 }
+            cancelledCount: { type: integer, minimum: 0 }
+    LegacyTaskMaintenanceClear:
+      allOf:
+        - { $ref: '#/components/schemas/TaskMaintenanceClear' }
+        - type: object
+          properties:
+            taskIds: { type: [array, 'null'], maxItems: 10000, items: { type: string, minLength: 1, maxLength: 200 }, description: Optional exact legacy selection; cannot replace fingerprint }
+    LegacyTaskMutationBase:
+      type: object
+      required: [taskId, version]
+      properties:
+        taskId: { type: string, minLength: 1, maxLength: 200 }
+        version: { type: integer, format: int64, minimum: 0, description: Required persisted version; zero is valid }
+        requesterId: { type: string, description: Ignored; actor comes from session }
+    LegacyTaskUpdate:
+      allOf:
+        - { $ref: '#/components/schemas/LegacyTaskMutationBase' }
+        - type: object
+          description: Omitted fields preserve values. Empty lists clear them; null tips/reminders preserve configuration.
+          properties:
+            title: { type: string, minLength: 2, maxLength: 160 }
+            description: { type: [string, 'null'], maxLength: 4000 }
+            sow: { type: [string, 'null'], maxLength: 8000 }
+            deadline: { type: string, format: date }
+            assignedTo: { $ref: '#/components/schemas/LegacyTaskCreate/properties/assignedTo' }
+            facultyId: { type: [string, 'null'], description: Cannot change the persisted scope }
+            eventId: { type: [string, 'null'], maxLength: 200 }
+            priority: { type: string, enum: [normal, important, critical] }
+            competency: { type: [string, 'null'], maxLength: 200 }
+            competencies: { type: [array, 'null'], maxItems: 100, items: { type: string, minLength: 1, maxLength: 200 } }
+            tips: { type: [array, 'null'], maxItems: 50, items: { type: string, minLength: 1, maxLength: 1000 } }
+            reminders: { type: [array, 'null'], maxItems: 3, items: { $ref: '#/components/schemas/TaskReminderInput' } }
+    LegacyTaskComment:
+      allOf:
+        - { $ref: '#/components/schemas/LegacyTaskMutationBase' }
+        - type: object
+          required: [side, text]
+          properties:
+            side: { type: string, enum: [executor, coordinator] }
+            text: { type: string, minLength: 1, maxLength: 4000 }
+            assigneeId: { type: [string, 'null'], description: Required for coordinator; ignored for executor, whose target is self }
+    LegacyTaskStatus:
+      allOf:
+        - { $ref: '#/components/schemas/LegacyTaskMutationBase' }
+        - type: object
+          required: [status]
+          properties:
+            status: { type: string, enum: [open, assigned, in_progress, waiting, completed] }
+            timeSpentMinutes: { type: [integer, 'null'], minimum: 1, maximum: 60000 }
+            completionComment: { type: [string, 'null'], maxLength: 4000 }
+    LegacyTaskCreate:
+      type: object
+      required: [title, deadline]
+      properties:
+        title: { type: string, minLength: 2, maxLength: 160 }
+        description: { type: string, maxLength: 4000 }
+        sow: { type: string, maxLength: 8000 }
+        deadline: { type: string, format: date }
+        assignedTo:
+          oneOf:
+            - { type: string }
+            - { type: array, maxItems: 200, items: { type: string, minLength: 1 } }
+            - { type: 'null' }
+        facultyId: { type: string, maxLength: 200 }
+        eventId: { type: string, maxLength: 200 }
+        priority: { type: string, enum: [normal, important, critical], default: normal }
+        competency: { type: string, maxLength: 200 }
+        competencies: { type: array, maxItems: 100, items: { type: string, minLength: 1, maxLength: 200 } }
+        tips: { type: array, maxItems: 50, items: { type: string, minLength: 1, maxLength: 1000 } }
+        reminders: { type: array, maxItems: 3, items: { $ref: '#/components/schemas/TaskReminderInput' } }
+        creatorId: { type: string, description: Ignored; actor comes from session }
+        requesterId: { type: string, description: Ignored; actor comes from session }
+    TaskMaintenanceClear:
+      type: object
+      required: [fingerprint]
+      properties:
+        fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        confirmation: { type: string, maxLength: 100 }
+    TaskMaintenancePreview:
+      type: object
+      required: [mode, count, tasks, statusCounts, fingerprint]
+      properties:
+        mode: { type: string, enum: [archive, season-reset] }
+        count: { type: integer, minimum: 0 }
+        fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        statusCounts:
+          type: object
+          additionalProperties: { type: integer, minimum: 0 }
+        tasks:
+          type: array
+          items:
+            type: object
+            required: [id, version, status]
+            properties:
+              id: { type: string }
+              version: { type: integer, format: int64, minimum: 0 }
+              status: { type: string }
     TaskVersion:
       type: object
       required: [expectedVersion]
@@ -465,7 +1312,25 @@ components:
         deadline: { type: [string, 'null'], format: date, description: End of selected Moscow day }
         assigneeIds: { type: array, maxItems: 200, items: { type: string } }
         competencyIds: { type: array, maxItems: 100, items: { type: string } }
+        tips:
+          type: [array, 'null']
+          description: Ordered tips; omitted or null preserves tips on update, empty array clears them
+          maxItems: 50
+          items: { type: string, minLength: 1, maxLength: 1000 }
+        reminders:
+          type: [array, 'null']
+          description: Reminder configuration; omitted or null preserves configuration, empty array removes it
+          maxItems: 3
+          items: { $ref: '#/components/schemas/TaskReminderInput' }
         expectedVersion: { type: integer, format: int64, minimum: 0 }
+    TaskReminderInput:
+      type: object
+      required: [type, value, unit]
+      properties:
+        id: { type: [string, 'null'], maxLength: 128, description: Existing server-issued reminder id; omit for new configuration }
+        type: { type: string, enum: [before_deadline, repeat] }
+        value: { type: integer, minimum: 1 }
+        unit: { type: string, enum: [days, hours] }
     TaskStatus:
       type: object
       required: [status, expectedVersion]
@@ -505,6 +1370,11 @@ components:
         minLength: 8
         maxLength: 128
   securitySchemes:
+    telegramWebhookSecret:
+      type: apiKey
+      in: header
+      name: X-Telegram-Bot-Api-Secret-Token
+      description: Independent random 32-256 character A-Z a-z 0-9 underscore hyphen secret; not a session or bot token.
     sessionCookie:
       type: apiKey
       in: cookie

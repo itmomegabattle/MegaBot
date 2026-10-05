@@ -10,6 +10,7 @@
     "verify:core": "npm run build && npm run verify:time && npm run verify:form-drafts && npm run verify:meeting-lifecycle && npm run verify:task-assignment && npm run verify:task-scopes && npm run verify:shared-tasks && npm run verify:user-lifecycle && npm run verify:command-parity && npm run verify:audiences && npm run verify:notifications && npm run verify:telegram-inbox && npm run verify:reminders && npm run verify:birthdays && npm run verify:availability && npm run verify:availability-weeks && npm run verify:recovery && node scripts/verify-core-flows.mjs && node scripts/verify-telegram-update-transport.mjs && node scripts/verify-telegram-inbox.mjs && node scripts/verify-service-readiness.mjs && node scripts/verify-session-auth.mjs && node scripts/verify-state-access.mjs && node scripts/verify-security-controls.mjs && node scripts/verify-concurrent-mutations.mjs",
     "verify:time": "tsx scripts/verify-project-time.ts",
     "verify:form-drafts": "tsx scripts/verify-form-drafts.ts",
+    "verify:broadcast-client": "tsx scripts/verify-broadcast-client.ts",
     "verify:meeting-lifecycle": "tsx scripts/verify-meeting-lifecycle.ts",
     "verify:task-assignment": "tsx scripts/verify-task-assignment.ts",
     "verify:task-scopes": "tsx scripts/verify-task-event-scopes.ts",

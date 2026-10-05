@@ -1,5 +1,7 @@
 package ru.itmomegabattle.megabot.meetings;
 
+import ru.itmomegabattle.megabot.common.SqlTime;
+
 import java.time.Clock;
 import java.time.Instant;
 import java.time.LocalDate;
@@ -14,6 +16,7 @@ import java.util.Set;
 import java.util.UUID;
 
 import org.springframework.http.HttpStatus;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -33,8 +36,12 @@ class MeetingService {
 	private final Clock clock;
 	private final AuditWriter audit;
 	private final OutboxWriter outbox;
+	private final int reminderMinutes;
 
-	MeetingService(JdbcClient jdbc, ObjectMapper json, Clock clock, AuditWriter audit, OutboxWriter outbox) {
+	MeetingService(JdbcClient jdbc, ObjectMapper json, Clock clock, AuditWriter audit, OutboxWriter outbox,
+			@Value("${megabot.meetings.reminder-minutes:60}") int reminderMinutes) {
+		if (reminderMinutes < 0 || reminderMinutes > 1440) throw new IllegalArgumentException("invalid_meeting_reminder_interval");
+		this.reminderMinutes = reminderMinutes;
 		this.jdbc = jdbc;
 		this.json = json;
 		this.clock = clock;
@@ -64,14 +71,14 @@ class MeetingService {
 				values (:id, :kind, :title, :eventId, :startsAt, :duration, :zoneId, :hostId,
 				        :audienceMode, :competencyId, :topic, :description, 'scheduled', 0)
 				""").param("id", id).param("kind", normalized.kind()).param("title", normalized.title())
-				.param("eventId", normalized.eventId()).param("startsAt", normalized.startsAt())
+				.param("eventId", normalized.eventId()).param("startsAt", SqlTime.of(normalized.startsAt()))
 				.param("duration", normalized.durationMinutes()).param("zoneId", MeetingRules.PROJECT_ZONE.getId())
 				.param("hostId", actor.id()).param("audienceMode", normalized.audienceMode())
 				.param("competencyId", normalized.competencyId()).param("topic", normalized.topic())
 				.param("description", normalized.description()).update();
 		replaceAudience(id, Set.of(), audience);
 		var meeting = require(id, false);
-		writeSideEffects(meeting, "created", Set.of(), audience);
+		writeSideEffects(meeting, "created", Set.of(), audience,actor.id(),meeting.title());
 		audit.write(actor.id(), "meeting", id, "created", snapshot(meeting, audience));
 		return view(meeting, clock.instant());
 	}
@@ -93,7 +100,7 @@ class MeetingService {
 				 topic = :topic, description = :description, version = :version, updated_at = now()
 				where id = :id and version = :expectedVersion
 				""").param("kind", normalized.kind()).param("title", normalized.title())
-				.param("eventId", normalized.eventId()).param("startsAt", normalized.startsAt())
+				.param("eventId", normalized.eventId()).param("startsAt", SqlTime.of(normalized.startsAt()))
 				.param("duration", normalized.durationMinutes()).param("audienceMode", normalized.audienceMode())
 				.param("competencyId", normalized.competencyId()).param("topic", normalized.topic())
 				.param("description", normalized.description()).param("version", nextVersion)
@@ -104,7 +111,7 @@ class MeetingService {
 		changes.put("before", snapshot(current, previousAudience));
 		changes.put("after", snapshot(updated, nextAudience));
 		audit.write(actor.id(), "meeting", id, "updated", changes);
-		writeSideEffects(updated, "updated", previousAudience, nextAudience);
+		writeSideEffects(updated, "updated", previousAudience, nextAudience,actor.id(),current.title());
 		return view(updated, clock.instant());
 	}
 
@@ -120,7 +127,7 @@ class MeetingService {
 		var cancelled = require(id, false);
 		var audience = invitationIds(id);
 		audit.write(actor.id(), "meeting", id, "cancelled", Map.of("version", nextVersion));
-		writeSideEffects(cancelled, "cancelled", audience, audience);
+		writeSideEffects(cancelled, "cancelled", audience, audience,actor.id(),current.title());
 		return view(cancelled, clock.instant());
 	}
 
@@ -139,7 +146,7 @@ class MeetingService {
 				.orElseThrow(() -> new ApiException(HttpStatus.FORBIDDEN, "not_invited", "Вы не приглашены на эту встречу"));
 		if (previous.equals(response)) return new MeetingController.RsvpView(id, response, false);
 		jdbc.sql("update meeting_invitations set rsvp = :response, responded_at = :respondedAt where meeting_id = :meetingId and user_id = :userId")
-				.param("response", response).param("respondedAt", "unanswered".equals(response) ? null : clock.instant())
+				.param("response", response).param("respondedAt", SqlTime.of("unanswered".equals(response) ? null : clock.instant()))
 				.param("meetingId", id).param("userId", actor.id()).update();
 		audit.write(actor.id(), "meeting_rsvp", id + ":" + actor.id(), "changed", Map.of("before", previous, "after", response));
 		return new MeetingController.RsvpView(id, response, true);
@@ -190,19 +197,38 @@ class MeetingService {
 		}
 	}
 
-	private void writeSideEffects(MeetingRow meeting, String action, Set<String> previousAudience, Set<String> nextAudience) {
+	private void writeSideEffects(MeetingRow meeting, String action, Set<String> previousAudience, Set<String> nextAudience,String actorId,String previousTitle) {
 		var payload = new LinkedHashMap<String, Object>();
 		payload.put("action", action); payload.put("meeting", snapshot(meeting, nextAudience));
 		payload.put("previousAudienceUserIds", previousAudience); payload.put("audienceUserIds", nextAudience);
+		payload.put("actorId",actorId);
+		payload.put("previousTitle",previousTitle);
+		var union=new HashSet<>(previousAudience);union.addAll(nextAudience);
+		var recipients=jdbc.sql("select id,telegram_id from users where id in (:ids) order by id")
+				.param("ids",union).query((r,i)->{
+			var person=new LinkedHashMap<String,Object>();person.put("userId",r.getString(1));person.put("telegramId",r.getObject(2));
+			person.put("kind",nextAudience.contains(r.getString(1))?"invited":"removed");return person;
+		}).list();
+		payload.put("recipientSnapshot",recipients);
 		payload.put("groupTargets", importantGroupTargets());
 		var encoded = encode(payload);
 		outbox.write("meeting", meeting.id(), "meeting." + action,
 				"meeting:" + meeting.id() + ":" + meeting.version() + ":" + action, encoded, clock.instant());
+		var due=meeting.startsAt().minusSeconds(reminderMinutes * 60L);
+		var databaseNow=jdbc.sql("select clock_timestamp()").query((r,i)->r.getTimestamp(1).toInstant()).single();
+		if (reminderMinutes > 0 && !action.equals("cancelled") && due.isAfter(databaseNow)) {
+			var reminder=new LinkedHashMap<>(payload);
+			reminder.put("action","reminder");
+			reminder.put("originAction",action);
+			reminder.put("recipientSnapshot",recipients.stream().filter(p->p.get("kind").equals("invited")).toList());
+			outbox.write("meeting",meeting.id(),"meeting.reminder",
+					"meeting:"+meeting.id()+":"+meeting.version()+":reminder",encode(reminder),due);
+		}
 		jdbc.sql("""
 				insert into integration_jobs(id, provider, entity_type, entity_id, entity_version, payload, available_at, status)
 				values (:id, 'google_calendar', 'meeting', :meetingId, :version, cast(:payload as jsonb), :availableAt, 'pending')
 				""").param("id", "job_" + UUID.randomUUID()).param("meetingId", meeting.id())
-				.param("version", meeting.version()).param("payload", encoded).param("availableAt", clock.instant()).update();
+				.param("version", meeting.version()).param("payload", encoded).param("availableAt", SqlTime.of(clock.instant())).update();
 	}
 
 	private List<Map<String, Object>> importantGroupTargets() {

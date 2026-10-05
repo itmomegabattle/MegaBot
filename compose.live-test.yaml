@@ -1,0 +1,23 @@
+# Standalone file, NOT an override of compose.yaml. No production service, network or volume reuse.
+name: megabot-live-test
+services:
+  db:
+    image: postgres:17.11-alpine3.24
+    environment:
+      POSTGRES_DB: megabot_live_test
+      POSTGRES_USER: megabot_live_test_admin
+      POSTGRES_PASSWORD: megabot_live_test_admin_local_only
+      MEGABOT_DB_USERNAME: megabot_live_test_app
+      MEGABOT_DB_PASSWORD: megabot_live_test_local_only
+    ports:
+      - "127.0.0.1:55432:5432"
+    volumes:
+      - test-postgres-data:/var/lib/postgresql/data
+      - ./backend/docker/postgres/001-create-app-user.sh:/docker-entrypoint-initdb.d/001-create-app-user.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U megabot_live_test_admin -d megabot_live_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+volumes:
+  test-postgres-data:

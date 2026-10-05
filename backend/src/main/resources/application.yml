@@ -30,6 +30,27 @@ management:
           include: readinessState,db
 
 megabot:
+  telegram:
+    incoming-mode: ${MEGABOT_TELEGRAM_INCOMING_MODE:disabled}
+    bot-id: ${MEGABOT_TELEGRAM_BOT_ID:}
+    webhook-secret: ${MEGABOT_TELEGRAM_WEBHOOK_SECRET:}
+  birthdays:
+    hour: ${BIRTHDAY_REMINDER_HOUR:12}
+    payment-phone: ${BIRTHDAY_PAYMENT_PHONE:89105408050}
+    payment-bank: ${BIRTHDAY_PAYMENT_BANK:Сбер}
+    max-amount: ${BIRTHDAY_GIFT_MAX_AMOUNT:400}
+  meetings:
+    reminder-minutes: ${MEETING_REMINDER_MINUTES:60}
+  broadcast:
+    request-window-ms: ${BROADCAST_RATE_LIMIT_WINDOW_MS:600000}
+    request-max: ${BROADCAST_RATE_LIMIT_MAX:10}
+    volume-window-ms: ${BROADCAST_VOLUME_WINDOW_MS:3600000}
+    volume-max: ${BROADCAST_VOLUME_MAX_RECIPIENTS:500}
+  delivery:
+    enabled: ${MEGABOT_DELIVERY_ENABLED:false}
+    bot-per-second: 20
+    private-per-second: 1
+    group-per-minute: 20
   auth:
     telegram:
       bot-token: ${TELEGRAM_BOT_TOKEN:}
