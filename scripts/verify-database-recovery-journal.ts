@@ -35,6 +35,24 @@ try {
   assert.throws(() => writeDatabaseRecoveryRecord(blockedPath, state(6, 'Ошибка')));
 
   const sheetsConfig = { spreadsheetId: 'test', credentialsFile: 'unused.json', enabled: true };
+  const originalTimeout = AbortSignal.timeout;
+  const timeouts: number[] = [];
+  try {
+    AbortSignal.timeout = (milliseconds) => {
+      timeouts.push(milliseconds);
+      return originalTimeout(milliseconds);
+    };
+    const signals: (AbortSignal | null | undefined)[] = [];
+    await exportStateToGoogleSheetsDatabase(sheetsConfig, state(7, 'Sheets'), 'timeout_test', {
+      initialize: async () => ({ spreadsheetId: 'test', sheets: [], created: false }),
+      request: async (_config, _path, init) => { signals.push(init?.signal); return {}; },
+    });
+    assert.deepEqual(timeouts, [45_000], 'only the large final snapshot write gets a longer bounded deadline');
+    assert.ok(signals[2] instanceof AbortSignal);
+    assert.ok(signals.filter(Boolean).length === 1, 'metadata, clear and audit retain their ordinary deadlines');
+  } finally {
+    AbortSignal.timeout = originalTimeout;
+  }
   for (let failedStep = 1; failedStep <= 4; failedStep += 1) {
     let requestCount = 0;
     await assert.rejects(exportStateToGoogleSheetsDatabase(sheetsConfig, state(7, 'Sheets'), 'failure_test', {
@@ -47,7 +65,7 @@ try {
     }), new RegExp(`step ${failedStep}`));
     assert.equal(requestCount, failedStep, `export must surface failure at step ${failedStep}`);
   }
-  console.log('Database recovery verification passed: durable fallback, retention, write rejection, and every Sheets export failure step.');
+  console.log('Database recovery verification passed: durable fallback, retention, bounded large-write timeout, write rejection, and every Sheets export failure step.');
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }

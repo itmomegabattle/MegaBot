@@ -1,0 +1,11 @@
+{
+  "sourceUserIds": ["legacy_host", "legacy_yes", "legacy_no", "legacy_unanswered"],
+  "audienceUserIds": ["legacy_host", "legacy_yes", "legacy_no", "legacy_unanswered"],
+  "meeting": {
+    "id": "legacy_meeting",
+    "hostId": "legacy_host",
+    "status": "completed",
+    "attendeeIds": ["legacy_yes", "legacy_no"],
+    "rsvpByUser": {"legacy_no": "no"}
+  }
+}

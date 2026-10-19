@@ -9,12 +9,14 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
+import tools.jackson.databind.ObjectMapper;
 
 /** Internal lifecycle only. No scheduler: command handlers must exist before consumption is enabled. */
 @Service
 public class TelegramInboxQueue {
 	private final JdbcClient jdbc;
-	TelegramInboxQueue(JdbcClient jdbc) { this.jdbc=jdbc; }
+	private final ObjectMapper json;
+	TelegramInboxQueue(JdbcClient jdbc,ObjectMapper json) { this.jdbc=jdbc;this.json=json; }
 
 	/** One durable head per chat; a delayed retry or locked head blocks its followers. */
 	@Transactional(propagation=Propagation.REQUIRES_NEW,isolation=Isolation.READ_COMMITTED,timeout=5)
@@ -64,12 +66,27 @@ public class TelegramInboxQueue {
 					row.getString("chat_key"),row.getString("payload"),row.getInt("attempts"))).optional();
 		// Recheck after the lock wait: an unchanged row can retain a pre-wait predicate evaluation.
 		if(current.isEmpty() || !ownsLease(id,token)) return false;
-		action.accept(current.get());
+		boolean duplicate=false;
+		var callback=json.readTree(current.get().payload()).get("callback_query");
+		if(callback!=null) {
+			var callbackId=callback.path("id");
+			if(!callbackId.isString() || callbackId.asText().isBlank()
+					|| callbackId.asText().getBytes(java.nio.charset.StandardCharsets.UTF_8).length>256
+					|| !java.nio.charset.StandardCharsets.UTF_8.newEncoder().canEncode(callbackId.asText()))throw new InvalidCallbackId();
+			// PostgreSQL arbitrates competing copies, including copies delivered to different chat keys.
+			duplicate=jdbc.sql("""
+					insert into telegram_callback_effects(bot_id,callback_id,first_inbox_id)
+					values (:bot,:callback,:inbox) on conflict(bot_id,callback_id) do nothing
+					""").param("bot",current.get().botId()).param("callback",callbackId.asText()).param("inbox",id).update()==0;
+			// An insert can wait for another transaction longer than this owner's remaining lease.
+			if(!ownsLease(id,token))throw new IllegalStateException("Inbox lease expired during processing");
+		}
+		if(!duplicate)action.accept(current.get());
 		if(jdbc.sql("""
 				update telegram_inbox set status='completed',processed_at=clock_timestamp(),updated_at=clock_timestamp(),
-				lease_token=null,leased_until=null,last_error=null where id=:id and lease_token=:token
+				lease_token=null,leased_until=null,last_error=:code where id=:id and lease_token=:token
 				and status='processing' and leased_until>clock_timestamp()
-				""").param("id",id).param("token",token).update()!=1)
+				""").param("id",id).param("token",token).param("code",duplicate?"duplicate_callback":null).update()!=1)
 			throw new IllegalStateException("Inbox lease expired during processing");
 		return true;
 	}
@@ -98,4 +115,5 @@ public class TelegramInboxQueue {
 		return duration.toSeconds()+(duration.getNano()>0?1:0);
 	}
 	public record Lease(String id,String token,String botId,long updateId,String chatKey,String payload,int attempts) {}
+	static class InvalidCallbackId extends RuntimeException {}
 }

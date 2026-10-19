@@ -41,6 +41,7 @@ const setupEvent = buildGoogleCalendarEvent({
   ...meeting,
   id: 'm_setup_1',
   kind: 'setup',
+  duration: 4,
   eventId: 'event-1',
   title: 'Монтаж сцены',
   participants: 'all',
@@ -49,6 +50,8 @@ const setupEvent = buildGoogleCalendarEvent({
   competency: '',
 }, state);
 assert.equal(setupEvent.summary, 'Монтаж сцены');
+assert.equal(setupEvent.end.dateTime, '2026-08-06T21:30:00', 'setup calendar end must use selected four-hour duration');
+assert.equal(buildGoogleCalendarEvent({...meeting, kind:'setup', duration:12}, state).end.dateTime, '2026-08-07T05:30:00', 'twelve-hour setup must end on the next day');
 assert.match(setupEvent.description, /Тип: монтаж площадки/);
 assert.match(setupEvent.description, /Мероприятие: Фестиваль/);
 assert.match(setupEvent.description, /Формат: монтаж, приглашена вся команда/);

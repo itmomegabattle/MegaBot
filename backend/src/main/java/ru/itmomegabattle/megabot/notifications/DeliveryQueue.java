@@ -20,7 +20,16 @@ public class DeliveryQueue {
 	private final AvailabilitySubmissionService availability;
 	private final ru.itmomegabattle.megabot.tasks.TaskDeliveryGate taskGate;
 	private final BroadcastGroupTargets groups;
-	public DeliveryQueue(JdbcClient jdbc,AvailabilitySubmissionService availability,ru.itmomegabattle.megabot.tasks.TaskDeliveryGate taskGate,BroadcastGroupTargets groups) { this.jdbc=jdbc;this.availability=availability;this.taskGate=taskGate;this.groups=groups; }
+	private final ru.itmomegabattle.megabot.meetings.TelegramMeetingRsvp meetingRsvp;
+	public DeliveryQueue(JdbcClient jdbc,AvailabilitySubmissionService availability,ru.itmomegabattle.megabot.tasks.TaskDeliveryGate taskGate,BroadcastGroupTargets groups,ru.itmomegabattle.megabot.meetings.TelegramMeetingRsvp meetingRsvp) { this.jdbc=jdbc;this.availability=availability;this.taskGate=taskGate;this.groups=groups;this.meetingRsvp=meetingRsvp; }
+
+	public boolean meetingMarkupAllowed(String id,String token,String bot) { return meetingRsvp.sendAllowed(id,token,bot); }
+
+	@Transactional
+	public boolean meetingReplyReadyForSending(String id,String token,String bot) {
+		if(meetingRsvp.sendAllowed(id,token,bot))return true;
+		finish(id,token,Result.failed("stale_meeting_panel"));return false;
+	}
 
 	@Transactional(propagation=Propagation.MANDATORY)
 	public String enqueue(NewDelivery r) {
@@ -84,9 +93,11 @@ public class DeliveryQueue {
 				 select id from notification_deliveries where status in ('planned','retry') and not cancel_requested and attempts<8
 				 and (not :broadcastsOnly or (category='broadcast' and broadcast_target_id is not null)
 				 or (category='broadcast_expired' and broadcast_expiry_notice_id is not null)
-				 or (:reminders and ((category='task_reminder' and task_occurrence_id is not null) or (category in ('task_manual','task_created','task_status','task_updated','task_unassigned','task_assignment','task_comment','task_cancel') and task_manual_id is not null) or (category='meeting_event' and meeting_target_id is not null) or (category='availability_reminder' and availability_reminder_target_id is not null) or (category='birthday_reminder' and birthday_reminder_target_id is not null) or (category='telegram_command_reply' and command_reply_outbox_id is not null))))
+				 or (:reminders and ((category='task_reminder' and task_occurrence_id is not null) or (category in ('task_manual','task_created','task_status','task_updated','task_unassigned','task_assignment','task_comment','task_cancel') and task_manual_id is not null) or (category='meeting_event' and meeting_target_id is not null) or (category='availability_reminder' and availability_reminder_target_id is not null) or (category='birthday_reminder' and birthday_reminder_target_id is not null) or (category='telegram_command_reply' and command_reply_outbox_id is not null) or (category='telegram_panel_delete' and panel_delete_source_id is not null))))
 				 and (category<>'telegram_command_reply' or exists(select 1 from outbox_events o join telegram_inbox i on i.id=o.aggregate_id where o.id=command_reply_outbox_id and i.bot_id=:bot))
+				 and (category<>'telegram_panel_delete' or payload->>'botId'=:bot)
 				 and (category<>'meeting_event' or cast(:bot as text) is null or exists(select 1 from meeting_notification_targets mt where mt.id=meeting_target_id and (mt.bot_id is null or mt.bot_id=:bot)))
+				 and (category<>'meeting_event' or not jsonb_exists(payload,'replyMarkup') or (cast(:bot as text) is not null and payload->>'botId'=:bot))
 				 and (category<>'broadcast' or not exists(select 1 from broadcast_targets t where t.id=broadcast_target_id and t.bot_id is not null and (cast(:bot as text) is null or t.bot_id<>:bot)))
 				 and intended_at<=clock_timestamp() and available_at<=clock_timestamp()
 				 and (part_number=1 or broadcast_part_ready(broadcast_target_id,part_number))
@@ -120,6 +131,14 @@ public class DeliveryQueue {
 	/** Caller must verify domain version, audience and quota before this final ownership gate. */
 	@Transactional
 	public boolean start(String id,String token) {
+		if(!panelDeleteEligible(id,token,null,false)) {
+			jdbc.sql("""
+					update notification_deliveries set status='cancelled',cancel_requested=true,lease_token=null,leased_until=null,
+					last_error_code='invalid_panel_delete',version=version+1,updated_at=clock_timestamp()
+					where id=:id and lease_token=:token and status='claimed' and category='telegram_panel_delete' and leased_until>clock_timestamp()
+					""").param("id",id).param("token",token).update();
+			return false;
+		}
 		if(!commandReplyEligible(id,token,null)) {
 			jdbc.sql("""
 					update notification_deliveries set status='cancelled',cancel_requested=true,lease_token=null,leased_until=null,
@@ -161,7 +180,9 @@ public class DeliveryQueue {
 	@Transactional
 	public boolean finish(String id,String token,Result result) {
 		taskGate.lockForResult(id);
-		if(result==null || ("sent".equals(result.status()) && (result.messageId()==null || result.messageId()<1))
+		boolean withoutMessageId=result!=null && "sent".equals(result.status()) && jdbc.sql("select (category='telegram_command_reply' and payload->>'command'='callback_ack' and payload->>'operation'='ack') or category='telegram_panel_delete' from notification_deliveries where id=:id")
+				.param("id",id).query(Boolean.class).optional().orElse(false);
+		if(result==null || ("sent".equals(result.status()) && (withoutMessageId?result.messageId()!=null:result.messageId()==null || result.messageId()<1))
 				|| result.status()==null || !List.of("sent","retry","failed","unknown").contains(result.status())
 				|| (!"sent".equals(result.status()) && result.messageId()!=null)
 				|| (result.code()!=null && !result.code().matches("[A-Za-z0-9_.:-]{1,128}"))
@@ -187,14 +208,80 @@ public class DeliveryQueue {
 				.param("code",result.code()).param("message",result.messageId()).update();
 		if("sent".equals(changed.get().status())) {
 			taskGate.confirmed(id);
+			planPanelDeletions(id);
 			jdbc.sql("""
 					insert into bot_messages(id,user_id,sender,text,buttons,occurred_at)
 					select 'reply:'||d.id,d.recipient_id,'bot',d.payload->>'text',d.payload->'replyMarkup',d.sent_at
-					from notification_deliveries d where d.id=:id and d.category='telegram_command_reply' and d.recipient_id is not null
+					from notification_deliveries d where d.id=:id and d.category='telegram_command_reply' and d.recipient_id is not null and coalesce(d.payload->>'operation','send')<>'ack'
 					on conflict(id) do nothing
 					""").param("id",id).update();
 		}
 		return true;
+	}
+
+	/** Only confirmed replacement sends retire known slot-panel sends; edits never create new provider IDs. */
+	private void planPanelDeletions(String replacement) {
+		jdbc.sql("""
+				insert into notification_deliveries(id,operation_id,dedupe_key,category,chat_id,payload,
+				 intended_at,available_at,initial_available_at,expires_at,status,panel_delete_source_id,panel_delete_replacement_id)
+				select 'panel-delete:'||p.id,p.id,'panel-delete:'||(p.payload->>'botId')||':'||p.chat_id||':'||p.telegram_message_id,
+				 'telegram_panel_delete',p.chat_id,
+				 jsonb_build_object('botId',p.payload->>'botId','command','slot_panel_delete','operation','delete','targetMessageId',p.telegram_message_id),
+				 p.request_started_at,clock_timestamp(),clock_timestamp(),p.request_started_at+interval '47 hours',
+				 case when p.request_started_at+interval '47 hours'>clock_timestamp() then 'planned' else 'expired' end,p.id,r.id
+				from notification_deliveries r join notification_deliveries p on p.chat_id=r.chat_id
+				 and p.payload->>'botId'=r.payload->>'botId' and p.recipient_id=r.recipient_id
+				join telegram_slot_drafts s on s.id=p.payload->>'slotDraftId' and s.bot_id=p.payload->>'botId'
+				 and s.chat_id=p.chat_id and s.user_id=p.recipient_id
+				join outbox_events po on po.id=p.command_reply_outbox_id and po.status='completed' and po.payload=p.payload
+				join telegram_inbox pi on pi.id=po.aggregate_id and pi.status='completed' and pi.bot_id=s.bot_id
+				join outbox_events ro on ro.id=r.command_reply_outbox_id and ro.status='completed' and ro.payload=r.payload
+				join telegram_inbox ri on ri.id=ro.aggregate_id and ri.status='completed' and ri.bot_id=s.bot_id
+				where r.id=:replacement and r.category='telegram_command_reply' and r.status='sent'
+				 and not jsonb_exists(r.payload,'operation') and r.message_thread_id is null and r.telegram_message_id>0
+				 and p.category='telegram_command_reply' and p.status='sent' and p.message_thread_id is null
+				 and p.payload->>'command' in ('slots','back') and not jsonb_exists(p.payload,'operation')
+				 and p.telegram_message_id>0 and p.telegram_message_id<>r.telegram_message_id and p.request_started_at is not null
+				 and (s.status<>'open' or s.expires_at<=clock_timestamp()
+				 or (s.id=r.payload->>'slotDraftId' and s.revision::text=r.payload->>'slotRevision'))
+				on conflict do nothing
+				""").param("replacement",replacement).update();
+	}
+
+	private boolean panelDeleteEligible(String id,String token,String bot,boolean requireDelete) {
+		return jdbc.sql("""
+				select (not :required and d.category<>'telegram_panel_delete') or (d.category='telegram_panel_delete'
+				 and d.chat_id>0 and d.message_thread_id is null and d.recipient_id is null and not d.disable_notification
+				 and not d.cancel_requested and d.operation_id=p.id and d.intended_at<=clock_timestamp()
+				 and d.payload=jsonb_build_object('botId',p.payload->>'botId','command','slot_panel_delete','operation','delete','targetMessageId',p.telegram_message_id)
+				 and (cast(:bot as text) is null or d.payload->>'botId'=:bot)
+				 and d.chat_id=p.chat_id and p.status='sent' and p.telegram_message_id>0 and p.message_thread_id is null
+				 and po.payload=p.payload and po.status='completed' and pi.status='completed' and pi.bot_id=p.payload->>'botId'
+				 and p.category='telegram_command_reply' and p.payload->>'command' in ('slots','back')
+				 and not jsonb_exists(p.payload,'operation') and p.payload->>'slotDraftId'=s.id
+				 and p.payload->>'botId'=s.bot_id and p.chat_id=s.chat_id and p.recipient_id=s.user_id
+				 and r.status='sent' and r.category='telegram_command_reply' and not jsonb_exists(r.payload,'operation')
+				 and r.chat_id=p.chat_id and r.recipient_id=p.recipient_id and r.payload->>'botId'=p.payload->>'botId'
+				 and r.telegram_message_id>0 and r.telegram_message_id<>p.telegram_message_id and r.message_thread_id is null
+				 and ro.payload=r.payload and ro.status='completed' and ri.status='completed' and ri.bot_id=p.payload->>'botId'
+				 and d.intended_at=p.request_started_at and d.expires_at=p.request_started_at+interval '47 hours'
+				 and d.expires_at>clock_timestamp()
+				 and (s.status<>'open' or s.expires_at<=clock_timestamp()
+				 or (s.id=r.payload->>'slotDraftId' and s.revision::text=r.payload->>'slotRevision')))
+				from notification_deliveries d left join notification_deliveries p on p.id=d.panel_delete_source_id
+				left join notification_deliveries r on r.id=d.panel_delete_replacement_id
+				left join telegram_slot_drafts s on s.id=p.payload->>'slotDraftId'
+				left join outbox_events po on po.id=p.command_reply_outbox_id left join telegram_inbox pi on pi.id=po.aggregate_id
+				left join outbox_events ro on ro.id=r.command_reply_outbox_id left join telegram_inbox ri on ri.id=ro.aggregate_id
+				where d.id=:id and d.lease_token=:token and d.status in ('claimed','sending') and d.leased_until>clock_timestamp()
+				""").param("id",id).param("token",token).param("bot",bot).param("required",requireDelete)
+				.query((r,i)->r.getBoolean(1)).optional().orElse(false);
+	}
+	/** Repeat immutable source/cutoff checks after quota and immediately before HTTP. */
+	@Transactional
+	public boolean panelDeleteReadyForSending(String id,String token,String bot) {
+		if(panelDeleteEligible(id,token,bot,true))return true;
+		finish(id,token,Result.failed("invalid_panel_delete"));return false;
 	}
 
 	@Transactional
@@ -232,32 +319,48 @@ public class DeliveryQueue {
 	}
 	private static boolean blank(String s) { return s==null || s.isBlank(); }
 	private boolean commandReplyEligible(String id,String token,String bot) {
+		var payload=jdbc.sql("select payload::text from notification_deliveries where id=:id and lease_token=:token")
+				.param("id",id).param("token",token).query(String.class).optional();
+		if(payload.isPresent() && !meetingRsvp.editAllowed(payload.get()))return false;
 		return jdbc.sql("""
 				select d.category<>'telegram_command_reply' or exists(
 				 select 1 from outbox_events o join telegram_inbox i on i.id=o.aggregate_id
 				 where o.id=d.command_reply_outbox_id and o.aggregate_type='telegram_inbox' and o.event_type='telegram_command_reply'
 				 and o.status='completed' and i.status='completed' and (cast(:bot as text) is null or i.bot_id=:bot)
 				 and d.operation_id=o.id and d.payload=o.payload and not d.disable_notification
-				 and d.chat_id>0 and d.message_thread_id is null and d.payload->>'command' in ('start','help','menu','profile')
+				 and d.chat_id>0 and d.message_thread_id is null and d.payload->>'command' in ('start','help','menu','profile','tasks','my_tasks','open_tasks','completed_tasks','meetings','meeting_begin','meeting_audience','meeting_text','slots','back','slot_callback','meeting_callback','callback_ack')
 				 and d.payload->>'botId'=i.bot_id and d.payload->>'chatId'=d.chat_id::text
-				 and d.intended_at=o.available_at and d.expires_at=o.available_at+interval '15 minutes'
+				 and d.intended_at=o.available_at and d.expires_at=o.available_at+case when d.payload->>'operation'='ack' then interval '30 seconds' else interval '15 minutes' end
 				 and d.expires_at>clock_timestamp() and d.intended_at<=clock_timestamp()
 				 and i.chat_key=i.bot_id||':chat:'||d.chat_id::text
+				 and ((d.payload->>'command' in ('slot_callback','meeting_callback','callback_ack')
+				 and ((d.payload->>'command' in ('slot_callback','meeting_callback') and d.payload->>'operation'='edit') or (d.payload->>'command'='callback_ack' and d.payload->>'operation'='ack'))
+				 and
+				"""+ru.itmomegabattle.megabot.telegram.TelegramSlotCallbackHandler.SOURCE_SQL+"""
+				) or (d.payload->>'command' in ('start','help','menu','profile','tasks','my_tasks','open_tasks','completed_tasks','meetings','meeting_begin','meeting_audience','meeting_text','slots','back') and not jsonb_exists(d.payload,'operation')
 				 and i.payload->'message'->'chat'->>'type'='private'
 				 and i.payload->'message'->'chat'->>'id'=d.chat_id::text
 				 and i.payload->'message'->'from'->>'id'=d.chat_id::text
 				 and i.payload->'message'->'from'->'is_bot'='false'::jsonb
 				 and i.payload->'message'->>'message_id'=d.payload->>'sourceMessageId'
 				 and not jsonb_exists_any(i.payload->'message',array['sender_chat','forward_origin','via_bot','business_connection_id'])
-				 and ((d.recipient_id is not null and d.payload->>'recipientId'=d.recipient_id and exists(
+				 and
+				"""+ru.itmomegabattle.megabot.meetings.TelegramMeetingDraftService.AUDIENCE_SOURCE_SQL+" and "+ru.itmomegabattle.megabot.meetings.TelegramMeetingDraftService.TEXT_SOURCE_SQL+" and "+ru.itmomegabattle.megabot.meetings.TelegramMeetingDraftService.CONSUMED_OFFER_SQL+" and "+ru.itmomegabattle.megabot.tasks.TelegramTaskText.SOURCE_SQL+"""
+				))
+				 and ((d.payload->>'command'='callback_ack' and d.recipient_id is null
+				 and not jsonb_exists_any(d.payload,array['recipientId','recipientRole','replyMarkup','targetMessageId'])
+				 and d.payload->>'text' in ('','Редактор слотов устарел. Откройте слоты заново.','Приглашение устарело или недоступно.','Кнопка устарела. Откройте раздел заново через меню.','Отметил: вы придёте','Отметил: вы не придёте','Ответ сброшен'))
+				 or (d.recipient_id is not null and d.payload->>'recipientId'=d.recipient_id and exists(
 				  select 1 from users u join chat_bindings b on b.bot_id=i.bot_id and b.chat_id=d.chat_id and b.type='private'
 				  where u.id=d.recipient_id and u.active and u.registered and u.telegram_id=d.chat_id and u.role=d.payload->>'recipientRole'
-				  and (not (d.payload->>'command'='profile' or (d.payload->>'command'='menu' and u.role in ('admin','organizer')))
+				  and (not (d.payload->>'command' in ('profile','meetings') or (d.payload->>'command' in ('menu','back') and u.role in ('admin','organizer')))
 				       or u.version::text=d.payload->>'profileVersion')))
 				 or (d.recipient_id is null and not jsonb_exists_any(d.payload,array['recipientId','recipientRole'])
 				  and d.payload->>'text'='Вас нет в списке участников. Попросите админа добавить ваш Telegram в раздел «Команда», а потом нажмите /start ещё раз.'
 				  and d.payload->'replyMarkup'='{"keyboard":[[{"text":"Помощь"}]],"resize_keyboard":true,"is_persistent":false,"one_time_keyboard":false}'::jsonb
 				  and not exists(select 1 from users u where u.telegram_id=d.chat_id and u.active and u.registered))))
+				and
+				"""+ru.itmomegabattle.megabot.availability.TelegramSlotDraftService.CURRENT_PANEL_SQL+" and "+ru.itmomegabattle.megabot.meetings.TelegramMeetingDraftService.CURRENT_PANEL_SQL+" and "+ru.itmomegabattle.megabot.tasks.TelegramTaskText.CURRENT_VIEW_SQL+"""
 				from notification_deliveries d where d.id=:id and d.lease_token=:token
 				and d.status in ('claimed','sending') and d.leased_until>clock_timestamp() and not d.cancel_requested
 				""").param("id",id).param("token",token).param("bot",bot).query((r,i)->r.getBoolean(1)).optional().orElse(false);

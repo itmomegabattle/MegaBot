@@ -3,22 +3,66 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
+    inputs:
+      verify_java:
+        description: 'Run the deferred Java/PostgreSQL migration checks separately'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
 
 jobs:
   frontend-node:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: npm
+      - run: npm install --global npm@10.9.8
       - run: npm ci
+      - name: Dependency audit
+        run: |
+          mkdir -p output
+          npm audit --json > output/npm-audit.json
       - run: npm run lint
-      - run: npm run build
+      - run: npm run verify:docs
+      - run: npm run verify:dependency-controls
+      - run: npm run verify:core
+      - run: npm run verify:release-boundary
+      - name: Typecheck after build
+        run: npm run lint
+      - name: Profiled mock checks
+        run: |
+          npm run verify:avatar
+          npm run verify:sheets
+          npm run verify:database-sheets
+          npm run verify:calendar
+          npm run verify:broadcast-client
+      - run: npm exec --yes --package=@playwright/cli@0.1.22 -- playwright-cli install-browser chrome --with-deps
+      - run: npm run verify:ui
+      - name: Production-only dependency smoke
+        run: |
+          npm ci --omit=dev --no-audit --no-fund
+          npm run verify:dependency-controls
+          npm run verify:readiness
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: node-audit-and-ui
+          path: |
+            output/npm-audit.json
+            output/playwright/
+          retention-days: 14
 
   java-backend:
+    if: github.event_name == 'workflow_dispatch' && inputs.verify_java
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: backend
@@ -29,4 +73,21 @@ jobs:
           distribution: temurin
           java-version: 21
           cache: maven
-      - run: ./mvnw --batch-mode verify
+      - run: sh ./mvnw --batch-mode verify
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - name: Isolated Compose readiness and restart drill
+        run: node ../scripts/verify-java-compose.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: java-test-reports
+          path: backend/target/surefire-reports/
+          retention-days: 14
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: java-compose-drill
+          path: output/megabot-b01-*/
+          retention-days: 14

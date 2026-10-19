@@ -6,6 +6,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { readFileSync } from 'node:fs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'megabot-telegram-transport-'));
@@ -86,6 +87,7 @@ try {
       ALLOW_LOCAL_PREVIEW: 'false',
       PORT: String(appPort),
       DB_FILE: databasePath,
+      DATABASE_RECOVERY_DIR: `${databasePath}.recovery`,
       TELEGRAM_BOT_TOKEN: 'transport-test-token',
       TELEGRAM_API_BASE: `http://127.0.0.1:${telegramPort}`,
       TELEGRAM_UPDATE_MODE: 'polling',
@@ -105,7 +107,7 @@ try {
   appProcess.stderr.on('data', (chunk) => { serverErrors += chunk.toString(); });
   for (let attempt = 0; attempt < 200; attempt += 1) {
     try {
-      const state = JSON.parse(await readFile(databasePath, 'utf8'));
+      const state = JSON.parse(readFileSync(databasePath, 'utf8'));
       const inboxEntry = state.settings?.telegramInbox?.find((entry) => entry.updateId === 7001);
       if (state.settings?.teamChatId === '-7001' && inboxEntry?.status === 'completed') break;
     } catch {
@@ -114,7 +116,7 @@ try {
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
 
-  const stateAfterPolling = JSON.parse(await readFile(databasePath, 'utf8'));
+  const stateAfterPolling = JSON.parse(readFileSync(databasePath, 'utf8'));
   assert.equal(stateAfterPolling.settings.teamChatId, '-7001');
   assert.equal(
     stateAfterPolling.settings.telegramInbox?.find((entry) => entry.updateId === 7001)?.status,
@@ -137,7 +139,7 @@ try {
     body: JSON.stringify({ ...pollingUpdate, update_id: 7002, message: { ...pollingUpdate.message, chat: { id: -999 } } }),
   });
   assert.equal(forgedHttpUpdate.status, 404);
-  const stateAfterHttpAttempt = JSON.parse(await readFile(databasePath, 'utf8'));
+  const stateAfterHttpAttempt = JSON.parse(readFileSync(databasePath, 'utf8'));
   assert.equal(stateAfterHttpAttempt.settings.teamChatId, '-7001');
 
   const webhookSecret = 'transport-cli-webhook-secret';
@@ -162,6 +164,12 @@ try {
   assert.equal(setWebhookCall.body.secret_token, webhookSecret);
   assert.deepEqual(setWebhookCall.body.allowed_updates, ['message', 'callback_query', 'chat_member', 'my_chat_member']);
   assert.equal(serverErrors, '');
+  const closed = new Promise(resolve => appProcess.once('close', resolve));
+  appProcess.kill();
+  await closed;
+  const stoppedState = JSON.parse(await readFile(databasePath, 'utf8'));
+  assert.equal(stoppedState.settings.teamChatId, '-7001');
+  assert.equal(stoppedState.settings.telegramInbox.find(item => item.updateId === 7001).status, 'completed');
 
   console.log('Telegram transport verification passed: durable polling offset, disabled HTTP route, and webhook CLI configuration.');
 } finally {

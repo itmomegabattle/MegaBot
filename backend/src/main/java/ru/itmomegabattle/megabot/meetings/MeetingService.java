@@ -4,9 +4,6 @@ import ru.itmomegabattle.megabot.common.SqlTime;
 
 import java.time.Clock;
 import java.time.Instant;
-import java.time.LocalDate;
-import java.time.ZoneId;
-import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -61,7 +58,7 @@ class MeetingService {
 
 	@Transactional
 	MeetingController.MeetingView create(MeetingController.MeetingMutation request, AuthenticatedUser actor) {
-		var normalized = MeetingRules.normalize(request, slotPolicy(), clock);
+		var normalized = MeetingRules.normalize(request, clock);
 		validateEvent(normalized.eventId(), "setup".equals(normalized.kind()));
 		var audience = resolveAudience(normalized, actor.id());
 		var id = "mtg_" + UUID.randomUUID();
@@ -89,7 +86,7 @@ class MeetingService {
 		requireOwnerOrAdmin(current, actor);
 		requireScheduled(current);
 		if (current.version() != request.expectedVersion()) throw stale();
-		var normalized = MeetingRules.normalize(request, slotPolicy(), clock);
+		var normalized = MeetingRules.normalize(request, clock);
 		validateEvent(normalized.eventId(), "setup".equals(normalized.kind()));
 		var previousAudience = invitationIds(id);
 		var nextAudience = resolveAudience(normalized, current.hostId());
@@ -165,17 +162,22 @@ class MeetingService {
 			}
 			audience.addAll(selected);
 		} else {
-			if (meeting.competencyId() == null) throw new ApiException(HttpStatus.BAD_REQUEST, "competency_required", "Выберите блок компетенций");
-			var competencyExists = jdbc.sql("select count(*) from competencies where id = :id and active and scope = 'core'")
-					.param("id", meeting.competencyId()).query(Long.class).single();
-			if (competencyExists == 0) throw new ApiException(HttpStatus.BAD_REQUEST, "competency_not_found", "Блок компетенций не найден");
-			audience.addAll(jdbc.sql("""
-					select u.id from users u join user_competencies uc on uc.user_id = u.id
-					where uc.competency_id = :competencyId and u.active and u.role in ('admin', 'organizer')
-					""").param("competencyId", meeting.competencyId()).query(String.class).list());
-			if (audience.isEmpty()) throw new ApiException(HttpStatus.BAD_REQUEST, "empty_audience", "В выбранном блоке нет активных участников");
+			audience.addAll(blockAudience(meeting.competencyId()));
 		}
 		audience.add(hostId);
+		return Set.copyOf(audience);
+	}
+
+	Set<String> blockAudience(String competencyId) {
+		if (competencyId == null) throw new ApiException(HttpStatus.BAD_REQUEST, "competency_required", "Выберите блок компетенций");
+		var competencyExists = jdbc.sql("select count(*) from competencies where id = :id and active and scope = 'core'")
+				.param("id", competencyId).query(Long.class).single();
+		if (competencyExists == 0) throw new ApiException(HttpStatus.BAD_REQUEST, "competency_not_found", "Блок компетенций не найден");
+		var audience = jdbc.sql("""
+				select u.id from users u join user_competencies uc on uc.user_id = u.id
+				where uc.competency_id = :competencyId and u.active and u.role in ('admin', 'organizer')
+				""").param("competencyId", competencyId).query(String.class).list();
+		if (audience.isEmpty()) throw new ApiException(HttpStatus.BAD_REQUEST, "empty_audience", "В выбранном блоке нет активных участников");
 		return Set.copyOf(audience);
 	}
 
@@ -249,24 +251,6 @@ class MeetingService {
 		var exists = jdbc.sql("select count(*) from work_events where id = :id and status = 'active'")
 				.param("id", eventId).query(Long.class).single();
 		if (exists == 0) throw new ApiException(HttpStatus.BAD_REQUEST, "event_not_found", "Активное мероприятие не найдено");
-	}
-
-	private MeetingRules.SlotPolicy slotPolicy() {
-		return jdbc.sql("select setting_value::text from app_settings where setting_key = 'availability'")
-				.query(String.class).optional().map(this::decodePolicy)
-				.orElseGet(() -> new MeetingRules.SlotPolicy(List.of(0, 1, 2, 3, 4), 17, 23));
-	}
-
-	private MeetingRules.SlotPolicy decodePolicy(String value) {
-		try {
-			var node = json.readTree(value);
-			var days = new ArrayList<Integer>();
-			node.path("activeDays").forEach(item -> days.add(item.asInt()));
-			return new MeetingRules.SlotPolicy(days.isEmpty() ? List.of(0, 1, 2, 3, 4) : List.copyOf(days),
-					node.path("firstHour").asInt(17), node.path("lastHour").asInt(23));
-		} catch (JacksonException exception) {
-			throw new IllegalStateException("Invalid availability settings", exception);
-		}
 	}
 
 	private MeetingRow require(String id, boolean lock) {

@@ -5,7 +5,6 @@ import {
   GraduationCap,
   Briefcase,
   Shield,
-  Check,
   Plus,
   Minus,
   Trash,
@@ -29,7 +28,7 @@ import {
 import { Meeting, MeetingKind, SimulationState, Task, User, WorkEvent } from '../types';
 import { alignAvailabilityToWeek, currentAvailabilityWeekStart, normalizeAvailabilityConfig } from '../availabilityConfig';
 import { mergeAvailabilityDraft } from '../availabilityWeekMutation';
-import { meetingKindText, normalizeMeetingKind } from '../meetingKind';
+import { meetingDurationError, meetingKindText, normalizeMeetingKind } from '../meetingKind';
 import { meetingEndTimestamp, meetingPhase, meetingStartTimestamp } from '../meetingLifecycle';
 import { meetingRsvpFor, normalizedMeetingRsvps } from '../meetingRsvp';
 import { readFormDraft, readLatestFormDraft, removeFormDraft, writeFormDraft } from '../formDrafts';
@@ -550,8 +549,8 @@ export default function MiniApp({
 
   const navigateBack = useCallback(() => {
     tabScrollPositionsRef.current[activeTab] = window.scrollY;
-    let target = tabHistoryRef.current.pop() || 'slots';
-    while (target === activeTab && tabHistoryRef.current.length) target = tabHistoryRef.current.pop() || 'slots';
+    let target = tabHistoryRef.current.pop() || 'meetings';
+    while (target === activeTab && tabHistoryRef.current.length) target = tabHistoryRef.current.pop() || 'meetings';
     setActiveTab(target);
     restoreTabScroll(target);
   }, [activeTab, restoreTabScroll, setActiveTab]);
@@ -1339,7 +1338,7 @@ export default function MiniApp({
       type: meetingKind === 'setup' ? 'general' : meetingType === 'competency' ? 'custom' : meetingType,
       date: meetingDate || nextDateForDay(0),
       time: meetingTime,
-      duration: meetingKind === 'setup' ? 1 : Number(meetingDuration) || 1,
+      duration: Number(meetingDuration) || 1,
       hostId: currentUser.id,
       participants: meetingKind === 'setup' || meetingType === 'general' ? 'all' : participants,
       topic: meetingKind === 'setup' ? '' : meetingTopic,
@@ -1399,7 +1398,6 @@ export default function MiniApp({
       setMeetingTopic('');
       setMeetingDescription('');
       setShowMeetingExtras(false);
-      setMeetingDuration('1');
       return;
     }
     setMeetingEventId('');
@@ -1962,6 +1960,7 @@ export default function MiniApp({
   const toggleDeliveryJournal = async () => {
     const next = !deliveryJournalOpen;
     setDeliveryJournalOpen(next);
+    setDiagnosticsOpen(false);
     if (next) await loadDeliveryIssues();
   };
 
@@ -1984,6 +1983,7 @@ export default function MiniApp({
   const toggleDiagnostics = async () => {
     const next = !diagnosticsOpen;
     setDiagnosticsOpen(next);
+    setDeliveryJournalOpen(false);
     if (next && !diagnostics) await loadDiagnostics();
   };
 
@@ -2626,7 +2626,7 @@ export default function MiniApp({
 
         {isAdminPanel && (
           <section className="space-y-4">
-            <div className="rounded-2xl border border-blue-100 bg-white p-1.5 shadow-sm" role="tablist" aria-label="Разделы админской панели">
+            <div className="mega-admin-tabs rounded-2xl border border-blue-100 bg-white p-1.5 shadow-sm" role="tablist" aria-label="Разделы админской панели">
               <div className="grid grid-cols-2 gap-1 min-[480px]:grid-cols-3 sm:grid-cols-6">
                 {([
                   ['team', 'Команда'],
@@ -2794,14 +2794,14 @@ export default function MiniApp({
                         </select>
                       </Field>
                     )}
-                    <div className={`grid min-w-0 grid-cols-1 gap-3 ${meetingKind === 'setup' ? 'min-[520px]:grid-cols-2' : 'min-[720px]:grid-cols-3'}`}>
+                    <div className="grid min-w-0 grid-cols-1 gap-3 min-[720px]:grid-cols-3">
                       <Field label="Дата"><DatePickerField label="Дата встречи" value={meetingDate} onChange={setMeetingDate} placeholder="Выбери дату" /></Field>
-                      <Field label="Время"><input type="time" min={meetingKind === 'vibe' ? undefined : `${String(availabilityConfig.startHour).padStart(2, '0')}:00`} max={meetingKind === 'vibe' ? undefined : `${String(availabilityConfig.endHour).padStart(2, '0')}:00`} value={meetingTime} onChange={(event) => setMeetingTime(event.target.value)} className={inputClass} /></Field>
-                      {meetingKind !== 'setup' && <Field label="Длительность">
+                      <Field label="Время"><input type="time" value={meetingTime} onChange={(event) => setMeetingTime(event.target.value)} className={inputClass} /></Field>
+                      <Field label="Длительность">
                         <select value={meetingDuration} onChange={(event) => setMeetingDuration(event.target.value)} className={selectClass}>
-                          <option value="0.5">30 минут</option><option value="1">1 час</option><option value="1.5">1,5 часа</option><option value="2">2 часа</option><option value="2.5">2,5 часа</option><option value="3">3 часа</option><option value="4">4 часа</option><option value="5">5 часов</option><option value="6">6 часов</option>
+                          <MeetingDurationOptions kind={meetingKind} value={meetingDuration} />
                         </select>
-                      </Field>}
+                      </Field>
                     </div>
                     {meetingKind !== 'setup' && <MeetingAudiencePicker value={meetingType} onChange={setMeetingAudience} />}
                     {meetingKind !== 'setup' && meetingType === 'competency' && (
@@ -2814,13 +2814,13 @@ export default function MiniApp({
                     )}
                     {meetingKind !== 'setup' && (meetingType === 'custom' || meetingType === 'competency') && (
                       <div className="grid grid-cols-1 gap-2">
-                        {coreTeamUsers.length > 3 && <ListDisclosure expanded={showAllMeetingParticipants} onToggle={() => setShowAllMeetingParticipants((value) => !value)} total={coreTeamUsers.length} />}
                         {(showAllMeetingParticipants ? coreTeamUsers : coreTeamUsers.slice(0, 3)).map((user) => (
                           <label key={user.id} className="flex items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm">
                             <span>{user.realName}</span>
                             <input type="checkbox" checked={participants.includes(user.id)} onChange={() => setParticipants((prev) => prev.includes(user.id) ? prev.filter((id) => id !== user.id) : [...prev, user.id])} />
                           </label>
                         ))}
+                        {coreTeamUsers.length > 3 && <ListDisclosure expanded={showAllMeetingParticipants} onToggle={() => setShowAllMeetingParticipants((value) => !value)} total={coreTeamUsers.length} />}
                       </div>
                     )}
                     {meetingKind !== 'setup' && (
@@ -2956,12 +2956,12 @@ export default function MiniApp({
                           : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50 active:bg-slate-100'
                       }`}
                     >
-                      {weekOut ? '✓ Я в ауте' : 'Я в ауте'}
+                      Я в ауте
                     </button>
                   </div>
 
                   <p id={`week-out-help-${weekIndex}`} className={`mx-1 text-xs font-semibold ${weekOut ? 'text-rose-700' : 'text-slate-500'}`}>
-                    {weekOut ? 'Недоступен всю неделю. Отдельные дни и часы не отправятся.' : '«Я в ауте» означает: недоступен всю неделю.'}
+                    {weekOut && 'Недоступен всю неделю. Отдельные дни и часы не отправятся.'}
                   </p>
 
                   {isAdmin && expandedWeekInfoIndex === weekIndex && (
@@ -2999,9 +2999,9 @@ export default function MiniApp({
                       <div key={`${weekIndex}-${day.full}`} className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
                         <div className="mb-3 min-w-0">
                           <h2 className="whitespace-nowrap text-sm font-black leading-tight sm:text-base"><span className="sm:hidden">{day.short},</span><span className="hidden sm:inline">{day.full},</span> {formatDayMonth(date)}</h2>
-                          <p className={`text-xs font-semibold ${unavailable ? 'text-slate-700' : selected.length ? 'text-[#005BC4]' : 'text-slate-500'}`} role="status">
-                            {unavailable ? '✓ Не смогу' : selected.length ? `✓ Выбрано: ${formatHours(selected)}` : '○ Не заполнено'}
-                          </p>
+                          {(unavailable || !selected.length) && <p className={`text-xs font-semibold ${unavailable ? 'text-slate-700' : 'text-slate-500'}`} role="status">
+                            {unavailable ? 'Не смогу' : 'Не заполнено'}
+                          </p>}
                         </div>
                         <div className="mb-3 grid grid-cols-2 gap-2">
                           <button type="button" aria-pressed={selected.length === hours.length} onClick={() => selectWholeDay(absoluteDayIndex)} className={`${secondaryButtonClass} min-h-11 min-w-0 !rounded-2xl px-2.5`}>
@@ -3017,7 +3017,7 @@ export default function MiniApp({
                                 : 'border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100 active:bg-slate-100'
                             }`}
                           >
-                            {unavailable ? '✓ Не смогу' : 'Не смогу'}
+                            Не смогу
                           </button>
                         </div>
                         <div className="grid grid-cols-2 gap-2 min-[560px]:grid-cols-4">
@@ -3036,7 +3036,6 @@ export default function MiniApp({
                                     : 'border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100 active:bg-slate-100'
                                 }`}
                               >
-                                {active && <Check className="mr-1 inline h-4 w-4" aria-hidden="true" />}
                                 {formatHourRange(hour)}
                               </button>
                             );
@@ -3058,7 +3057,6 @@ export default function MiniApp({
                         aria-busy={savingWeekIndex === weekIndex}
                         className={`${primaryCompactButtonClass} min-h-11 w-full px-4 min-[480px]:w-auto disabled:opacity-70`}
                       >
-                        <Check className="h-5 w-5" />
                         <span aria-live="polite">{savingWeekIndex === weekIndex ? 'Сохраняю…' : 'Сохранить неделю'}</span>
                       </button>
                     </div>
@@ -3083,9 +3081,6 @@ export default function MiniApp({
                   <ArrowSquareOut className="h-4 w-4" /> Открыть ОСНОВА
                 </a>
               </div>
-              {calendarUsers.length > 3 && (
-                <ListDisclosure expanded={showFullCalendar} onToggle={() => setShowFullCalendar((value) => !value)} total={calendarUsers.length} className="mt-3" />
-              )}
               <div className="mt-4 overflow-x-auto rounded-2xl border border-slate-100">
                 <table className="w-full min-w-[560px] border-collapse text-left text-xs">
                   <thead className="bg-slate-50 text-slate-500">
@@ -3120,6 +3115,9 @@ export default function MiniApp({
                   </tbody>
                 </table>
               </div>
+              {calendarUsers.length > 3 && (
+                <ListDisclosure expanded={showFullCalendar} onToggle={() => setShowFullCalendar((value) => !value)} total={calendarUsers.length} className="mt-3" />
+              )}
             </div>
 
             <div className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
@@ -3344,18 +3342,18 @@ export default function MiniApp({
                   </select>
                 </Field>
               )}
-              <div className={`grid min-w-0 grid-cols-1 gap-3 min-[520px]:grid-cols-2 [&>*]:min-w-0 ${meetingKind !== 'setup' ? 'min-[820px]:grid-cols-3' : ''}`}>
+              <div className="grid min-w-0 grid-cols-1 gap-3 min-[520px]:grid-cols-2 min-[820px]:grid-cols-3 [&>*]:min-w-0">
                 <Field label="Дата">
                   <DatePickerField label="Дата встречи" value={meetingDate} onChange={setMeetingDate} placeholder="Выбери дату" />
                 </Field>
                 <Field label="Время">
-                  <input type="time" min={meetingKind === 'vibe' ? undefined : `${String(availabilityConfig.startHour).padStart(2, '0')}:00`} max={meetingKind === 'vibe' ? undefined : `${String(availabilityConfig.endHour).padStart(2, '0')}:00`} value={meetingTime} onChange={(e) => setMeetingTime(e.target.value)} className={inputClass} />
+                  <input type="time" value={meetingTime} onChange={(e) => setMeetingTime(e.target.value)} className={inputClass} />
                 </Field>
-                {meetingKind !== 'setup' && <Field label="Длительность">
+                <Field label="Длительность">
                   <select value={meetingDuration} onChange={(event) => setMeetingDuration(event.target.value)} className={selectClass}>
-                    <option value="0.5">30 минут</option><option value="1">1 час</option><option value="1.5">1,5 часа</option><option value="2">2 часа</option><option value="2.5">2,5 часа</option><option value="3">3 часа</option><option value="4">4 часа</option><option value="5">5 часов</option><option value="6">6 часов</option>
+                    <MeetingDurationOptions kind={meetingKind} value={meetingDuration} />
                   </select>
-                </Field>}
+                </Field>
               </div>
               {meetingKind !== 'setup' && <MeetingAudiencePicker value={meetingType} onChange={setMeetingAudience} />}
               {meetingKind !== 'setup' && meetingType === 'competency' && (
@@ -3370,6 +3368,12 @@ export default function MiniApp({
               )}
               {meetingKind !== 'setup' && (meetingType === 'custom' || meetingType === 'competency') && (
                 <div className="grid grid-cols-1 gap-2">
+                  {(showAllMeetingParticipants ? coreTeamUsers : coreTeamUsers.slice(0, 3)).map((user) => (
+                    <label key={user.id} className="flex items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm">
+                      <span>{user.realName}</span>
+                      <input type="checkbox" checked={participants.includes(user.id)} onChange={() => setParticipants((prev) => (prev.includes(user.id) ? prev.filter((id) => id !== user.id) : [...prev, user.id]))} />
+                    </label>
+                  ))}
                   {coreTeamUsers.length > 3 && (
                     <ListDisclosure
                       expanded={showAllMeetingParticipants}
@@ -3377,12 +3381,6 @@ export default function MiniApp({
                       total={coreTeamUsers.length}
                     />
                   )}
-                  {(showAllMeetingParticipants ? coreTeamUsers : coreTeamUsers.slice(0, 3)).map((user) => (
-                    <label key={user.id} className="flex items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm">
-                      <span>{user.realName}</span>
-                      <input type="checkbox" checked={participants.includes(user.id)} onChange={() => setParticipants((prev) => (prev.includes(user.id) ? prev.filter((id) => id !== user.id) : [...prev, user.id]))} />
-                    </label>
-                  ))}
                 </div>
               )}
               {meetingKind !== 'setup' && (
@@ -3419,14 +3417,6 @@ export default function MiniApp({
               <div className="flex min-w-0 flex-col items-stretch gap-3 px-1 min-[420px]:flex-row min-[420px]:items-center min-[420px]:justify-between">
                 <div className="min-w-0">
                   <h2 className="font-black">Ближайшие и текущие встречи</h2>
-                  {scheduledMeetings.length > 3 && (
-                    <ListDisclosure
-                      expanded={showAllMeetings}
-                      onToggle={() => setShowAllMeetings((value) => !value)}
-                      total={scheduledMeetings.length}
-                      className="mt-2"
-                    />
-                  )}
                 </div>
                 {!showMeetingForm && (
                   <button
@@ -3488,22 +3478,20 @@ export default function MiniApp({
                           dateTime={`${formatDateShort(meeting.date).split('.').reverse().map((part, index) => index === 0 && part.length === 2 ? `20${part}` : part).join('-')}T${meeting.time}`}
                           className="mt-1 block break-words text-sm font-bold tabular-nums text-slate-600"
                         >
-                          {weekdayShortByDate(meeting.date)}, {formatDateShort(meeting.date)} · {meeting.time} МСК · {durationLabel}
+                          {weekdayShortByDate(meeting.date)}, {formatDateShort(meeting.date)} · {meeting.time} · {durationLabel}
                         </time>
-                        <div className="mt-2 flex flex-wrap gap-2 text-xs font-black">
+                        <div className={`mega-meeting-badges mt-2 gap-2 text-xs font-black ${meeting.kind === 'setup' ? 'grid grid-cols-[auto_minmax(0,1fr)_auto] items-start' : 'flex flex-wrap'}`}>
                           <span className="rounded-full bg-blue-100 px-2.5 py-1 text-[#005BC4]">{meetingKindText(meeting.kind).label}</span>
-                          <span className="rounded-full bg-slate-100 px-2.5 py-1 text-slate-700">{audienceLabel}</span>
-                          {meeting.kind === 'setup' && <span className="max-w-full break-words rounded-full bg-slate-100 px-2.5 py-1 text-slate-700">{workEvent?.name || 'Мероприятие не найдено'}</span>}
+                          {meeting.kind === 'setup' && <span className="min-w-0 max-w-full justify-self-center break-words rounded-full bg-slate-100 px-2.5 py-1 text-center text-slate-700">{workEvent?.name || 'Мероприятие не найдено'}</span>}
+                          <span className={`${meeting.kind === 'setup' ? 'justify-self-end' : 'ml-auto'} max-w-full break-words rounded-full bg-slate-100 px-2.5 py-1 text-right text-slate-700`}>{audienceLabel}</span>
                         </div>
                       </div>
 
                       <div className="mt-3 border-t border-slate-100 pt-3">
-                        <p className="text-sm font-bold text-slate-700">Ваш ответ: {currentResponse === 'yes' ? 'приду' : currentResponse === 'no' ? 'не приду' : 'не выбран'}</p>
-                        <div className="mt-2 grid grid-cols-2 gap-2">
-                          <button type="button" disabled={rsvpMeetingId === meeting.id} onClick={() => void setMeetingAttendance(meeting, 'yes')} aria-pressed={currentResponse === 'yes'} className={`${miniButtonClass} min-w-0 disabled:opacity-60 ${currentResponse === 'yes' ? 'mega-rsvp-yes border-emerald-200 bg-emerald-100' : ''}`}>{currentResponse === 'yes' && <Check className="h-4 w-4" aria-hidden="true" />}Приду</button>
-                          <button type="button" disabled={rsvpMeetingId === meeting.id} onClick={() => void setMeetingAttendance(meeting, 'no')} aria-pressed={currentResponse === 'no'} className={`${miniButtonClass} min-w-0 disabled:opacity-60 ${currentResponse === 'no' ? 'mega-rsvp-no border-rose-200 bg-rose-100' : ''}`}>{currentResponse === 'no' && <Check className="h-4 w-4" aria-hidden="true" />}Не приду</button>
+                        <div className="grid grid-cols-2 gap-2">
+                          <button type="button" disabled={rsvpMeetingId === meeting.id} onClick={() => void setMeetingAttendance(meeting, 'yes')} aria-pressed={currentResponse === 'yes'} className={`${miniButtonClass} min-w-0 disabled:opacity-60 ${currentResponse === 'yes' ? 'mega-rsvp-yes border-emerald-200 bg-emerald-100' : ''}`}>Приду</button>
+                          <button type="button" disabled={rsvpMeetingId === meeting.id} onClick={() => void setMeetingAttendance(meeting, 'no')} aria-pressed={currentResponse === 'no'} className={`${miniButtonClass} min-w-0 disabled:opacity-60 ${currentResponse === 'no' ? 'mega-rsvp-no border-rose-200 bg-rose-100' : ''}`}>Не приду</button>
                         </div>
-                        {currentResponse !== 'unanswered' && <button type="button" disabled={rsvpMeetingId === meeting.id} onClick={() => void setMeetingAttendance(meeting, 'unanswered')} className="mt-2 text-xs font-bold text-slate-500 underline decoration-slate-300 underline-offset-4 disabled:opacity-60">Сбросить ответ</button>}
                       </div>
 
                       <button
@@ -3560,6 +3548,14 @@ export default function MiniApp({
                     </div>
                   );
                 })
+              )}
+              {scheduledMeetings.length > 3 && (
+                <ListDisclosure
+                  expanded={showAllMeetings}
+                  onToggle={() => setShowAllMeetings((value) => !value)}
+                  total={scheduledMeetings.length}
+                  className="mt-2"
+                />
               )}
               {meetingHistory.length > 0 && (
                 <div className="pt-2">
@@ -3677,7 +3673,7 @@ export default function MiniApp({
                               const selected = taskCompetencies.includes(name);
                               return (
                                 <button key={name} type="button" aria-pressed={selected} onClick={() => toggleTaskCompetency(name)} className={`min-h-11 rounded-xl border px-3 py-2 text-left text-sm font-black ${pressClass} ${selected ? 'border-[#0069E0] bg-[#0069E0] text-white' : 'border-slate-200 bg-white text-slate-700'}`}>
-                                  {selected ? '✓ ' : ''}{name}
+                                  {name}
                                 </button>
                               );
                             })}
@@ -3697,13 +3693,13 @@ export default function MiniApp({
                             <UsersThree className="h-4 w-4" /> {taskAssignedTo.length === coreTeamUsers.length ? 'Снять всех' : 'Выбрать всех'}
                           </button>
                         </div>
-                        {!normalizedTaskAssigneeSearch && coreTeamUsers.length > 3 && <ListDisclosure expanded={showAllTaskAssignees} onToggle={() => setShowAllTaskAssignees((value) => !value)} total={coreTeamUsers.length} />}
                         {visibleTaskAssignees.map((user) => (
                           <label key={user.id} className="flex min-h-11 items-center justify-between rounded-xl bg-white px-3 py-2 text-sm font-semibold">
                             <span className="min-w-0 truncate">{user.realName}{user.id === currentUser.id ? ' · это вы' : ''}</span>
                             <input type="checkbox" checked={taskAssignedTo.includes(user.id)} onChange={() => setTaskAssignedTo((prev) => prev.includes(user.id) ? prev.filter((id) => id !== user.id) : [...prev, user.id])} />
                           </label>
                         ))}
+                        {!normalizedTaskAssigneeSearch && coreTeamUsers.length > 3 && <ListDisclosure expanded={showAllTaskAssignees} onToggle={() => setShowAllTaskAssignees((value) => !value)} total={coreTeamUsers.length} />}
                         {normalizedTaskAssigneeSearch && visibleTaskAssignees.length === 0 && <p className="px-2 py-3 text-center text-sm font-bold text-slate-500">Никого не нашли</p>}
                       </div>
                     )}
@@ -3786,17 +3782,27 @@ export default function MiniApp({
         {(activeTab === 'team' || (isAdminPanel && adminSection === 'team')) && (
           <section className="space-y-4">
             {teamError && <div role="alert" className="rounded-2xl border border-rose-200 bg-rose-50 p-3 text-sm font-bold text-rose-800">{teamError}</div>}
+            {isAdmin && <div className="grid grid-cols-2 items-start gap-2" aria-label="Состояние приложения">
             {isAdmin && (
-              <div className="overflow-hidden rounded-3xl border border-blue-100 bg-white shadow-sm">
-                <button type="button" onClick={toggleDiagnostics} className={`${secondaryButtonClass} min-h-12 w-full justify-between rounded-none border-0 px-4`} aria-expanded={diagnosticsOpen} aria-controls="service-diagnostics">
+              <div className="contents">
+                <button type="button" onClick={toggleDiagnostics} className={`${secondaryButtonClass} min-h-12 w-full justify-between px-3 text-xs`} aria-label="Состояние сервиса" aria-expanded={diagnosticsOpen} aria-controls="service-diagnostics">
                   <span className="flex min-w-0 items-center gap-2 text-left">
                     <Shield className="h-4 w-4 shrink-0" />
-                    <span className="min-w-0 break-words">Состояние сервиса{diagnostics ? ` · ${diagnostics.status === 'healthy' ? 'в норме' : diagnostics.status === 'degraded' ? 'есть предупреждения' : 'недоступен'}` : ''}</span>
+                    <span className="min-w-0 break-words">Сервис</span>
                   </span>
                   {diagnosticsOpen ? <CaretUp className="h-4 w-4 shrink-0" /> : <CaretDown className="h-4 w-4 shrink-0" />}
                 </button>
+                {state.settings?.notificationDeliverySummary && (
+                <button type="button" onClick={toggleDeliveryJournal} className={`${secondaryButtonClass} min-h-12 w-full justify-between px-3 text-xs`} aria-label="Доставка сообщений" aria-expanded={deliveryJournalOpen} aria-controls="delivery-journal">
+                  <span className="flex min-w-0 items-center gap-2 text-left">
+                    <Bell className="h-4 w-4 shrink-0" />
+                    <span className="min-w-0 break-words">Доставки · {state.settings.notificationDeliverySummary.pending}/{state.settings.notificationDeliverySummary.attention}</span>
+                  </span>
+                  {deliveryJournalOpen ? <CaretUp className="h-4 w-4 shrink-0" /> : <CaretDown className="h-4 w-4 shrink-0" />}
+                </button>
+                )}
                 {diagnosticsOpen && (
-                  <div id="service-diagnostics" className="border-t border-blue-100 px-4 py-4">
+                  <div id="service-diagnostics" className="order-last col-span-2 rounded-3xl border border-blue-100 bg-white px-4 py-4">
                     {diagnosticsError && <InlineNotice variant="error">{diagnosticsError}</InlineNotice>}
                     {diagnosticsBusy && !diagnostics && <p className="text-sm font-bold text-slate-500" role="status">Проверяю хранилище и очереди…</p>}
                     {diagnostics && (
@@ -3855,16 +3861,10 @@ export default function MiniApp({
               </div>
             )}
             {isAdmin && state.settings?.notificationDeliverySummary && (
-              <div className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
-                <button type="button" onClick={toggleDeliveryJournal} className={`${secondaryButtonClass} w-full justify-between`} aria-expanded={deliveryJournalOpen} aria-controls="delivery-journal">
-                  <span className="flex min-w-0 items-center gap-2 text-left">
-                    <Bell className="h-4 w-4 shrink-0" />
-                    Доставка сообщений · ожидают {state.settings.notificationDeliverySummary.pending} · требуют решения {state.settings.notificationDeliverySummary.attention}
-                  </span>
-                  {deliveryJournalOpen ? <CaretUp className="h-4 w-4 shrink-0" /> : <CaretDown className="h-4 w-4 shrink-0" />}
-                </button>
+              <div className="contents">
                 {deliveryJournalOpen && (
-                  <div id="delivery-journal" className="mt-3 space-y-2">
+                  <div id="delivery-journal" className="order-last col-span-2 space-y-2 rounded-3xl border border-blue-100 bg-white p-4">
+                    <p className="text-sm font-bold">Ожидают {state.settings.notificationDeliverySummary.pending} · требуют решения {state.settings.notificationDeliverySummary.attention}</p>
                     {state.settings.notificationDeliverySummary.overloaded && <InlineNotice variant="error">Очередь перегружена: новые уведомления сохраняются, но доставка отстаёт. Проверь ошибки и состояние Telegram.</InlineNotice>}
                     {deliveryJournalError && <InlineNotice variant="error">{deliveryJournalError}</InlineNotice>}
                     {deliveryJournalBusy && !deliveryIssues.length && <p className="text-sm font-bold text-slate-500">Загружаю журнал…</p>}
@@ -3894,6 +3894,7 @@ export default function MiniApp({
                 )}
               </div>
             )}
+            </div>}
             <div className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
                 <button type="button" onClick={() => setBroadcastOpen((value) => !value)} className={`${secondaryButtonClass} w-full justify-between`} aria-expanded={broadcastOpen} aria-controls="broadcast-form">
                   <span className="flex items-center gap-2"><PaperPlaneTilt className="h-4 w-4" /> Создать рассылку</span>
@@ -3913,7 +3914,7 @@ export default function MiniApp({
                       </div>
                     </Field>
 
-                    {durableBroadcasts && <Button type="button" variant={broadcastMode === 'groups' ? 'primary' : 'secondary'} aria-pressed={broadcastMode === 'groups'} onClick={() => setBroadcastRecipientMode('groups')}>{broadcastMode === 'groups' && <span aria-hidden="true">✓ </span>}Группы и топики</Button>}
+                    {durableBroadcasts && <Button type="button" variant={broadcastMode === 'groups' ? 'primary' : 'secondary'} aria-pressed={broadcastMode === 'groups'} onClick={() => setBroadcastRecipientMode('groups')}>Группы и топики</Button>}
                     {broadcastMode === 'groups' && durableBroadcasts && <BroadcastGroupPicker userId={currentUser.id} selected={broadcastGroupIds} onChange={setBroadcastGroupIds} onOptions={setBroadcastGroupOptions} onLoading={setBroadcastGroupsLoading} />}
                     {broadcastMode === 'missing_slots' && (
                       <div className="space-y-2 rounded-2xl border border-amber-200 bg-amber-50 p-2">
@@ -3956,7 +3957,7 @@ export default function MiniApp({
                           <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
                             {competencies.map((name) => {
                               const selected = broadcastBlocks.includes(name);
-                              return <button key={name} type="button" aria-pressed={selected} onClick={() => toggleBroadcastBlock(name)} className={`min-h-11 rounded-xl border px-3 py-2 text-left text-sm font-black ${pressClass} ${selected ? 'border-[#0069E0] bg-[#0069E0] text-white' : 'border-slate-200 bg-white text-slate-700'}`}>{selected ? '✓ ' : ''}{name}</button>;
+                              return <button key={name} type="button" aria-pressed={selected} onClick={() => toggleBroadcastBlock(name)} className={`min-h-11 rounded-xl border px-3 py-2 text-left text-sm font-black ${pressClass} ${selected ? 'border-[#0069E0] bg-[#0069E0] text-white' : 'border-slate-200 bg-white text-slate-700'}`}>{name}</button>;
                             })}
                             {!competencies.length && <p className="px-2 py-3 text-sm font-bold text-slate-500">Сначала добавь блоки команды.</p>}
                           </div>
@@ -4094,14 +4095,6 @@ export default function MiniApp({
                     Добавить
                   </button>
                 </div>
-                {competencies.length > 3 && (
-                  <ListDisclosure
-                    expanded={showAllCompetencies}
-                    onToggle={() => setShowAllCompetencies((value) => !value)}
-                    total={competencies.length}
-                    className="mt-3"
-                  />
-                )}
                 <div className="mt-3 flex flex-wrap gap-2">
                   {competencies.length === 0 ? (
                     <span className="text-sm font-bold text-slate-400">Пока нет блоков</span>
@@ -4114,6 +4107,14 @@ export default function MiniApp({
                     ))
                   )}
                 </div>
+                {competencies.length > 3 && (
+                  <ListDisclosure
+                    expanded={showAllCompetencies}
+                    onToggle={() => setShowAllCompetencies((value) => !value)}
+                    total={competencies.length}
+                    className="mt-3"
+                  />
+                )}
               </div>
             )}
 
@@ -4136,13 +4137,6 @@ export default function MiniApp({
                     )}
                   </div>
                 </Field>
-                {!normalizedTeamSearch && filteredTeamUsers.length > 3 && (
-                  <ListDisclosure
-                    expanded={showAllTeamUsers}
-                    onToggle={() => setShowAllTeamUsers((value) => !value)}
-                    total={filteredTeamUsers.length}
-                  />
-                )}
               </div>
               {state.users.length === 0 ? (
                 <EmptyState text="Пока в команде никого нет" />
@@ -4167,9 +4161,7 @@ export default function MiniApp({
                         </div>
                         <div className="flex flex-wrap gap-2 min-[440px]:max-w-[48%] min-[440px]:justify-end">
                           <div className="max-w-full break-words rounded-full bg-blue-50 px-3 py-1 text-xs font-black text-[#0069E0]">{user.primaryCompetency || 'Блок не выбран'}</div>
-                          <div className={`max-w-full break-words rounded-full px-2.5 py-1 text-xs font-black ${user.registered ? 'bg-emerald-50 text-emerald-800' : 'bg-slate-100 text-[#4D647A]'}`}>
-                            {user.registered ? 'Telegram подключён' : 'Не подключён'}
-                          </div>
+                          {!user.registered && <div className="max-w-full break-words rounded-full bg-slate-100 px-2.5 py-1 text-xs font-black text-[#4D647A]">Не подключён</div>}
                         </div>
                       </div>
 
@@ -4260,6 +4252,13 @@ export default function MiniApp({
                   );
                 })
               )}
+              {!normalizedTeamSearch && filteredTeamUsers.length > 3 && (
+                <ListDisclosure
+                  expanded={showAllTeamUsers}
+                  onToggle={() => setShowAllTeamUsers((value) => !value)}
+                  total={filteredTeamUsers.length}
+                />
+              )}
             </div>
           </section>
         )}
@@ -4284,14 +4283,6 @@ export default function MiniApp({
                       <Plus className="h-4 w-4" />
                     </button>
                   </div>
-                  {facultyCompetencies.length > 3 && (
-                    <ListDisclosure
-                      expanded={showAllFacultyCompetencies}
-                      onToggle={() => setShowAllFacultyCompetencies((value) => !value)}
-                      total={facultyCompetencies.length}
-                      className="mt-3"
-                    />
-                  )}
                   <div className="mt-3 flex flex-wrap gap-2">
                     {facultyCompetencies.length === 0 ? (
                       <span className="text-sm font-bold text-slate-400">Пока нет компетенций</span>
@@ -4304,6 +4295,14 @@ export default function MiniApp({
                       </span>
                     ))}
                   </div>
+                  {facultyCompetencies.length > 3 && (
+                    <ListDisclosure
+                      expanded={showAllFacultyCompetencies}
+                      onToggle={() => setShowAllFacultyCompetencies((value) => !value)}
+                      total={facultyCompetencies.length}
+                      className="mt-3"
+                    />
+                  )}
                 </div>
 
                 <div className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
@@ -4462,13 +4461,6 @@ export default function MiniApp({
                         <option value="Ответственные">Ответственные</option>
                         {facultyCompetencies.map((name) => <option key={name} value={name}>{name}</option>)}
                       </select>
-                      {facultyTaskUsers.length > 3 && (
-                        <ListDisclosure
-                          expanded={showAllFacultyTaskUsers}
-                          onToggle={() => setShowAllFacultyTaskUsers((value) => !value)}
-                          total={facultyTaskUsers.length}
-                        />
-                      )}
                       {visibleFacultyTaskUsers.map((user) => (
                         <label key={user.id} className={`flex items-center justify-between rounded-xl px-3 py-2 text-sm font-semibold ${facultyTaskDraft.competency && facultyTaskMatchedUsers.some((item) => item.id === user.id) ? 'bg-blue-50 text-[#0069E0]' : 'bg-white'} ${facultyTaskErrors.assignedTo ? 'ring-2 ring-rose-200' : ''}`}>
                           <span>
@@ -4478,6 +4470,13 @@ export default function MiniApp({
                           <input type="checkbox" checked={facultyTaskDraft.assignedTo.includes(user.id)} onChange={() => { setFacultyTaskErrors((prev) => ({ ...prev, assignedTo: false })); setFacultyTaskDraft((prev) => ({ ...prev, assignedTo: prev.assignedTo.includes(user.id) ? prev.assignedTo.filter((id) => id !== user.id) : [...prev.assignedTo, user.id] })); }} />
                         </label>
                       ))}
+                      {facultyTaskUsers.length > 3 && (
+                        <ListDisclosure
+                          expanded={showAllFacultyTaskUsers}
+                          onToggle={() => setShowAllFacultyTaskUsers((value) => !value)}
+                          total={facultyTaskUsers.length}
+                        />
+                      )}
                       {facultyTaskErrors.assignedTo && <RequiredHint text="Выбери хотя бы одного исполнителя" />}
                     </div>
                   </Field>
@@ -4557,13 +4556,6 @@ export default function MiniApp({
                 <div className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
                   <div className="flex items-center justify-between gap-3">
                     <h2 className="font-black">Задачи факультетов</h2>
-                    {facultyTasks.length > 3 && (
-                      <ListDisclosure
-                        expanded={showAllFacultyTasks}
-                        onToggle={() => setShowAllFacultyTasks((value) => !value)}
-                        total={facultyTasks.length}
-                      />
-                    )}
                   </div>
                   <div className="mt-3 space-y-3">
                     {facultyTasks.length === 0 ? (
@@ -4618,19 +4610,19 @@ export default function MiniApp({
                       })
                     )}
                   </div>
+                  {facultyTasks.length > 3 && (
+                    <ListDisclosure
+                      expanded={showAllFacultyTasks}
+                      onToggle={() => setShowAllFacultyTasks((value) => !value)}
+                      total={facultyTasks.length}
+                    />
+                  )}
                 </div>
 
                 <div className="rounded-3xl border border-blue-100 bg-white p-4 shadow-sm">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <h2 className="font-black">Журнал задач факультетов</h2>
                     <div className="flex flex-wrap gap-2">
-                      {facultyTasks.length > 3 && (
-                        <ListDisclosure
-                          expanded={showAllFacultyBacklog}
-                          onToggle={() => setShowAllFacultyBacklog((value) => !value)}
-                          total={facultyTasks.length}
-                        />
-                      )}
                       <a href="/api/integrations/google-sheets/task-log" target="_blank" rel="noreferrer" className={miniButtonClass}>
                         <ArrowSquareOut className="h-4 w-4" />
                         Таблица лога
@@ -4662,6 +4654,13 @@ export default function MiniApp({
                       </div>
                     ))}
                   </div>
+                  {facultyTasks.length > 3 && (
+                    <ListDisclosure
+                      expanded={showAllFacultyBacklog}
+                      onToggle={() => setShowAllFacultyBacklog((value) => !value)}
+                      total={facultyTasks.length}
+                    />
+                  )}
                 </div>
               </>
             )}
@@ -4750,10 +4749,10 @@ export default function MiniApp({
       <nav className="mega-bottom-nav fixed inset-x-0 bottom-0 z-40 border border-blue-100 bg-white/95 p-1.5 shadow-[0_-12px_30px_rgba(0,105,224,0.08)] backdrop-blur">
         <div className="mega-bottom-nav-inner mx-auto grid max-w-3xl grid-cols-5 gap-1">
           <NavButton icon={<CalendarDots />} label="Слоты" active={activeTab === 'slots'} onClick={() => navigateToTab('slots')} />
-          <NavButton icon={<UsersThree />} label="Встречи" active={activeTab === 'meetings'} onClick={() => navigateToTab('meetings')} />
           <NavButton icon={<Briefcase />} label="Задачи" active={activeTab === 'tasks'} onClick={() => navigateToTab('tasks')} />
-          <NavButton icon={<Shield />} label="Команда" active={activeTab === 'team'} onClick={() => navigateToTab('team')} />
+          <NavButton icon={<UsersThree />} label="Встречи" active={activeTab === 'meetings'} onClick={() => navigateToTab('meetings')} />
           <NavButton icon={<GraduationCap />} label="МФ" active={activeTab === 'faculties'} onClick={() => navigateToTab('faculties')} />
+          <NavButton icon={<Shield />} label="Команда" active={activeTab === 'team'} onClick={() => navigateToTab('team')} />
         </div>
       </nav>
     </div>
@@ -5082,9 +5081,6 @@ function TaskList({
     <div className="space-y-3">
       <div className="flex items-center justify-between gap-3 px-1">
         <h2 className="font-black">{title}</h2>
-        {tasks.length > 3 && (
-          <ListDisclosure expanded={showAll} onToggle={() => setShowAll((value) => !value)} total={tasks.length} />
-        )}
       </div>
       {tasks.length === 0 ? (
         <EmptyState text="По выбранным фильтрам задач нет." />
@@ -5251,6 +5247,9 @@ function TaskList({
         );
         })
       )}
+      {tasks.length > 3 && (
+        <ListDisclosure expanded={showAll} onToggle={() => setShowAll((value) => !value)} total={tasks.length} />
+      )}
     </div>
   );
 }
@@ -5270,17 +5269,6 @@ function TaskLogView({ tasksByCompetency, users, events, currentUser, onEditComp
               <span className="rounded-full bg-white px-2.5 py-1 text-xs font-black text-[#0069E0]">
                 {tasksByCompetency[blockName].length}
               </span>
-              {tasksByCompetency[blockName].length > 3 && (
-                <ListDisclosure
-                  expanded={expandedBlocks.includes(blockName)}
-                  onToggle={() => setExpandedBlocks((current) => (
-                    current.includes(blockName)
-                      ? current.filter((item) => item !== blockName)
-                      : [...current, blockName]
-                  ))}
-                  total={tasksByCompetency[blockName].length}
-                />
-              )}
             </div>
           </div>
           <div className="space-y-2">
@@ -5328,6 +5316,17 @@ function TaskLogView({ tasksByCompetency, users, events, currentUser, onEditComp
                 );
               })}
           </div>
+          {tasksByCompetency[blockName].length > 3 && (
+            <ListDisclosure
+              expanded={expandedBlocks.includes(blockName)}
+              onToggle={() => setExpandedBlocks((current) => (
+                current.includes(blockName)
+                  ? current.filter((item) => item !== blockName)
+                  : [...current, blockName]
+              ))}
+              total={tasksByCompetency[blockName].length}
+            />
+          )}
         </div>
       ))}
     </div>
@@ -5394,6 +5393,14 @@ function AvailabilityPersonLink({ user }: { user: Pick<User, 'id' | 'realName' |
   );
 }
 
+function MeetingDurationOptions({kind, value}: {kind: MeetingKind; value: string}) {
+  const hours = kind === 'setup' ? Array.from({length: 12}, (_, index) => index + 1) : [0.5, 1, 1.5, 2, 2.5, 3, 4, 5, 6];
+  return <>
+    {meetingDurationError(kind, Number(value)) && <option value={value} disabled>{value.replace('.', ',')} ч — выбери длительность</option>}
+    {hours.map(hour => <option key={hour} value={hour}>{taskDurationText(hour * 60)}</option>)}
+  </>;
+}
+
 function ListDisclosure({
   expanded,
   onToggle,
@@ -5408,12 +5415,17 @@ function ListDisclosure({
   return (
     <button
       type="button"
-      onClick={onToggle}
+      onClick={() => {
+        const top = window.scrollY;
+        onToggle();
+        // The focused disclosure moves below new rows; don't follow it down.
+        if (!expanded) requestAnimationFrame(() => window.scrollTo({top, behavior: 'instant'}));
+      }}
       aria-expanded={expanded}
-      className={`${secondaryButtonClass} shrink-0 ${className}`}
+      className={`${secondaryButtonClass} mega-list-disclosure w-full shrink-0 ${className}`}
     >
       {expanded ? <Minus className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
-      {expanded ? 'Свернуть' : `Ещё ${Math.max(0, total - 3)}`}
+      {expanded ? 'Свернуть' : `Развернуть ${Math.max(0, total - 3)}`}
     </button>
   );
 }
@@ -5441,22 +5453,11 @@ function MeetingAttendanceList({
           <p id={listId} className="min-w-0 flex-1 break-words text-sm font-bold leading-6 text-slate-700">
             {visibleUsers.map((user) => user.realName).join(', ')}
           </p>
-          {users.length > 3 && (
-            <button
-              type="button"
-              onClick={onToggle}
-              aria-expanded={expanded}
-              aria-controls={listId}
-              className={`${miniButtonClass} shrink-0`}
-            >
-              {expanded ? <CaretUp className="h-4 w-4" /> : <CaretDown className="h-4 w-4" />}
-              {expanded ? 'Скрыть' : 'Раскрыть'}
-            </button>
-          )}
         </div>
       ) : (
         <p id={listId} className="mt-3 rounded-xl bg-white px-3 py-3 text-sm font-bold text-slate-600">Пока никто не подтвердил участие.</p>
       )}
+      {users.length > 3 && <ListDisclosure expanded={expanded} onToggle={onToggle} total={users.length} className="mt-2" />}
     </section>
   );
 }

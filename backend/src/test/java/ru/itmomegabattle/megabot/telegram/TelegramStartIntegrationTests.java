@@ -62,7 +62,7 @@ class TelegramStartIntegrationTests {
 		assertThat(count("chat_bindings")).isEqualTo(2);assertThat(count("outbox_events")).isEqualTo(2);
 	}
 	@Test void unsupportedCommandsAndCallbacksStayRetryableRatherThanBeingDiscarded() {
-		inbox.accept("123",message(1,42,"alice","/tasks"));assertThat(worker.processOne("123")).isTrue();
+		inbox.accept("123",message(1,42,"alice","/not_implemented"));assertThat(worker.processOne("123")).isTrue();
 		assertThat(jdbc.queryForObject("select status from telegram_inbox",String.class)).isEqualTo("retry");
 		assertThat(jdbc.queryForObject("select last_error from telegram_inbox",String.class)).isEqualTo("unsupported_command");
 		assertThat(count("outbox_events")).isZero();assertThat(worker.processOne("123")).isFalse();

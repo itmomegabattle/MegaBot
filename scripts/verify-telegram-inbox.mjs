@@ -6,6 +6,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { readFileSync } from 'node:fs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'megabot-telegram-inbox-'));
@@ -38,7 +39,8 @@ async function waitFor(predicate, description, attempts = 100) {
 }
 
 async function readDatabase() {
-  return JSON.parse(await readFile(databasePath, 'utf8'));
+  // Close the Windows file handle before yielding back to polling/writes.
+  return JSON.parse(readFileSync(databasePath, 'utf8'));
 }
 
 const appPort = await freePort();
@@ -87,6 +89,7 @@ function startApp({ failUpdateOnce = false, pollIntervalMs = 250 } = {}) {
       ALLOW_LOCAL_PREVIEW: 'false',
       PORT: String(appPort),
       DB_FILE: databasePath,
+      DATABASE_RECOVERY_DIR: `${databasePath}.recovery`,
       TELEGRAM_BOT_TOKEN: 'inbox-test-token',
       TELEGRAM_API_BASE: `http://127.0.0.1:${telegramPort}`,
       TELEGRAM_UPDATE_MODE: 'webhook',
@@ -116,7 +119,7 @@ async function waitForServer() {
 }
 
 async function stopApp() {
-  if (!appProcess || appProcess.exitCode !== null) return;
+  if (!appProcess || appProcess.exitCode !== null || appProcess.signalCode !== null) return;
   const closed = new Promise((resolve) => appProcess.once('close', resolve));
   appProcess.kill('SIGTERM');
   await closed;
@@ -195,6 +198,9 @@ try {
   assert.ok(telegramCalls.some((call) => call.path.endsWith('/sendMessage') && String(call.body.chat_id) === '100'));
   assert.ok(telegramCalls.some((call) => call.path.endsWith('/sendMessage') && String(call.body.chat_id) === '-8001'));
   assert.match(serverErrors, /Telegram inbox update 8001 failed|^$/);
+  await stopApp();
+  const stoppedState = JSON.parse(await readFile(databasePath, 'utf8'));
+  assert.equal(stoppedState.settings.telegramInbox.find(item => item.updateId === 8001).status, 'completed');
 
   console.log('Telegram inbox integration verification passed: durable receipt, cross-chat progress, restart retry, and duplicate suppression.');
 } finally {

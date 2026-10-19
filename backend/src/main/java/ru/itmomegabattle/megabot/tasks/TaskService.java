@@ -20,6 +20,13 @@ import tools.jackson.databind.ObjectMapper;
 
 @Service
 public class TaskService {
+    /** Shared read visibility, including removal/membership/assignment; bind only trusted actor values. */
+    static final String VISIBLE_SQL="""
+            t.removed_at is null and (:core or
+              ((t.faculty_all or t.faculty_id=(select faculty_id from faculty_memberships where user_id=:actor))
+               and exists(select 1 from faculty_memberships where user_id=:actor)
+               and exists(select 1 from task_assignees a where a.task_id=t.id and a.user_id=:actor)))
+            """;
 	private final JdbcClient jdbc;
 	private final Clock clock;
 	private final AuditWriter audit;
@@ -34,26 +41,14 @@ public class TaskService {
 	@Transactional(readOnly=true, isolation=Isolation.REPEATABLE_READ)
 	public List<Map<String, Object>> list(AuthenticatedUser actor, int limit, String cursor) {
 		if (limit < 1 || limit > 100) throw TaskRules.bad("invalid_limit", "Лимит должен быть 1–100");
-		return jdbc.sql("""
-				select t.* from tasks t where t.removed_at is null and t.id > :cursor
-				and (:core or ((t.faculty_all or t.faculty_id = (select faculty_id from faculty_memberships where user_id=:actor))
-				and exists (select 1 from faculty_memberships where user_id=:actor)
-				and exists (select 1 from task_assignees a where a.task_id=t.id and a.user_id=:actor)))
-				order by t.id limit :limit
-				""").param("cursor", cursor == null ? "" : cursor).param("core", core(actor)).param("actor",actor.id()).param("limit",limit)
+        return jdbc.sql("select t.* from tasks t where "+VISIBLE_SQL+" and t.id>:cursor order by t.id limit :limit").param("cursor", cursor == null ? "" : cursor).param("core", core(actor)).param("actor",actor.id()).param("limit",limit)
 				.query((row,index)->row(row)).list().stream().map(t->view(t,actor)).toList();
 	}
 	@Transactional(readOnly=true, isolation=Isolation.REPEATABLE_READ)
 	public Map<String,Object> get(String id, AuthenticatedUser actor) { var task=require(id,false); access(task,actor); return view(task,actor); }
 	@Transactional(readOnly=true, isolation=Isolation.REPEATABLE_READ)
 	public List<Map<String,Object>> frontendTasks(AuthenticatedUser actor) {
-		return jdbc.sql("""
-				select t.* from tasks t where t.removed_at is null and (:core or
-				((t.faculty_all or t.faculty_id=(select faculty_id from faculty_memberships where user_id=:actor))
-				and exists (select 1 from faculty_memberships where user_id=:actor)
-				and exists(select 1 from task_assignees a where a.task_id=t.id and a.user_id=:actor)))
-				order by t.created_at,t.id
-				""").param("core",core(actor)).param("actor",actor.id()).query((row,index)->row(row)).list().stream()
+        return jdbc.sql("select t.* from tasks t where "+VISIBLE_SQL+" order by t.created_at,t.id").param("core",core(actor)).param("actor",actor.id()).query((row,index)->row(row)).list().stream()
 				.map(task->TaskFrontendMapper.map(view(task,actor),jdbc.sql("""
 						select c.name from competencies c join task_competencies tc on tc.competency_id=c.id
 						where tc.task_id=:id order by c.name,c.id
@@ -163,6 +158,16 @@ public class TaskService {
 		changed(updated,task.status(),action,actor,List.copyOf(targets)); return view(updated,actor);
 	}
 
+    /** Faculty dialog confirmation: a stale/closed offer must never reopen a task or silently succeed. */
+    @Transactional(propagation=org.springframework.transaction.annotation.Propagation.MANDATORY)
+    public Map<String,Object> facultyStatus(String id,long expectedVersion,String next,AuthenticatedUser actor) {
+        if(!List.of("faculty_responsible","faculty_helper").contains(actor.role())) throw forbidden();
+        if(next==null || !List.of("waiting","in_progress","completed").contains(next))
+            throw TaskRules.bad("invalid_task_status","Выберите статус задачи кнопкой");
+        TaskMaintenanceGate.shared(jdbc);
+        var task=require(id,true); access(task,actor); editable(task); version(task,expectedVersion);
+        return status(id,new TaskController.Status(next,expectedVersion,null,null),actor);
+    }
 	@Transactional
 	Map<String,Object> status(String id,TaskController.Status request,AuthenticatedUser actor) {
 		TaskMaintenanceGate.shared(jdbc);

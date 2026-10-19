@@ -31,8 +31,18 @@ assert.equal(completed.completionComments?.member, 'Готово');
 const settings = { availabilityActiveDays: [0], availabilityStartHour: 18, availabilityEndHour: 21 };
 const now = new Date('2029-01-01T00:00:00.000Z');
 assert.equal(meetingScheduleError('07.01.30', '18:00', 1, settings, 'meeting', now), '');
-assert.match(meetingScheduleError('08.01.30', '18:00', 1, settings, 'meeting', now), /отключены/);
-assert.match(meetingScheduleError('07.01.30', '22:30', 1, settings, 'meeting', now), /диапазон/);
+for (const kind of ['meeting', 'setup', 'vibe'] as const) {
+  for (const date of ['07.01.30', '08.01.30', '09.01.30', '10.01.30', '11.01.30', '12.01.30', '13.01.30']) {
+    for (const time of ['00:00', '03:15', '22:30', '23:59']) {
+      assert.equal(meetingScheduleError(date, time, 1, settings, kind, now), '');
+    }
+  }
+  assert.match(meetingScheduleError('01.01.28', '18:00', 1, settings, kind, now), /прошлом/);
+  assert.match(meetingScheduleError('31.02.30', '18:00', 1, settings, kind, now), /дату/);
+  for (const time of ['24:00', '23:60', 'invalid']) {
+    assert.match(meetingScheduleError('08.01.30', time, 1, settings, kind, now), /время/);
+  }
+}
 assert.match(meetingScheduleError('01.01.28', '18:00', 1, settings, 'meeting', now), /прошлом/);
 assert.equal(meetingScheduleError('08.01.30', '03:15', 1, settings, 'vibe', now), '');
 

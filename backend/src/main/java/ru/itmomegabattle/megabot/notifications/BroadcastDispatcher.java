@@ -105,13 +105,20 @@ public final class BroadcastDispatcher implements SmartLifecycle {
 		if(birthdays!=null)birthdays.materialize();
 		if(replies!=null)replies.materialize(20,bot);
 		var leases=reminders==null && manual==null && meetings==null && availability==null && birthdays==null && replies==null?queue.claimBroadcasts(1,Duration.ofSeconds(30),bot):queue.claimSupported(1,Duration.ofSeconds(30),bot);if(leases.isEmpty())return false;
-		var lease=leases.getFirst();TelegramTransport.Message message;
+		var lease=leases.getFirst();TelegramTransport.Message message=null;TelegramTransport.Edit edit=null;TelegramTransport.Acknowledgement ack=null;TelegramTransport.Deletion deletion=null;boolean meetingMarkup=false;
 		try {
 			var root=json.readTree(lease.payload());var text=root.path("text");
-			if(!text.isString())throw new IllegalArgumentException("invalid_broadcast_payload");
-			if(root.has("replyMarkup")!=(lease.commandReplyOutboxId()!=null))throw new IllegalArgumentException("invalid_keyboard_source");
-			message=new TelegramTransport.Message(lease.chatId(),lease.threadId(),text.asText(),lease.silent(),
-					root.has("replyMarkup")?TelegramTransport.ReplyKeyboard.parse(root.path("replyMarkup")):null);
+			var operation=TelegramTransport.operation(root);
+			if(!operation.equals("delete") && !text.isString())throw new IllegalArgumentException("invalid_broadcast_payload");
+			if(!operation.equals("send") && (lease.threadId()!=null || lease.silent() || !operation.equals("delete") && lease.commandReplyOutboxId()==null))throw new IllegalArgumentException("invalid_operation_source");
+			if(operation.equals("delete"))deletion=TelegramTransport.deletionFrom(lease.chatId(),root);
+			else if(operation.equals("ack"))ack=TelegramTransport.ackFrom(lease.chatId(),root);
+			else {
+				meetingMarkup=root.has("replyMarkup") && lease.commandReplyOutboxId()==null && queue.meetingMarkupAllowed(lease.id(),lease.token(),bot);
+				if(root.has("replyMarkup")!=(lease.commandReplyOutboxId()!=null || meetingMarkup))throw new IllegalArgumentException("invalid_keyboard_source");
+				if(operation.equals("edit"))edit=TelegramTransport.editFrom(lease.chatId(),root);
+				else message=TelegramTransport.Message.withMarkup(lease.chatId(),lease.threadId(),text.asText(),lease.silent(),root.get("replyMarkup"));
+			}
 		}catch(RuntimeException invalid) {
 			if(queue.start(lease.id(),lease.token()))queue.finish(lease.id(),lease.token(),DeliveryQueue.Result.failed("invalid_delivery_payload"));
 			return true;
@@ -134,7 +141,10 @@ public final class BroadcastDispatcher implements SmartLifecycle {
 			}
 			TelegramTransport.Outcome outcome;
 			if(lease.commandReplyOutboxId()!=null && !queue.commandReplyReadyForSending(lease.id(),lease.token(),bot))return true;
-			try { outcome=transport.send(message); }catch(RuntimeException e) { outcome=TelegramTransport.Outcome.unknown("transport_exception_after_start"); }
+			if(deletion!=null && !queue.panelDeleteReadyForSending(lease.id(),lease.token(),bot))return true;
+			if(meetingMarkup && !queue.meetingReplyReadyForSending(lease.id(),lease.token(),bot))return true;
+			try { outcome=deletion!=null?transport.delete(deletion):ack!=null?transport.acknowledge(ack):edit!=null?transport.edit(edit):transport.send(message); }
+			catch(RuntimeException e) { outcome=TelegramTransport.Outcome.unknown("transport_exception_after_start"); }
 			var result=DeliveryRetryPolicy.result(outcome,attempt);
 			if("telegram_429".equals(result.code()))quota.block(bot,lease.chatId(),result.retryDelay());
 			queue.finish(lease.id(),lease.token(),result);

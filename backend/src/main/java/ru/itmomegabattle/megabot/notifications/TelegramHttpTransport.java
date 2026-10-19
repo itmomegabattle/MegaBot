@@ -55,13 +55,40 @@ public final class TelegramHttpTransport implements TelegramTransport {
 		var body=new LinkedHashMap<String,Object>();body.put("chat_id",message.chatId());body.put("text",message.text());body.put("disable_notification",message.silent());
 		if(message.threadId()!=null)body.put("message_thread_id",message.threadId());
 		if(message.keyboard()!=null)body.put("reply_markup",message.keyboard().markup());
+		if(message.inlineKeyboard()!=null)body.put("reply_markup",message.inlineKeyboard().markup());
+		return request(endpoint,body,message.chatId(),null,false);
+	}
+	@Override public Outcome edit(Edit edit) {
+		if(allowedPrivateChats!=null && !allowedPrivateChats.contains(edit.chatId()))return Outcome.failed("test_recipient_not_allowed");
+		return request(endpoint.resolve("editMessageText"),java.util.Map.of("chat_id",edit.chatId(),"message_id",edit.messageId(),
+				"text",edit.text(),"reply_markup",edit.keyboard().markup()),edit.chatId(),edit.messageId(),false);
+	}
+	@Override public Outcome acknowledge(Acknowledgement ack) {
+		if(allowedPrivateChats!=null && !allowedPrivateChats.contains(ack.chatId()))return Outcome.failed("test_recipient_not_allowed");
+		return request(endpoint.resolve("answerCallbackQuery"),java.util.Map.of("callback_query_id",ack.callbackId(),"text",ack.text(),
+				"show_alert",false,"cache_time",0),ack.chatId(),null,true);
+	}
+	@Override public Outcome delete(Deletion deletion) {
+		if(allowedPrivateChats!=null && !allowedPrivateChats.contains(deletion.chatId()))return Outcome.failed("test_recipient_not_allowed");
+		return request(endpoint.resolve("deleteMessage"),java.util.Map.of("chat_id",deletion.chatId(),"message_id",deletion.messageId()),
+				deletion.chatId(),null,true);
+	}
+	private Outcome request(URI uri,java.util.Map<String,?> body,long chatId,Long expectedId,boolean booleanResult) {
 		try {
-			var request=HttpRequest.newBuilder(endpoint).timeout(timeout).header("Content-Type","application/json")
+			var request=HttpRequest.newBuilder(uri).timeout(timeout).header("Content-Type","application/json")
 					.POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(body))).build();
 			var pending=http.sendAsync(request,info->new LimitedBody());
 			try {
 				var response=pending.get(timeout.toMillis(),TimeUnit.MILLISECONDS);
-				return classify(response.statusCode(),response.body(),message.chatId());
+				if(booleanResult) {
+					var root=json.readTree(response.body());
+					if(root!=null && root.path("ok").isBoolean() && root.path("ok").booleanValue())
+						return response.statusCode()==200 && root.path("result").isBoolean() && root.path("result").booleanValue()
+								?Outcome.acknowledged():Outcome.unknown("invalid_boolean_response");
+				}
+				var result=classify(response.statusCode(),response.body(),chatId);
+				return expectedId!=null && result.kind()==Kind.SENT && !expectedId.equals(result.messageId())
+						?Outcome.unknown("unexpected_edited_message"):result;
 			}catch(TimeoutException e) { pending.cancel(true);return Outcome.unknown("response_timeout"); }
 			catch(InterruptedException e) { pending.cancel(true);Thread.currentThread().interrupt();return Outcome.unknown("interrupted_after_start"); }
 			catch(ExecutionException e) {

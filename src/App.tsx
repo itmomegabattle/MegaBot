@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { CheckCircle, LockKey, PlugsConnected, TelegramLogo, WarningCircle, WifiSlash } from '@phosphor-icons/react';
+import { LockKey, PlugsConnected, TelegramLogo, WarningCircle, WifiSlash } from '@phosphor-icons/react';
 import { SimulationState } from './types';
 import MiniApp from './components/MiniApp';
 import BootGate from './components/BootGate';
@@ -43,7 +43,7 @@ export default function App() {
     const requestedTab = new URLSearchParams(window.location.search).get('tab');
     return ['slots', 'meetings', 'tasks', 'team', 'faculties', 'profile'].includes(requestedTab || '')
       ? requestedTab as string
-      : 'slots';
+      : 'meetings';
   });
   const [notifications, setNotifications] = useState<{ id: string; text: string; type: ToastType }[]>([]);
   const [currentUserId, setCurrentUserId] = useState('');
@@ -424,7 +424,7 @@ export default function App() {
             }`}
           >
             {n.type === 'success' ? (
-              <CheckCircle className="w-4.5 h-4.5 shrink-0" weight="fill" />
+              <span className="sr-only">Успешно</span>
             ) : (
               <WarningCircle className="w-4.5 h-4.5 shrink-0" weight="fill" />
             )}

@@ -22,7 +22,7 @@ import ru.itmomegabattle.megabot.common.ApiException;
 import ru.itmomegabattle.megabot.notifications.DeliveryQueue;
 
 @Import(TestcontainersConfiguration.class)
-@SpringBootTest
+@SpringBootTest(properties="spring.datasource.hikari.connection-init-sql=SET search_path TO public,pg_catalog")
 @AutoConfigureMockMvc
 @ActiveProfiles("test")
 @Testcontainers(disabledWithoutDocker=true)
@@ -45,6 +45,49 @@ class DeliveryQueueIntegrationTests {
 	private DeliveryQueue.Lease claim() { return queue.claim(1,Duration.ofSeconds(30)).getFirst(); }
 	private String status(String id) { return jdbc.queryForObject("select status from notification_deliveries where id=?",String.class,id); }
 	private void expireLease(String id) { jdbc.update("update notification_deliveries set leased_until=clock_timestamp()-interval '1 second' where id=?",id); }
+
+	@Test void exactDueAndAvailableBoundariesAndClockRollbackAreIndependentOfJvmZone() {
+		var originalZone=java.util.TimeZone.getDefault();
+		var intended=Instant.parse("2030-12-31T21:00:00Z"); // Moscow New Year boundary.
+		try {
+			for(var zone:List.of("UTC","Pacific/Honolulu","Asia/Tokyo")) {
+				java.util.TimeZone.setDefault(java.util.TimeZone.getTimeZone(zone));
+				jdbc.execute("truncate notification_deliveries cascade");
+				var id=enqueue(input("exact-"+zone,intended,intended,intended.plusSeconds(300)));
+				var delayed=enqueue(input("available-"+zone,intended.minusSeconds(60),intended.plusSeconds(1),intended.plusSeconds(300)));
+				for(var before:List.of(intended.minusSeconds(1),intended.minusNanos(1000))) {
+					fixedDatabaseClock(before);
+					assertThat(queue.claim(10,Duration.ofSeconds(30))).as(zone+" before due").isEmpty();
+					assertThat(jdbc.queryForObject("select count(*) from delivery_attempts",Long.class)).isZero();
+				}
+				fixedDatabaseClock(intended);
+				var leases=queue.claim(10,Duration.ofSeconds(30));
+				assertThat(leases).as(zone+" at exact due").hasSize(1);
+				var lease=leases.getFirst();assertThat(lease.id()).isEqualTo(id);
+				assertThat(lease.intendedAt()).isEqualTo(intended);
+				assertThat(status(delayed)).isEqualTo("planned");
+				fixedDatabaseClock(intended.minusSeconds(1));
+				assertThat(queue.start(id,lease.token())).isFalse();
+				assertThat(jdbc.queryForObject("select count(*) from delivery_attempts",Long.class)).isZero();
+				fixedDatabaseClock(intended);
+				assertThat(queue.start(id,lease.token())).isTrue();
+				assertThat(jdbc.queryForObject("select request_started_at from notification_deliveries where id=?",java.sql.Timestamp.class,id).toInstant()).isEqualTo(intended);
+				assertThat(queue.finish(id,lease.token(),DeliveryQueue.Result.sent(123))).isTrue();
+				fixedDatabaseClock(intended.plusSeconds(1).minusNanos(1000));
+				assertThat(queue.claim(10,Duration.ofSeconds(30))).isEmpty();
+				fixedDatabaseClock(intended.plusSeconds(1));
+				assertThat(claim().id()).isEqualTo(delayed);
+			}
+		} finally {
+			java.util.TimeZone.setDefault(originalZone);
+			jdbc.execute("drop function if exists public.clock_timestamp()");
+		}
+	}
+
+	private void fixedDatabaseClock(Instant instant) {
+		// Only this disposable PostgreSQL; never change host time or sleep until due.
+		jdbc.execute("create or replace function public.clock_timestamp() returns timestamptz language sql volatile as $$ select timestamptz '"+instant+"' $$");
+	}
 
 	@Test void enqueueRequiresDomainTransactionAndRollbackLeavesNoDelivery() {
 		var r=input("atomic",now,now,null);

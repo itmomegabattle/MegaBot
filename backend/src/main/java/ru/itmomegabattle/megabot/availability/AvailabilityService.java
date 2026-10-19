@@ -81,9 +81,10 @@ class AvailabilityService {
 			LocalDate weekStart,
 			AvailabilityController.SaveWeekRequest request) {
 		var userId = resolveUser(actor, requestedUserId);
-		var settings = settingsService.get();
-		requireVisibleMonday(weekStart, settings.weekCount());
-		var days = validateDays(weekStart, request, settings);
+		// A week row does not exist on first save: lock its stable parent before reading its version.
+		jdbc.sql("select id from users where id=:id for no key update").param("id",userId).query(String.class).optional()
+				.orElseThrow(()->new ApiException(HttpStatus.NOT_FOUND,"user_not_found","Участник не найден"));
+		var days = validateWeek(weekStart, request);
 		var current = jdbc.sql("select id, version from availability_weeks where user_id = :userId and week_start = :weekStart for update")
 				.param("userId", userId).param("weekStart", weekStart)
 				.query((row, index) -> new WeekIdentity(row.getString("id"), row.getLong("version")))
@@ -174,12 +175,20 @@ class AvailabilityService {
 		return java.util.stream.IntStream.range(0, weekCount).mapToObj(monday::plusWeeks).toList();
 	}
 
+	List<AvailabilityController.DayMutation> validateWeek(LocalDate weekStart, AvailabilityController.SaveWeekRequest request) {
+		var settings = settingsService.get();
+		requireVisibleMonday(weekStart, settings.weekCount());
+		if (request == null || request.expectedVersion() < 0)
+			throw new ApiException(HttpStatus.BAD_REQUEST, "invalid_week_request", "Некорректная версия недели");
+		return validateDays(weekStart, request, settings);
+	}
+
 	private List<AvailabilityController.DayMutation> validateDays(
 			LocalDate weekStart,
 			AvailabilityController.SaveWeekRequest request,
 			AvailabilitySettings settings) {
 		if (request.outOfWeek()) {
-			if (request.days() != null && request.days().stream().anyMatch(day -> !day.startMinutes().isEmpty())) {
+			if (request.days() == null || request.days().stream().anyMatch(day -> day == null || day.startMinutes() == null || !day.startMinutes().isEmpty())) {
 				throw new ApiException(HttpStatus.BAD_REQUEST, "out_week_has_slots", "У недели «Я в ауте» не может быть слотов");
 			}
 			return List.of();
@@ -189,7 +198,7 @@ class AvailabilityService {
 		}
 		var unique = new HashMap<LocalDate, AvailabilityController.DayMutation>();
 		for (var day : request.days()) {
-			if (day.date() == null || day.date().isBefore(weekStart) || day.date().isAfter(weekStart.plusDays(6))
+			if (day == null || day.date() == null || day.date().isBefore(weekStart) || day.date().isAfter(weekStart.plusDays(6))
 					|| unique.put(day.date(), day) != null) {
 				throw new ApiException(HttpStatus.BAD_REQUEST, "invalid_day", "Дни должны быть уникальны и входить в выбранную неделю");
 			}
@@ -197,10 +206,12 @@ class AvailabilityService {
 			if (!settings.activeDays().contains(offset)) {
 				throw new ApiException(HttpStatus.BAD_REQUEST, "inactive_day", "Нельзя сохранить слоты для отключённого дня недели");
 			}
-			if (!List.of("unanswered", "available", "unavailable").contains(day.status())) {
+			if (day.status() == null || !List.of("unanswered", "available", "unavailable").contains(day.status())) {
 				throw new ApiException(HttpStatus.BAD_REQUEST, "invalid_day_status", "Неизвестное состояние дня");
 			}
-			var slots = day.startMinutes() == null ? List.<Integer>of() : day.startMinutes().stream().distinct().sorted().toList();
+			if (day.startMinutes() == null || day.startMinutes().stream().anyMatch(java.util.Objects::isNull))
+				throw new ApiException(HttpStatus.BAD_REQUEST, "invalid_slot", "Передайте список часов без пустых значений");
+			var slots = day.startMinutes().stream().distinct().sorted().toList();
 			if (slots.stream().anyMatch(minute -> minute == null || minute % 60 != 0
 					|| minute < settings.firstHour() * 60 || minute > settings.lastHour() * 60)) {
 				throw new ApiException(HttpStatus.BAD_REQUEST, "invalid_slot", "Слот должен попадать в настроенный часовой диапазон");

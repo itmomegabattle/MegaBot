@@ -23,7 +23,7 @@ import ru.itmomegabattle.megabot.team.*;
 import tools.jackson.databind.ObjectMapper;
 
 @Import(TestcontainersConfiguration.class)
-@SpringBootTest
+@SpringBootTest(properties="spring.datasource.hikari.connection-init-sql=SET search_path TO public,pg_catalog")
 @AutoConfigureMockMvc
 @ActiveProfiles("test")
 @Testcontainers(disabledWithoutDocker=true)
@@ -48,6 +48,77 @@ class BroadcastDispatcherIntegrationTests {
 	String due(String key) { return delivery(key,now.minusSeconds(1),"{\"text\":\"Проверка\"}"); }
 	String status(String id) { return jdbc.queryForObject("select status from notification_deliveries where id=?",String.class,id); }
 	BroadcastDispatcher worker(TelegramTransport transport) { return new BroadcastDispatcher(queue,quota,transport,json,"12345",DeliveryQuota.Limits.defaults()); }
+	@Test void transportStartsExactlyAtDueWithoutEarlyCallsOrDuplicatesInDifferentJvmZones() {
+		var originalZone=java.util.TimeZone.getDefault();
+		var intended=Instant.parse("2030-12-31T21:00:00Z");
+		try {
+			for(var zone:java.util.List.of("UTC","Pacific/Honolulu","Asia/Tokyo")) {
+				java.util.TimeZone.setDefault(java.util.TimeZone.getTimeZone(zone));
+				jdbc.execute("truncate broadcasts,notification_deliveries,delivery_rate_limits cascade");
+				now=intended.minusSeconds(1);
+				var id=delivery("transport-boundary-"+zone,intended,"{\"text\":\"Проверка\"}");
+				var count=new AtomicInteger();
+				var sender=worker(message->{
+					assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
+					assertThat(jdbc.queryForObject("select clock_timestamp()",java.sql.Timestamp.class).toInstant()).isEqualTo(intended);
+					assertThat(message.chatId()).isEqualTo(902L);assertThat(message.silent()).isTrue();
+					count.incrementAndGet();return TelegramTransport.Outcome.sent(123);
+				});
+				for(var before:java.util.List.of(intended.minusSeconds(1),intended.minusNanos(1000))) {
+					fixedDatabaseClock(before);
+					assertThat(sender.dispatchOne()).as(zone+" before due").isFalse();
+					assertThat(count).hasValue(0);assertThat(status(id)).isEqualTo("planned");
+					assertThat(jdbc.queryForObject("select count(*) from delivery_attempts",Long.class)).isZero();
+				}
+				fixedDatabaseClock(intended);
+				assertThat(sender.dispatchOne()).as(zone+" at due").isTrue();
+				assertThat(status(id)).isEqualTo("sent");assertThat(count).hasValue(1);
+				assertThat(jdbc.queryForObject("select request_started_at from notification_deliveries where id=?",java.sql.Timestamp.class,id).toInstant()).isEqualTo(intended);
+				fixedDatabaseClock(intended.plusSeconds(5));
+				assertThat(sender.dispatchOne()).isFalse();assertThat(count).hasValue(1);
+			}
+		} finally {
+			java.util.TimeZone.setDefault(originalZone);
+			jdbc.execute("drop function if exists public.clock_timestamp()");
+		}
+	}
+	private void fixedDatabaseClock(Instant instant) {
+		jdbc.execute("create or replace function public.clock_timestamp() returns timestamptz language sql volatile as $$ select timestamptz '"+instant+"' $$");
+	}
+	@Test void accessRevokedBeforeDueCancelsDeliveryWithoutTransportOrAttempt() {
+		try {
+			for(var change:java.util.List.of("author_disabled","recipient_disabled","recipient_unregistered","recipient_rebound","author_role_revoked","recipient_role_revoked")) {
+				prepare();var intended=now.plusSeconds(60);
+				fixedDatabaseClock(now);
+				var id=delivery("revoked-"+change,intended,"{\"text\":\"Закрытая информация\"}");
+				var sender=worker(message->{throw new AssertionError("revoked recipient reached transport: "+change);});
+				assertThat(sender.dispatchOne()).isFalse();assertThat(status(id)).isEqualTo("planned");
+				switch(change) {
+					case "author_disabled" -> jdbc.update("update users set active=false,deactivated_at=now() where id=?",author.getId());
+					case "recipient_disabled" -> jdbc.update("update users set active=false,deactivated_at=now() where id=?",recipient.getId());
+					case "recipient_unregistered" -> jdbc.update("update users set registered=false where id=?",recipient.getId());
+					case "recipient_rebound" -> jdbc.update("update users set telegram_id=9999 where id=?",recipient.getId());
+					case "author_role_revoked" -> jdbc.update("update users set role='faculty_helper' where id=?",author.getId());
+					case "recipient_role_revoked" -> jdbc.update("update users set role='faculty_helper' where id=?",recipient.getId());
+					default -> throw new AssertionError(change);
+				}
+				fixedDatabaseClock(intended);
+				assertThat(sender.dispatchOne()).as(change).isTrue();
+				assertThat(status(id)).as(change).isEqualTo("cancelled");
+				assertThat(jdbc.queryForObject("select count(*) from delivery_attempts",Long.class)).isZero();
+				assertThat(sender.dispatchOne()).isFalse();
+			}
+		} finally { jdbc.execute("drop function if exists public.clock_timestamp()"); }
+	}
+	@Test void ordinaryBroadcastCannotInjectInlineOrReplyKeyboardIntoCommandTransport() {
+		for(var markup:java.util.List.of("{\"inline_keyboard\":[[{\"text\":\"Слоты\",\"callback_data\":\"slot_edit\"}]]}",
+				"{\"keyboard\":[[{\"text\":\"Меню\"}]],\"resize_keyboard\":true,\"is_persistent\":false,\"one_time_keyboard\":false}")) {
+			var id=delivery("injected:"+UUID.randomUUID(),now.minusSeconds(1),"{\"text\":\"Проверка\",\"replyMarkup\":"+markup+"}");
+			assertThat(worker(m->{throw new AssertionError("broadcast_keyboard_sent");}).dispatchOne()).isTrue();
+			assertThat(status(id)).isEqualTo("failed");
+			assertThat(jdbc.queryForObject("select last_error_code from notification_deliveries where id=?",String.class,id)).isEqualTo("invalid_delivery_payload");
+		}
+	}
 	@Test void disabledByDefaultAndNetworkAttemptRunsOutsideTransaction() {
 		assertThat(context.getBeansOfType(BroadcastDispatcher.class)).isEmpty();var id=due("send");var count=new AtomicInteger();
 		var worker=worker(message->{assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isFalse();assertThat(message.silent()).isTrue();count.incrementAndGet();return TelegramTransport.Outcome.sent(44);});

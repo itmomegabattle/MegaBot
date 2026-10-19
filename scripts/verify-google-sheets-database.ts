@@ -3,6 +3,8 @@ import {
   compareDatabaseStateCounts,
   decodeGoogleSheetsDatabaseSnapshot,
   encodeGoogleSheetsDatabaseSnapshot,
+  exportStateToGoogleSheetsDatabase,
+  importStateFromGoogleSheetsDatabase,
 } from '../src/googleSheetsDatabase.js';
 import type { SimulationState } from '../src/types.js';
 import { resetOperationalData, sanitizeSimulationState } from '../src/stateMaintenance.js';
@@ -60,3 +62,44 @@ assert.deepEqual({ tasks: reset.tasks, meetings: reset.meetings, events: reset.e
   tasks: [], meetings: [], events: [], availabilities: {}, messages: {},
 });
 console.log('Google Sheets database verification passed: exact snapshots, schema cleanup, and safe operational reset.');
+
+const config = { spreadsheetId: 'synthetic', credentialsFile: 'unused', enabled: true };
+const large = structuredClone(state);
+large.tasks[0].description = 'Short';
+large.settings!.telegramInbox = Array.from({length:47}, (_, updateId) => ({updateId, chatKey:'test', payload:{text:'Ю🚀'.repeat(1000)},status:'completed' as const,receivedAt:'2030-01-01',availableAt:'2030-01-01',updatedAt:'2030-01-01',attempts:1}));
+const calls: string[] = [];
+let written: {range:string;values:unknown[][]}[] = [];
+const dependencies: NonNullable<Parameters<typeof exportStateToGoogleSheetsDatabase>[3]> = {
+  initialize: async () => { calls.push('initialize'); return {spreadsheetId:config.spreadsheetId,sheets:[],created:false}; },
+  request: async (_config, route, options) => {
+    calls.push(route);
+    if (route === '/values:batchUpdate') written = JSON.parse(String(options!.body)).data;
+    if (route.startsWith('/values:batchGet')) return {valueRanges: new URLSearchParams(route.split('?')[1]).getAll('ranges').map(range => {
+      const title = range.match(/^'([^']+)'/)![1];
+      const data = written.find(item => item.range.startsWith(`'${title}'!`));
+      const headers = title === 'settings' ? ['key','value_json','chunk_index'] : title === 'meta' ? null : [];
+      return {range,values:title === 'snapshot' ? [] : headers === null ? data!.values : [headers,...(data?.values || [])]};
+    })};
+    return {};
+  },
+};
+await exportStateToGoogleSheetsDatabase(config, large, 'test', dependencies);
+const chunks = written.find(item => item.range === "'settings'!A2")!.values.filter(row => row[0] === 'settings');
+assert.ok(chunks.length > 2);
+assert.ok(chunks.every(row => String(row[1]).length <= 30_000 && !/^[\uDC00-\uDFFF]|[\uD800-\uDBFF]$/.test(String(row[1]))), 'chunks must not split Unicode surrogate pairs');
+assert.ok(written.every(item => item.values.every(row => row.every(cell => typeof cell !== 'string' || cell.length <= 50_000))));
+assert.deepEqual(JSON.parse(chunks.map(row => row[1]).join('')), large.settings);
+// Domain fallback, not just the already-chunked snapshot, must restore the queue.
+assert.deepEqual((await importStateFromGoogleSheetsDatabase(config, dependencies)).state!.settings, large.settings);
+written.find(item => item.range === "'settings'!A2")!.values = [['settings',JSON.stringify(state.settings)]];
+assert.deepEqual((await importStateFromGoogleSheetsDatabase(config, dependencies)).state!.settings, state.settings);
+for (const length of [50_001, 120_000]) {
+  const invalid = structuredClone(large);
+  invalid.tasks[0].description = 'x'.repeat(length);
+  calls.length = 0;
+  await assert.rejects(exportStateToGoogleSheetsDatabase(config, invalid, 'test', dependencies), /tasks!F2/);
+  assert.deepEqual(calls, [], 'oversized cells must fail before initialization, writing meta, or clearing data');
+}
+large.tasks[0].description = 'x'.repeat(50_000);
+await exportStateToGoogleSheetsDatabase(config, large, 'test', dependencies);
+console.log('Oversized settings verification passed: chunked Unicode queue, legacy/fallback read, 50000 boundary, and zero remote mutations on invalid payload.');

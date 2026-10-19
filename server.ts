@@ -5,7 +5,6 @@ import express from 'express';
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
-import { createServer as createViteServer } from 'vite';
 import { ProxyAgent } from 'undici';
 import { SimulationState, User, Availability, Meeting, Task, BotMessage, Faculty, TaskReminder, WorkEvent, NotificationDelivery } from './src/types.js';
 import { isAvailabilityReminderTime, millisecondsUntilNextWholeHour, moscowClock } from './src/reminderSchedule.js';
@@ -30,7 +29,7 @@ import { mergePrimarySheetAvailability, sanitizeSimulationState } from './src/st
 import { alignAvailabilityToWeek, filterSlotsByAvailabilityConfig, normalizeAvailabilityConfig } from './src/availabilityConfig.js';
 import { AvailabilityWeekConflictError, AvailabilityWeekRangeError, replaceAvailabilityWeek } from './src/availabilityWeekMutation.js';
 import { birthdayParts, deliverBirthdayReminders } from './src/birthdayGift.js';
-import { meetingKindText, normalizeMeetingKind } from './src/meetingKind.js';
+import { meetingDurationError, meetingKindText, normalizeMeetingKind } from './src/meetingKind.js';
 import { meetingPhase, meetingStartTimestamp } from './src/meetingLifecycle.js';
 import { meetingRsvpFor, normalizedMeetingRsvps, setMeetingRsvp } from './src/meetingRsvp.js';
 import { completeTaskCommand, releaseTaskCommand, TaskCommandError } from './src/taskCommands.js';
@@ -418,6 +417,7 @@ function coreClientState(state: SimulationState, viewer: User): SimulationState 
   const settings = state.settings || {};
   return {
     users: state.users.map((user) => clientUser(user, viewer)),
+    capabilities: { durableBroadcasts: false },
     faculties: [...(state.faculties || [])],
     facultyCompetencies: [...(state.facultyCompetencies || [])],
     competencies: [...(state.competencies || [])],
@@ -1232,9 +1232,8 @@ function meetingPayloadFieldErrors(payload: Record<string, unknown>, now = new D
   const time = String(payload.time || '');
   if (!/^\d{2}:\d{2}$/.test(time) || !projectDateTimeInstant(date, time, now)) errors.time = 'Укажи время в формате ЧЧ:ММ';
   const duration = Number(payload.duration);
-  if (!Number.isFinite(duration) || duration < 0.5 || duration > 6 || duration * 2 !== Math.round(duration * 2)) {
-    errors.duration = 'От 30 минут до 6 часов с шагом 30 минут';
-  }
+  const durationError = meetingDurationError(kind, duration);
+  if (durationError) errors.duration = durationError;
   if (!errors.date && !errors.time && (projectDateTimeInstant(date, time, now)?.getTime() || 0) <= now.getTime()) {
     errors.date = 'Нельзя создать событие в прошлом';
   }
@@ -6087,7 +6086,7 @@ async function startServer() {
     const requestedKind = kind === undefined ? 'meeting' : kind;
     const validationErrors = meetingPayloadFieldErrors({
       title, kind: requestedKind, eventId, type: requestedKind === 'setup' ? 'general' : type,
-      date, time, duration: requestedKind === 'setup' ? 1 : duration ?? 1,
+      date, time, duration: duration ?? 1,
       participants: requestedKind === 'setup' ? 'all' : participants,
       topic, description, competency,
     });
@@ -6105,10 +6104,7 @@ async function startServer() {
     if (isSetup && !state.events?.some((item) => item.id === cleanEventId)) {
       return res.status(400).json({ error: 'Выбери мероприятие для монтажа' });
     }
-    const cleanDuration = isSetup ? 1 : Number(duration || 1);
-    if (!Number.isFinite(cleanDuration) || cleanDuration < 0.5 || cleanDuration > 6) {
-      return res.status(400).json({ error: 'Длительность собрания должна быть от 30 минут до 6 часов' });
-    }
+    const cleanDuration = Number(duration ?? 1);
     const scheduleError = meetingScheduleError(String(date), String(time), cleanDuration, state.settings, cleanKind);
     if (scheduleError) return res.status(400).json({ error: scheduleError });
 
@@ -6161,7 +6157,7 @@ async function startServer() {
     if (isSetup && !state.events?.some((item) => item.id === nextEventId)) {
       return res.status(400).json({ error: 'Выбери мероприятие для монтажа' });
     }
-    const nextDuration = isSetup ? 1 : duration === undefined ? meeting.duration : Number(duration);
+    const nextDuration = duration === undefined ? meeting.duration : Number(duration);
     const nextDate = String(date || meeting.date);
     const nextTime = String(time || meeting.time);
     const nextTitle = title === undefined ? meeting.title : title;
@@ -6175,9 +6171,6 @@ async function startServer() {
       competency: isSetup ? '' : competency === undefined ? meeting.competency : competency,
     });
     if (Object.keys(validationErrors).length) return validationErrorResponse(res, validationErrors);
-    if (!Number.isFinite(nextDuration) || nextDuration < 0.5 || nextDuration > 6) {
-      return res.status(400).json({ error: 'Длительность собрания должна быть от 30 минут до 6 часов' });
-    }
     const scheduleError = meetingScheduleError(nextDate, nextTime, nextDuration, state.settings, nextKind);
     if (scheduleError) return res.status(400).json({ error: scheduleError });
     if (title) meeting.title = String(title).trim();
@@ -7100,8 +7093,11 @@ async function startServer() {
       requestId: context.requestId,
     });
   });
+  // The deferred Java API is not part of this Node runtime; never return SPA HTML as an API success.
+  app.use('/api/v1', (_req, res) => res.status(404).json({ error: 'Этот API не включён в текущем приложении.' }));
   // Serve static UI assets or let Vite do it in dev mode
   if (process.env.NODE_ENV !== 'production') {
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',

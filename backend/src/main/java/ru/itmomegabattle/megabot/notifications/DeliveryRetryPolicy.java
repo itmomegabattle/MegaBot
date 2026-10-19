@@ -7,7 +7,7 @@ public final class DeliveryRetryPolicy {
 	private DeliveryRetryPolicy() {}
 	public static DeliveryQueue.Result result(TelegramTransport.Outcome outcome,int attempt) {
 		return switch(outcome.kind()) {
-			case SENT -> DeliveryQueue.Result.sent(outcome.messageId());
+			case SENT -> new DeliveryQueue.Result("sent",null,outcome.messageId(),null);
 			case FAILED -> DeliveryQueue.Result.failed(outcome.code());
 			case UNKNOWN -> DeliveryQueue.Result.unknown(outcome.code());
 			case RETRY -> DeliveryQueue.Result.retry(outcome.code(),delay(attempt,outcome.retryAfter(),ThreadLocalRandom.current().nextDouble()));

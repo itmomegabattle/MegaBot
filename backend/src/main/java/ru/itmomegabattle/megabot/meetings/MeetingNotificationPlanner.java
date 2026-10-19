@@ -61,7 +61,7 @@ public class MeetingNotificationPlanner {
 					for(var person:snapshot.people()) {
 						if(person.chat()==null || person.chat()<=0 || !personValid(meeting.id(),person)) { unavailable++;continue; }
 						String text=person.kind().equals("removed")?"Вы больше не приглашены на встречу.\n\n"+snapshot.previousTitle():text(source.action(),snapshot);
-						enqueue(source,meeting,person.id(),person.chat(),null,null,person.kind(),"user:"+person.id(),text,expires);queued++;
+						enqueue(source,meeting,person.id(),person.chat(),null,bot,person.kind(),"user:"+person.id(),text,expires);queued++;
 					}
 					for(var group:snapshot.groups()) {
 						boolean allowed=group.bot().equals(bot) && jdbc.sql("select count(*) from chat_bindings where bot_id=:bot and chat_id=:chat and type='important' and important_thread_id=:thread")
@@ -86,9 +86,14 @@ public class MeetingNotificationPlanner {
 	private void enqueue(Source source,Meeting meeting,String recipient,long chat,Long thread,String bot,String kind,String key,String text,Instant expires) {
 		var target="meeting_target_"+UUID.randomUUID();
 		jdbc.sql("insert into meeting_notification_targets(id,event_id,target_key,recipient_id,chat_id,message_thread_id,bot_id,kind) values (:id,:event,:key,:recipient,:chat,:thread,:bot,:kind)")
-				.param("id",target).param("event",source.id()).param("key",key).param("recipient",recipient).param("chat",chat).param("thread",thread).param("bot",bot).param("kind",kind).update();
+				.param("id",target).param("event",source.id()).param("key",key).param("recipient",recipient).param("chat",chat).param("thread",thread).param("bot",kind.equals("group")?bot:null).param("kind",kind).update();
+		var payload=json.createObjectNode().put("text",text).put("meetingId",meeting.id());
+		if(kind.equals("invited") && !source.action().equals("cancelled")) {
+			payload.put("botId",bot).put("meetingVersion",meeting.version());
+			payload.set("replyMarkup",json.valueToTree(TelegramMeetingRsvp.keyboard(target).markup()));
+		}
 		var delivery=queue.enqueue(new DeliveryQueue.NewDelivery(source.id(),"meeting:"+source.id()+":"+key,"meeting_event",recipient,chat,thread,
-				json.writeValueAsString(Map.of("text",text,"meetingId",meeting.id())),false,source.due(),source.due(),expires));
+				json.writeValueAsString(payload),false,source.due(),source.due(),expires));
 		jdbc.sql("update notification_deliveries set meeting_target_id=:target where id=:id").param("target",target).param("id",delivery).update();
 	}
 	private void finish(String id,String status,String code) {

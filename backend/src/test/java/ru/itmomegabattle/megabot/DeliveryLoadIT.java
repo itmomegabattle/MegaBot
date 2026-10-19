@@ -47,6 +47,8 @@ class DeliveryLoadIT {
 	@Test void pacedThousandMeasuresEngineWithDefaultQuota() { measure("paced-engine",1000,60,false); }
 	@Test void burstThousandMeasuresBacklogWithDefaultQuota() { measure("burst-engine",1000,0,false); }
 	@Test void lifecycleWakeupDrainsThousandWithDefaultQuota() { measure("scheduled-burst",1000,0,true); }
+	@Test @Timeout(value=780,unit=TimeUnit.SECONDS)
+	void lifecyclePacedThousandMeasuresLatenessWithoutQuotaDeferral() { measure("scheduled-paced",1000,600,true); }
 
 	private void measure(String scenario,int count,int spacingMs,boolean scheduled) {
 		seed(count,spacingMs);
@@ -57,7 +59,7 @@ class DeliveryLoadIT {
 			assertThat(recipients.add(message.chatId())).as("recipient must not be sent twice").isTrue();
 			return TelegramTransport.Outcome.sent(calls.incrementAndGet());
 		},json,"12345",DeliveryQuota.Limits.defaults());
-		long started=System.nanoTime(),deadline=started+Duration.ofSeconds(150).toNanos();
+		long started=System.nanoTime(),deadline=started+Duration.ofMillis((long)count*spacingMs).plusSeconds(150).toNanos();
 		org.springframework.context.annotation.AnnotationConfigApplicationContext scheduler=null;
 		if(scheduled) {
 			scheduler=new org.springframework.context.annotation.AnnotationConfigApplicationContext();
@@ -91,6 +93,11 @@ class DeliveryLoadIT {
 		System.out.printf(java.util.Locale.ROOT,
 				"DELIVERY_LOAD scenario=%s samples=%d elapsed_ms=%.0f p50_ms=%.3f p95_ms=%.3f p99_ms=%.3f max_ms=%.3f first_completion_ms=%s last_completion_ms=%s quota_deferred=%d calls=%d%n",
 				scenario,count,(System.nanoTime()-started)/1_000_000.0,timings.get("p50"),timings.get("p95"),timings.get("p99"),timings.get("maximum"),timings.get("first_completion"),timings.get("last_completion"),deferred,calls.get());
+		if(scheduled && spacingMs>0) {
+			assertThat(deferred).as("paced scheduler must be measured without quota deferral").isZero();
+			assertThat(((Number)timings.get("p95")).doubleValue()).as("local scheduler p95 milliseconds").isLessThanOrEqualTo(2000);
+			assertThat(((Number)timings.get("p99")).doubleValue()).as("local scheduler p99 milliseconds").isLessThanOrEqualTo(5000);
+		}
 	}
 
 	private void seed(int count,int spacingMs) {

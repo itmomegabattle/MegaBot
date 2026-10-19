@@ -20,7 +20,7 @@
   color-scheme: light;
   font-family: "Raleway", "Segoe UI", sans-serif;
   --mega-blue: #0069e0;
-  --mega-link: #0069e0;
+  --mega-link: #005bc4;
   --mega-blue-hover: #1677e8;
   --mega-blue-active: #0058bd;
   --mega-cyan: #2685bb;
@@ -30,13 +30,13 @@
   --mega-white: #ffffff;
   --mega-ink: #061222;
   --mega-muted: #4d647a;
-  --mega-subtle: #718293;
+  --mega-subtle: #52667c;
   --mega-line: rgba(6, 18, 34, 0.14);
-  --mega-line-strong: rgba(6, 18, 34, 0.24);
-  --mega-canvas: #f3f6f8;
+  --mega-line-strong: #70869c;
+  --mega-canvas: #e3ebf3;
   --mega-surface: #ffffff;
-  --mega-surface-soft: #eaf2fb;
-  --mega-control: #f4f7fa;
+  --mega-surface-soft: #deebfb;
+  --mega-control: #edf1f5;
   --mega-shadow: 0 8px 22px rgba(6, 18, 34, 0.07);
   --mega-shadow-raised: 0 16px 38px rgba(0, 0, 0, 0.14);
   --mega-space-1: 4px;
@@ -300,6 +300,28 @@ textarea:focus-visible {
   word-break: normal;
 }
 
+.mega-shell .mega-list-disclosure {
+  overflow-anchor: none;
+}
+
+.mega-shell [role='tablist'] {
+  background: var(--mega-control);
+  border-color: var(--mega-line-strong);
+}
+
+.mega-shell [role='tab'] {
+  transition: border-color var(--mega-motion);
+  color: var(--mega-ink);
+  border: 1px solid var(--mega-line-strong);
+  background: var(--mega-surface);
+}
+
+.mega-shell [role='tab'][aria-selected='true'] {
+  color: var(--mega-white);
+  border-color: var(--mega-blue);
+  background: var(--mega-blue);
+}
+
 .mega-shell section {
   scroll-margin-top: 92px;
 }
@@ -368,6 +390,10 @@ textarea:focus-visible {
 }
 
 .mega-shell .text-\[\#0069E0\] {
+  color: var(--mega-link);
+}
+
+.mega-shell .text-\[\#005BC4\] {
   color: var(--mega-link);
 }
 
@@ -579,16 +605,16 @@ textarea:focus-visible {
 
 html.dark-theme {
   color-scheme: dark;
-  --mega-ink: #ffffff;
+  --mega-ink: #f3f6fc;
   --mega-link: #65aaff;
-  --mega-muted: #c1ccd8;
-  --mega-subtle: #8e9bab;
+  --mega-muted: #b8c7da;
+  --mega-subtle: #9eb0c5;
   --mega-line: rgba(255, 255, 255, 0.16);
-  --mega-line-strong: rgba(255, 255, 255, 0.28);
+  --mega-line-strong: #6f849e;
   --mega-canvas: #05070a;
-  --mega-surface: #10151c;
-  --mega-surface-soft: #10243a;
-  --mega-control: #181f29;
+  --mega-surface: #172231;
+  --mega-surface-soft: #203a55;
+  --mega-control: #0b1420;
   --mega-shadow: 0 18px 42px rgba(0, 0, 0, 0.34);
 }
 
@@ -642,6 +668,11 @@ html.dark-theme .mega-shell .bg-white,
 html.dark-theme .mega-shell .bg-white\/95,
 html.dark-theme .mega-shell .bg-white\/70 {
   background-color: var(--mega-surface);
+}
+
+.mega-shell .mega-admin-tabs[role='tablist'],
+html.dark-theme .mega-shell .mega-admin-tabs[role='tablist'] {
+  background-color: var(--mega-control);
 }
 
 html.dark-theme .mega-shell input,
@@ -721,11 +752,43 @@ html.dark-theme .mega-shell .mega-bottom-nav {
 
 .mega-shell input[type='date'],
 .mega-shell input[type='time'] {
+  -webkit-appearance: none;
+  appearance: none;
   display: block;
   width: 100%;
   min-width: 0;
   max-width: 100%;
   box-sizing: border-box;
+}
+
+.mega-shell input[type='date']::-webkit-datetime-edit,
+.mega-shell input[type='time']::-webkit-datetime-edit {
+  min-width: 0;
+  padding: 0;
+}
+
+/* Keep native multi-select semantics, without checkmark-shaped controls. */
+.mega-shell input[type='checkbox'] {
+  appearance: none;
+  -webkit-appearance: none;
+  flex: 0 0 20px;
+  width: 20px;
+  height: 20px;
+  min-height: 20px;
+  padding: 0;
+  border: 2px solid var(--mega-muted);
+  border-radius: 50%;
+  background: transparent;
+}
+
+.mega-shell input[type='checkbox']:checked {
+  border-color: var(--mega-link);
+  background: var(--mega-link);
+  box-shadow: inset 0 0 0 4px var(--mega-surface);
+}
+
+.mega-shell label:has(input[type='checkbox']) {
+  min-height: 44px;
 }
 
 .mega-shell .mega-date-input {

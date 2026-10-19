@@ -16,6 +16,8 @@ public class TelegramCommandWorker {
 		try { queue.apply(lease.id(),lease.token(),commands::handle); }
 		catch(TelegramPrivateCommandHandler.UnsupportedCommand e) { queue.reject(lease.id(),lease.token(),"unsupported_command",Duration.ofHours(1)); }
 		catch(TelegramPrivateCommandHandler.InvalidPrivateCommand e) { queue.reject(lease.id(),lease.token(),"invalid_private_command",null); }
+		catch(TelegramInboxQueue.InvalidCallbackId e) { queue.reject(lease.id(),lease.token(),"invalid_callback_id",null); }
+		catch(TelegramSlotCallbackHandler.InvalidCallback e) { queue.reject(lease.id(),lease.token(),"invalid_slot_callback",null); }
 		catch(RuntimeException e) {
 			queue.reject(lease.id(),lease.token(),"command_processing_failed",Duration.ofSeconds(Math.min(300,5L*lease.attempts())));
 		}

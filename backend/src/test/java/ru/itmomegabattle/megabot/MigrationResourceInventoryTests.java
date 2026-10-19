@@ -39,7 +39,19 @@ class MigrationResourceInventoryTests {
 			"V027__broadcast_expiry_notices.sql",
 			"V028__broadcast_group_allowlist.sql",
 			"V029__broadcast_message_parts.sql",
-			"V030__telegram_command_replies.sql"
+			"V030__telegram_command_replies.sql",
+			"V031__telegram_callback_effects.sql",
+			"V032__telegram_slot_drafts.sql",
+			"V033__setup_duration_hours.sql",
+			"V034__telegram_slot_panels.sql",
+			"V035__telegram_slot_pending_weeks.sql",
+			"V036__telegram_slot_day_baseline.sql",
+			"V037__telegram_panel_deletions.sql",
+			"V038__telegram_meeting_drafts.sql",
+			"V039__telegram_meeting_draft_creation.sql",
+            "V040__telegram_meeting_panels.sql",
+            "V041__legacy_snapshot_staging.sql",
+            "V042__telegram_task_drafts.sql"
 	};
 
 	@Test
@@ -58,6 +70,9 @@ class MigrationResourceInventoryTests {
 				"CREATE TABLE meetings",
 				"CREATE TABLE tasks",
 				"CREATE TABLE telegram_inbox",
+				"CREATE TABLE telegram_callback_effects",
+				"CREATE TABLE telegram_slot_drafts",
+				"CREATE TABLE telegram_meeting_drafts",
 				"CREATE TABLE broadcasts",
 				"CREATE TABLE notification_deliveries",
 				"CREATE TABLE integration_jobs",

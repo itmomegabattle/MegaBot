@@ -72,6 +72,7 @@ const users = [
 }));
 
 await writeFile(databasePath, JSON.stringify({
+  capabilities: { durableBroadcasts: true }, // Stored/legacy data cannot enable deferred capabilities.
   users,
   faculties: [{ id: 'fac_a', name: 'Факультет А' }, { id: 'fac_b', name: 'Факультет Б' }],
   facultyCompetencies: ['Дизайн'],
@@ -204,6 +205,12 @@ try {
 
   const adminState = await request('/api/state', adminCookie);
   assert.equal(adminState.response.status, 200);
+  assert.deepEqual(adminState.data.capabilities, { durableBroadcasts: false });
+  for (const api of ['/api/v1/broadcasts', '/api/v1/telegram/webhook', '/api/v1/tasks']) {
+    const disabled = await request(api, adminCookie);
+    assert.equal(disabled.response.status, 404);
+    assert.equal(typeof disabled.data.error, 'string');
+  }
   assert.equal(adminState.data.users.find((user) => user.id === 'u_member').birthday, '09.11.2000');
   assert.deepEqual(Object.keys(adminState.data.messages), ['u_admin']);
   assert.equal(adminState.data.users.some((user) => 'telegramId' in user || 'joinedAt' in user), false);
@@ -217,6 +224,7 @@ try {
 
   const memberState = await request('/api/state', memberCookie);
   assert.equal(memberState.response.status, 200);
+  assert.deepEqual(memberState.data.capabilities, { durableBroadcasts: false });
   assert.equal(memberState.data.users.find((user) => user.id === 'u_member').birthday, '09.11.2000');
   assert.equal(memberState.data.users.find((user) => user.id === 'u_admin').birthday, '15.04');
   assert.equal(memberState.data.users.some((user) => 'lastSeenAt' in user), false);

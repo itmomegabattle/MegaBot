@@ -17,6 +17,11 @@ Telegram / browser → https://megaorgiabot.ru → Caddy → 127.0.0.1:3000 → 
 
 ## Штатный выпуск
 
+Для ближайшего подготовленного Node/UI RC от 06.10.2026 использовать отдельную
+инструкцию [NODE-UI-RELEASE.md](NODE-UI-RELEASE.md), а не описанный ниже старый
+deploy script. Этот RC уже установлен по команде владельца 06.10.2026;
+последующие изменения требуют отдельной команды на production-выпуск.
+
 Перед push локально:
 
 ```bash
@@ -50,7 +55,61 @@ bash scripts/deploy-selectel.sh
 
 Для переноса Java применять только [B-10](../backend.md), после release gates и эксплуатационной части B-11. Штатный Node deploy не умеет мигрировать PostgreSQL, менять транспорт Telegram или возвращать данные из Java обратно в Sheets. Автоматически запускать его для Java-релиза нельзя.
 
-## Проверка после выпуска
+## Зависимости и CI — локальное обновление 06.10.2026
+
+`.nvmrc` закрепляет Node 22.23.1, `packageManager` — npm 10.9.8; engines
+также допускает Node 24.18+. Установка — `npm ci` по lockfile. Vite, React/Tailwind
+plugins и прочие build tools перенесены в devDependencies; `npm ci --omit=dev`
+достаточен для запуска готового server.cjs, но не для сборки и admin TS scripts.
+Vite загружается динамически только в dev-ветке: production больше не требует
+build tool при старте. Отдельный smoke проверяет именно установку без devDependencies.
+
+Аудит до обновления: 10 пакетов (1 critical, 5 high, 4 moderate).
+После точечного обновления без `audit fix --force`: 0 advisories в полном дереве.
+Runtime: Express 4.22.3, body-parser 1.20.8, qs 6.16.0, proxy-addr 2.0.8,
+undici 6.29.0. Build: browserslist 4.29.3, baseline-browser-mapping 2.11.27,
+PostCSS 8.5.29, nanoid 3.3.20, source-map-js 1.2.2. Major-линии сохранены.
+
+Reachability: proxy-addr участвует в Express req.ip/rate limits, но текущий
+`trust proxy=loopback` не является короткой mapped-IPv6 сетью из
+[GHSA-jqcg-44mw-7w3h](https://github.com/advisories/GHSA-jqcg-44mw-7w3h).
+Это анализ текущей конфигурации, не доказательство эксплуатации или её отсутствия.
+Добавлена регрессия mapped subnet/loopback/поддельного X-Forwarded-For.
+body-parser/qs принимают HTTP-ввод и не исключались из оценки как «только dev».
+undici используется для ProxyAgent; WebSocket/retry interceptor/cookie API из
+advisories в приложении не вызываются. Build-пакеты обрабатывают исходники проекта;
+исправлены тоже, а не оставлены по предположению о недостижимости. Оставленных
+advisories на дату проверки нет, значит список исключений/владельцев/сроков пуст.
+Нулевой audit не доказывает отсутствие всех уязвимостей.
+
+CI выполняет install/audit/lint/docs/dependency-controls/core и профильные mock
+проверки, затем pinned Playwright CLI 0.1.22 и synthetic frontend smoke; последний
+шаг переустанавливает только production dependencies и проверяет запуск/readiness.
+JSON audit и browser artifacts сохраняются даже при ошибке. Java job выполняет Maven
+verify/Testcontainers и сохраняет surefire reports. Доступ только contents:read,
+secrets не нужны. CLI-обёртка
+не доверяет одному exit code: требует явный passed:true от браузерного сценария.
+TypeScript include/exclude исключает dist, runtime artifacts и локальные skills.
+`scripts/playwright-ci.json` отключает Chromium sandbox только для синтетических
+сценариев в изолированном CI-контейнере, не для приложения или пользовательского браузера.
+
+Проверено локально: полный Node core, профильные mock-тесты и browser smoke
+(24 проверки длительности + 210 адаптивных сценариев). Повторено после чистого
+`npm ci` в Linux-контейнере Node 22.23.1/npm 10.9.8, без `.env`, токенов и БД;
+lint проходит и после build. Отдельная чистая production-only установка прошла
+dependency-controls/readiness. Логи: `output/debt02-clean-install.log`,
+`output/debt02-runtime-install.log`, `output/debt02-core.log`,
+`output/debt02-ui.log`; JSON audit и browser results — в `output/debt02-clean/`.
+Полный `backend/mvnw.cmd --batch-mode verify` на JDK 21 также прошёл:
+462 tests, 0 failures/errors/skipped, включая process crash/recovery с временной
+PostgreSQL. Лог — `backend/target/debt02-java-verify.log`. Локально Maven нужно
+запускать с JDK 21: системный `java` может указывать на старую Java 8.
+
+Эти изменения локальные: production остаётся на ранее установленном RC и старом
+lockfile, патчи зависимостей туда ещё не переносились. Фактический GitHub Actions
+run проверяется после следующего push, не подменяется локальным прогоном.
+
+## Проверка после выпуска (команды)
 
 ```bash
 curl -fsS http://127.0.0.1:3000/api/health
@@ -205,6 +264,8 @@ Apps Script устанавливается в пользовательской �
 - `pendingReplication` — есть ожидающая или выполняющаяся выгрузка.
 
 После перезапуска приложение сравнивает проверенный локальный journal с согласованным Sheets snapshot и выбирает более новую ревизию. Повреждённая последняя запись журнала пропускается в пользу предыдущей с корректной checksum. Не удалять каталог recovery до проверки, что Sheets имеет ту же или более новую ревизию.
+
+Настройки в листе `settings` записываются частями: повторяющийся `key`, `value_json`, `chunk_index`; каждая часть не превышает 30000 UTF-16 символов и не разрывает Unicode-пары. Чтение поддерживает прежнюю единственную строку без индекса и новый формат; основной snapshot остаётся schema11. Перед любыми изменениями Google Sheets проверяется размер всех экспортируемых ячеек: поле >50000 вызывает диагностическую ошибку с листом/координатой без раскрытия содержимого, до initialize/meta/clear. Данные не обрезаются. Это предотвращает очистку при известном нарушении лимита, но не делает сетевой clear/write атомарным: при сетевых сбоях по-прежнему обязательны durable journal, повтор и контроль `sync_state=ready`.
 
 Проверка и ручная копия:
 

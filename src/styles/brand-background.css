@@ -9,7 +9,7 @@
   contain: strict;
   background:
     radial-gradient(circle at 52% 42%, rgba(0, 48, 112, 0.08), transparent 55%),
-    linear-gradient(145deg, var(--mega-ink), var(--mega-black));
+    linear-gradient(145deg, #061222, var(--mega-black));
 }
 
 .brand-background__canvas {

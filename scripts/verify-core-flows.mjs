@@ -32,6 +32,7 @@ let delayNextTelegramSendMs = 0;
 let groupBotIsAdmin = true;
 let createdEventId = '';
 let serverErrors = '';
+let testClockMs = Date.now();
 
 const fixture = {
   users: [
@@ -109,7 +110,7 @@ function signedTelegramInitData(entries) {
 
 function telegramInitData(user, options = {}) {
   return signedTelegramInitData({
-    auth_date: String(options.authDate ?? Math.floor(Date.now() / 1000)),
+    auth_date: String(options.authDate ?? Math.floor(testClockMs / 1000)),
     query_id: `test-${user.id}`,
     user: JSON.stringify(user),
   });
@@ -193,7 +194,8 @@ const fakeTelegram = http.createServer((req, res) => {
       res.end(JSON.stringify({ ok: false, description: 'Bad Request: message to edit not found' }));
       return;
     }
-    if (failNextTelegramSend && req.url.endsWith('/sendMessage')) {
+    if (failNextTelegramSend && req.url.endsWith('/sendMessage') && (typeof failNextTelegramSend !== 'string'
+      || String(JSON.parse(rawBody || '{}').text || '').includes(failNextTelegramSend))) {
       failNextTelegramSend = false;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: false, error_code: 403, description: 'Forbidden: bot was blocked by the user' }));
@@ -234,6 +236,7 @@ try {
   await writeFile(testDatabasePath, JSON.stringify(fixture, null, 2), 'utf8');
   const clockPath = path.join(tempRoot, 'clock.txt');
   const testStartMs = Date.now();
+  testClockMs = testStartMs;
   await writeFile(clockPath, String(testStartMs));
   const clockPreload = path.join(tempRoot, 'clock.cjs');
   await writeFile(clockPreload, `
@@ -1200,14 +1203,14 @@ try {
   const meetingsBeforeInvalidChat = parityState.meetings.length;
   for (const [updateId, messageText] of [
     [10509, 'Назначить собрание'], [10510, 'Собрать всю команду'], [10511, 'Ночная встреча'],
-    [10512, 'Пропустить'], [10513, '31.12.2030'], [10514, '03:00'],
+    [10512, 'Пропустить'], [10513, '31.12.2030'], [10514, '24:00'],
   ]) await request('/api/telegram-webhook', {
     update_id: updateId,
     message: { message_id: updateId, chat: { id: 200, type: 'private' }, from: aliceTelegram, text: messageText },
   });
   parityState = (await request('/api/state')).data;
   assert.equal(parityState.meetings.length, meetingsBeforeInvalidChat);
-  assert.ok(telegramCalls.some((call) => String(call.body.text || '').includes('Встреча должна полностью помещаться')));
+  assert.ok(telegramCalls.some((call) => String(call.body.text || '').includes('Не понял время')));
   await request('/api/telegram-webhook', {
     update_id: 10515,
     message: { message_id: 10515, chat: { id: 200, type: 'private' }, from: aliceTelegram, text: 'Меню' },
@@ -1555,10 +1558,10 @@ try {
   assert.equal(pastMeeting.response.status, 400);
   assert.ok(pastMeeting.data.fieldErrors.date);
   assert.equal(telegramCalls.length, notificationsBeforeInvalidMeetingShapes, 'invalid meeting payloads must not notify anyone');
-  const weekendMeeting = await request('/api/meeting', {
-    title: 'Встреча в выходной', type: 'general', date: '2030-01-05', time: '18:00', duration: 1, hostId: 'u_admin', participants: 'all',
+  const invalidWeekendTime = await request('/api/meeting', {
+    title: 'Неверное время в выходной', type: 'general', date: '2030-01-05', time: '24:00', duration: 1, hostId: 'u_admin', participants: 'all',
   });
-  assert.equal(weekendMeeting.response.status, 400);
+  assert.equal(invalidWeekendTime.response.status, 400);
   assert.equal(telegramCalls.filter((call) => call.path.endsWith('/sendMessage')).length, 3);
   assert.ok(!telegramCalls.some((call) => call.body.chat_id === '400'));
   assert.ok(!telegramCalls.some((call) => String(call.body.text || '').includes('Придут:')), 'meeting notifications must not embed the attendee list');
@@ -1818,7 +1821,7 @@ try {
   assert.ok(!telegramCalls.some((call) => call.path.endsWith('/deleteMessage') && call.body.message_id === 20001));
 
   telegramCalls.length = 0;
-  failNextTelegramSend = true;
+  failNextTelegramSend = 'Встреча для важного топика';
   const importantMeeting = await request('/api/meeting', {
     title: 'Встреча для важного топика', type: 'general', date: '03.01.30', time: '18:00', duration: 1,
     hostId: 'u_admin', participants: 'all', description: 'Проверка дублирования',
@@ -1834,6 +1837,7 @@ try {
     call.path.endsWith('/sendMessage')
     && call.body.chat_id === '-100500'
     && call.body.message_thread_id === 321
+    && String(call.body.text || '').includes('Встреча для важного топика')
   )).length, 1, 'a terminal 403 must not be retried blindly');
   const failedImportantDeliveries = await request('/api/notification-deliveries?status=failed', undefined, { cookie: adminSessionCookie });
   assert.equal(failedImportantDeliveries.response.status, 200);
@@ -1861,7 +1865,7 @@ try {
   telegramCalls.length = 0;
   const setupMeeting = await request('/api/meeting', {
     kind: 'setup', eventId: createdEventId, title: 'Монтаж тестовой площадки',
-    type: 'custom', date: '03.01.30', time: '19:00', duration: 4,
+    type: 'custom', date: '03.01.30', time: '19:00', duration: 12,
     hostId: 'u_admin', participants: [], topic: 'Это поле должно быть очищено', description: 'И это тоже',
   });
   assert.equal(setupMeeting.response.status, 200);
@@ -1869,10 +1873,11 @@ try {
   assert.equal(setupMeeting.data.meeting.eventId, createdEventId);
   assert.equal(setupMeeting.data.meeting.type, 'general');
   assert.equal(setupMeeting.data.meeting.participants, 'all');
-  assert.equal(setupMeeting.data.meeting.duration, 1);
+  assert.equal(setupMeeting.data.meeting.duration, 12);
   assert.equal(setupMeeting.data.meeting.topic, '');
   assert.equal(setupMeeting.data.meeting.description, '');
   const setupNotifications = telegramCalls.filter((call) => call.path.endsWith('/sendMessage'));
+  assert.ok(setupNotifications.some((call) => /Длительность:.*12.*ч/.test(String(call.body.text || ''))), 'setup notification must use selected duration');
   assert.ok(setupNotifications.some((call) => String(call.body.text || '').includes('Новый монтаж запланирован!')));
   assert.ok(setupNotifications.some((call) => String(call.body.text || '').includes('Тестовое мероприятие — обновлено')));
   assert.ok(setupNotifications.some((call) => call.body.chat_id === '-100500' && call.body.message_thread_id === 321), 'setup notifications must be duplicated into IMPORTANT');
@@ -1881,11 +1886,29 @@ try {
 
   telegramCalls.length = 0;
   const setupUpdate = await request('/api/meeting/update', {
-    requesterId: 'u_admin', meetingId: setupMeeting.data.meeting.id, title: 'Монтаж главной сцены', time: '20:00',
+    requesterId: 'u_admin', meetingId: setupMeeting.data.meeting.id, title: 'Монтаж главной сцены', time: '09:00', duration: 1,
   });
   assert.equal(setupUpdate.response.status, 200);
   assert.equal(setupUpdate.data.meeting.kind, 'setup');
   assert.equal(setupUpdate.data.meeting.participants, 'all');
+  assert.equal(setupUpdate.data.meeting.duration, 1);
+  const setupTitleOnly = await request('/api/meeting/update', {
+    requesterId: 'u_admin', meetingId: setupMeeting.data.meeting.id, title: 'Монтаж — уточнение',
+  });
+  assert.equal(setupTitleOnly.response.status, 200);
+  assert.equal(setupTitleOnly.data.meeting.duration, 1, 'editing title must retain setup duration');
+  for (const duration of [0, -1, 0.5, 0.75, 2.5, 12.5, 13]) {
+    const invalidSetup = await request('/api/meeting', {
+      kind: 'setup', eventId: createdEventId, title: 'Некорректный монтаж',
+      date: '03.01.30', time: '19:00', duration, hostId: 'u_admin', participants: 'all',
+    });
+    assert.equal(invalidSetup.response.status, 400);
+    assert.ok(invalidSetup.data.fieldErrors?.duration || invalidSetup.data.errors?.duration || invalidSetup.data.error);
+    const invalidUpdate = await request('/api/meeting/update', {
+      meetingId: setupMeeting.data.meeting.id, duration,
+    });
+    assert.equal(invalidUpdate.response.status, 400);
+  }
   assert.ok(telegramCalls.some((call) => String(call.body.text || '').includes('Монтаж изменён')));
 
   telegramCalls.length = 0;
@@ -1927,6 +1950,24 @@ try {
   const vibeDelete = await request('/api/meeting/delete', { requesterId: 'u_admin', meetingId: vibeMeeting.data.meeting.id });
   assert.equal(vibeDelete.response.status, 200);
   assert.ok(telegramCalls.some((call) => String(call.body.text || '').includes('Вайбик отменён.')));
+  sessionCookie = beforeVibeSession;
+
+  sessionCookie = adminSessionCookie;
+  for (const kind of ['meeting', 'setup', 'vibe']) {
+    const created = await request('/api/meeting', {
+      kind, eventId: kind === 'setup' ? createdEventId : undefined,
+      title: 'Свободное расписание', type: 'general', date: '05.01.30', time: '00:00',
+      duration: 1, hostId: 'u_admin', participants: 'all',
+    });
+    assert.equal(created.response.status, 200, `${kind}: create on Saturday at midnight`);
+    const updated = await request('/api/meeting/update', {
+      meetingId: created.data.meeting.id, date: '06.01.30', time: '23:59',
+    });
+    assert.equal(updated.response.status, 200, `${kind}: update to Sunday crossing midnight`);
+    assert.equal(updated.data.meeting.time, '23:59');
+    assert.equal(updated.data.meeting.date, '06.01.30');
+    assert.equal((await request('/api/meeting/delete', { meetingId: created.data.meeting.id })).response.status, 200);
+  }
   sessionCookie = beforeVibeSession;
 
   const oneDayAvailability = await saveAvailabilityWeek('u_alice', 0, { 2: [18] });
@@ -2307,7 +2348,8 @@ try {
   await saveAvailabilityWeek('u_admin', 1, { 0: [19] }, [2]);
   const rolloverSave = await saveAvailabilityWeek('u_admin', 2, { 0: [20] }, [2]);
   assert.equal(rolloverSave.response.status, 200);
-  await writeFile(clockPath, String(Date.parse(`${weekAt(1)}T00:00:00+03:00`)));
+  testClockMs = Date.parse(`${weekAt(1)}T00:00:00+03:00`);
+  await writeFile(clockPath, String(testClockMs));
   const rolled = (await request('/api/state')).data;
   assert.equal(rolled.settings.availabilityWeekCount, 3);
   assert.deepEqual(rolled.settings.availabilityWeekNames, ['Событие 1', 'Событие 2', 'Неделя 3']);

@@ -43,10 +43,14 @@ const app = spawn(process.execPath, [path.join(repoRoot, 'dist', 'server.cjs')],
   },
   stdio: ['ignore', 'pipe', 'pipe'],
 });
+let startupOutput = '';
+app.stdout.on('data', chunk => { startupOutput += chunk; });
+app.stderr.on('data', chunk => { startupOutput += chunk; });
 
 try {
   let liveResponse;
   for (let attempt = 0; attempt < 100; attempt += 1) {
+    assert.equal(app.exitCode, null, `Server exited during startup: ${startupOutput}`);
     try {
       liveResponse = await fetch(`http://127.0.0.1:${port}/api/health/live`, {
         headers: { 'X-Request-ID': 'readiness-check-123' },
@@ -79,8 +83,11 @@ try {
 
   console.log('Service readiness verification passed: liveness stays up, failed durable writes return 503 readiness, and correlation headers are present.');
 } finally {
-  if (!app.killed) app.kill();
-  await once(app, 'exit');
+  if (app.exitCode === null && app.signalCode === null) {
+    const exited = once(app, 'exit');
+    app.kill();
+    await exited;
+  }
   if (path.resolve(tempRoot).startsWith(path.resolve(os.tmpdir()))) {
     await rm(tempRoot, { recursive: true, force: true });
   }

@@ -30,7 +30,7 @@ const SCHEMA: SchemaSheet[] = [
   { title: 'task_reminders', headers: ['task_id', 'id', 'type', 'value', 'unit', 'sent_at', 'last_sent_at'] },
   { title: 'task_log', headers: ['Мероприятие', 'Блоки', 'Задача', 'Описание', 'ТЗ', 'Статус', 'Приоритет', 'Автор', 'Исполнители', 'Назначена', 'Дедлайн', 'Выполнена', 'Завершил', 'Режим', 'Затрачено, мин', 'Комментарии исполнителей', 'Комментарии координатора', 'Комментарии при завершении', 'Напоминания', 'ID'] },
   { title: 'bot_messages', headers: ['owner_user_id', 'id', 'sender', 'text', 'timestamp', 'buttons_json'] },
-  { title: 'settings', headers: ['key', 'value_json'] },
+  { title: 'settings', headers: ['key', 'value_json', 'chunk_index'] },
   { title: 'audit_log', headers: ['timestamp', 'revision', 'action', 'details'] },
 ];
 
@@ -235,7 +235,7 @@ function stateRows(state: SimulationState) {
     ['settings', json(state.settings || {})],
     ['competencies', json(state.competencies || [])],
     ['facultyCompetencies', json(state.facultyCompetencies || [])],
-  ];
+  ].flatMap(([key, value]) => (value.match(/[\s\S]{1,15000}/gu) || ['']).map((chunk, index) => [key, chunk, index]));
   return new Map<string, unknown[][]>([
     ['snapshot', snapshotRows], ['events', eventRows], ['users', userRows], ['user_avatars', userAvatarRows], ['faculties', facultyRows], ['availability_weeks', availabilityWeekRows],
     ['availability_slots', availabilitySlotRows], ['meetings', meetingRows], ['meeting_participants', meetingParticipantRows],
@@ -257,9 +257,15 @@ export async function exportStateToGoogleSheetsDatabase(
 ) {
   const initialize = dependencies.initialize || initializeGoogleSheetsDatabase;
   const request = dependencies.request || googleSheetsApiRequest;
-  await initialize(config);
   const revision = Number(state.settings?.databaseRevision || 0);
   const rows = stateRows(state);
+  // Validate the entire payload before touching the remote copy; never truncate data.
+  for (const [sheet, values] of rows) {
+    values.forEach((row, rowIndex) => row.forEach((value, columnIndex) => {
+      if (typeof value === 'string' && value.length > 50_000) throw new Error(`Google Sheets cell exceeds 50000 characters: ${sheet}!${columnName(columnIndex)}${rowIndex + 2}`);
+    }));
+  }
+  await initialize(config);
   await request(config, '/values:batchUpdate', { method: 'POST', body: JSON.stringify({
     valueInputOption: 'RAW',
     data: [{ range: `${quoteSheet('meta')}!A1:B7`, values: [
@@ -288,7 +294,9 @@ export async function exportStateToGoogleSheetsDatabase(
     ['source', 'megabot'],
     ['sync_state', 'ready'],
   ] });
-  await request(config, '/values:batchUpdate', { method: 'POST', body: JSON.stringify({ valueInputOption: 'RAW', data }) });
+  // A full snapshot duplicates avatar chunks in the recovery snapshot and domain rows.
+  // Keep reads/metadata at 15s, but allow this bounded large write to finish.
+  await request(config, '/values:batchUpdate', { method: 'POST', signal: AbortSignal.timeout(45_000), body: JSON.stringify({ valueInputOption: 'RAW', data }) });
   await request(config, `/values/${encodeURIComponent(`${quoteSheet('audit_log')}!A:D`)}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`, {
     method: 'POST',
     body: JSON.stringify({ values: [[new Date().toISOString(), revision, action, `tasks=${state.tasks.length};users=${state.users.length};events=${state.events?.length || 0}`]] }),
@@ -309,10 +317,10 @@ function objects(values: unknown[][] | undefined) {
   return values.slice(1).filter((row) => row.some((value) => value !== '' && value !== undefined)).map((row) => Object.fromEntries(headers.map((header, index) => [header, row[index] ?? ''])));
 }
 
-export async function importStateFromGoogleSheetsDatabase(config: GoogleSheetsDatabaseConfig) {
-  await initializeGoogleSheetsDatabase(config);
+export async function importStateFromGoogleSheetsDatabase(config: GoogleSheetsDatabaseConfig, dependencies: GoogleSheetsDatabaseExportDependencies = {}) {
+  await (dependencies.initialize || initializeGoogleSheetsDatabase)(config);
   const ranges = SCHEMA.filter((sheet) => sheet.title !== 'audit_log').map((sheet) => `${quoteSheet(sheet.title)}!A:Z`);
-  const response = await googleSheetsApiRequest(config, `/values:batchGet?majorDimension=ROWS&${ranges.map((range) => `ranges=${encodeURIComponent(range)}`).join('&')}`) as { valueRanges?: { range: string; values?: unknown[][] }[] };
+  const response = await (dependencies.request || googleSheetsApiRequest)(config, `/values:batchGet?majorDimension=ROWS&${ranges.map((range) => `ranges=${encodeURIComponent(range)}`).join('&')}`) as { valueRanges?: { range: string; values?: unknown[][] }[] };
   const valuesByTitle = new Map<string, unknown[][]>();
   (response.valueRanges || []).forEach((valueRange, index) => valuesByTitle.set(SCHEMA.filter((sheet) => sheet.title !== 'audit_log')[index].title, valueRange.values || []));
   const metaRows = objects(valuesByTitle.get('meta'));
@@ -400,7 +408,10 @@ export async function importStateFromGoogleSheetsDatabase(config: GoogleSheetsDa
     if (!messages[owner]) messages[owner] = [];
     messages[owner].push({ id: String(row.id), userId: owner, sender: String(row.sender) as any, text: String(row.text || ''), timestamp: String(row.timestamp || ''), buttons: parseJson<any[]>(row.buttons_json, []) });
   });
-  const settingRows = Object.fromEntries(objects(valuesByTitle.get('settings')).map((row) => [String(row.key), parseJson(row.value_json, null)]));
+  const settingsChunks = objects(valuesByTitle.get('settings'));
+  const settingRows = Object.fromEntries([...new Set(settingsChunks.map(row => String(row.key)))].map(key => [key,
+    parseJson(settingsChunks.filter(row => String(row.key) === key).sort((a, b) => Number(a.chunk_index || 0) - Number(b.chunk_index || 0)).map(row => String(row.value_json || '')).join(''), null),
+  ]));
   const state: SimulationState = {
     users, faculties, facultyCompetencies: (settingRows.facultyCompetencies as string[]) || [], competencies: (settingRows.competencies as string[]) || [],
     availabilities, meetings, events, tasks, messages, settings: { ...((settingRows.settings as SimulationState['settings']) || {}), databaseRevision: Number(meta.revision || 0) },

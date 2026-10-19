@@ -22,8 +22,9 @@ import ru.itmomegabattle.megabot.TestcontainersConfiguration;
 @Testcontainers(disabledWithoutDocker=true)
 class TelegramInboxQueueIntegrationTests {
 	@Autowired TelegramInbox inbox;@Autowired TelegramInboxQueue queue;
+	@Autowired TelegramCommandWorker commands;
 	@Autowired JdbcTemplate jdbc;@Autowired PlatformTransactionManager transactions;
-	@BeforeEach void clear() { jdbc.execute("truncate telegram_inbox,bot_messages"); }
+	@BeforeEach void clear() { jdbc.execute("truncate telegram_inbox,bot_messages,telegram_callback_effects"); }
 	void accept(String bot,long update,long chat) {
 		inbox.accept(bot,("{\"update_id\":"+update+",\"message\":{\"chat\":{\"id\":"+chat+"},\"text\":\"/start\"}}")
 				.getBytes(StandardCharsets.UTF_8));
@@ -31,6 +32,85 @@ class TelegramInboxQueueIntegrationTests {
 	List<TelegramInboxQueue.Lease> claim() { return queue.claim("123",100,Duration.ofSeconds(300)); }
 	String status(String id) { return jdbc.queryForObject("select status from telegram_inbox where id=?",String.class,id); }
 	void effect() { jdbc.update("insert into bot_messages(id,sender,text,occurred_at) values ('fixture','bot','queued response',now())"); }
+	void callback(String bot,long update,long chat,String callback) {
+		inbox.accept(bot,("{\"update_id\":"+update+",\"callback_query\":{\"id\":\""+callback+"\",\"message\":{\"chat\":{\"id\":"+chat+"}}}}")
+				.getBytes(StandardCharsets.UTF_8));
+	}
+	@Test void callbackCopiesWithDifferentUpdatesOrChatsRunEffectOnceAndOtherBotsRemainIndependent() {
+		callback("123",1,51,"same");callback("123",2,52,"same");callback("456",1,51,"same");
+		var count=new java.util.concurrent.atomic.AtomicInteger();
+		for(var lease:claim())assertThat(queue.apply(lease.id(),lease.token(),row->count.incrementAndGet())).isTrue();
+		assertThat(count).hasValue(1);assertThat(jdbc.queryForObject("select count(*) from telegram_callback_effects",Integer.class)).isEqualTo(1);
+		assertThat(jdbc.queryForObject("select count(*) from telegram_inbox where last_error='duplicate_callback' and status='completed'",Integer.class)).isEqualTo(1);
+		var other=queue.claim("456",1,Duration.ofSeconds(30)).getFirst();assertThat(queue.apply(other.id(),other.token(),row->count.incrementAndGet())).isTrue();assertThat(count).hasValue(2);
+		// Raw-payload retention must not erase callback-effect deduplication.
+		jdbc.execute("delete from telegram_inbox where status='completed'");callback("123",3,53,"same");var late=claim().getFirst();
+		assertThat(queue.apply(late.id(),late.token(),row->fail("retained_callback_must_not_repeat"))).isTrue();
+	}
+	@Test void callbackHandlerAndCompletionFailuresRollbackLedgerWithEffectsSoRetryCanApply() {
+		callback("123",1,51,"retry");var lease=claim().getFirst();
+		assertThatThrownBy(()->queue.apply(lease.id(),lease.token(),row->{effect();throw new IllegalStateException("fixture");})).isInstanceOf(IllegalStateException.class);
+		assertThat(jdbc.queryForObject("select count(*) from telegram_callback_effects",Integer.class)).isZero();assertThat(jdbc.queryForObject("select count(*) from bot_messages",Integer.class)).isZero();
+		jdbc.execute("alter table telegram_inbox add constraint fixture_reject_callback_completion check(status<>'completed')");
+		try {
+			assertThatThrownBy(()->queue.apply(lease.id(),lease.token(),row->effect())).isInstanceOf(org.springframework.dao.DataIntegrityViolationException.class);
+			assertThat(jdbc.queryForObject("select count(*) from telegram_callback_effects",Integer.class)).isZero();assertThat(jdbc.queryForObject("select count(*) from bot_messages",Integer.class)).isZero();
+		} finally { jdbc.execute("alter table telegram_inbox drop constraint fixture_reject_callback_completion"); }
+		assertThat(queue.apply(lease.id(),lease.token(),row->effect())).isTrue();
+		assertThat(jdbc.queryForObject("select count(*) from telegram_callback_effects",Integer.class)).isEqualTo(1);
+	}
+	@Test @Timeout(60) void concurrentCallbackCopiesCommitOneEffectAcrossDifferentChatLeases() throws Exception {
+		callback("123",1,51,"race");callback("123",2,52,"race");var leases=claim();
+		try(var pool=Executors.newFixedThreadPool(2)) {
+			var go=new CountDownLatch(1);var results=new ArrayList<Future<Boolean>>();
+			for(var lease:leases)results.add(pool.submit(()->{go.await();return queue.apply(lease.id(),lease.token(),row->effect());}));
+			go.countDown();for(var result:results)assertThat(result.get(15,TimeUnit.SECONDS)).isTrue();
+		}
+		assertThat(jdbc.queryForObject("select count(*) from bot_messages",Integer.class)).isEqualTo(1);
+		assertThat(jdbc.queryForObject("select count(*) from telegram_callback_effects",Integer.class)).isEqualTo(1);
+	}
+	@Test void malformedCallbackIdsNeverConsumeLedgerAndUnsupportedCallbacksRemainRetryable() {
+		for(var id:List.of("null","1","\"\"","\" \"","\""+"я".repeat(129)+"\"")) {
+			clear();inbox.accept("123",("{\"update_id\":1,\"callback_query\":{\"id\":"+id+",\"from\":{\"id\":51}}}").getBytes(StandardCharsets.UTF_8));
+			var lease=claim().getFirst();assertThatThrownBy(()->queue.apply(lease.id(),lease.token(),row->fail("invalid_action"))).isInstanceOf(TelegramInboxQueue.InvalidCallbackId.class);
+			assertThat(jdbc.queryForObject("select count(*) from telegram_callback_effects",Integer.class)).isZero();
+		}
+		clear();callback("123",1,51,"unsupported");var lease=claim().getFirst();
+		assertThatThrownBy(()->queue.apply(lease.id(),lease.token(),row->{throw new TelegramPrivateCommandHandler.UnsupportedCommand();})).isInstanceOf(TelegramPrivateCommandHandler.UnsupportedCommand.class);
+		assertThat(jdbc.queryForObject("select count(*) from telegram_callback_effects",Integer.class)).isZero();
+		assertThat(queue.reject(lease.id(),lease.token(),"unsupported_command",Duration.ofHours(1))).isTrue();assertThat(status(lease.id())).isEqualTo("retry");
+	}
+	@Test void manualWorkerMarksMalformedCallbackIdFailedWithoutExecutingOrWritingLedger() {
+		inbox.accept("123","{\"update_id\":1,\"callback_query\":{\"id\":null,\"from\":{\"id\":51}}}".getBytes(StandardCharsets.UTF_8));
+		assertThat(commands.processOne("123")).isTrue();
+		assertThat(jdbc.queryForObject("select status from telegram_inbox",String.class)).isEqualTo("failed");
+		assertThat(jdbc.queryForObject("select last_error from telegram_inbox",String.class)).isEqualTo("invalid_callback_id");
+		assertThat(jdbc.queryForObject("select count(*) from telegram_callback_effects",Integer.class)).isZero();
+	}
+	@Test @Timeout(60) void leaseExpiryWhileWaitingForCallbackUniquenessRollsBackWithoutActionOrLedger() throws Exception {
+		callback("123",1,51,"wait");var lease=claim().getFirst();
+		jdbc.update("update telegram_inbox set leased_until=clock_timestamp()+interval '2 seconds' where id=?",lease.id());
+		try(var pool=Executors.newSingleThreadExecutor()) {
+			var pending=new ArrayList<Future<Boolean>>();
+			new TransactionTemplate(transactions).executeWithoutResult(tx->{
+				jdbc.update("insert into telegram_callback_effects(bot_id,callback_id,first_inbox_id) values ('123','wait','blocker')");
+				pending.add(pool.submit(()->queue.apply(lease.id(),lease.token(),row->fail("expired_callback_action"))));
+				long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(1);boolean waiting=false;
+				while(System.nanoTime()<deadline) {
+					jdbc.execute("select pg_stat_clear_snapshot()");
+					waiting=jdbc.queryForObject("select exists(select 1 from pg_stat_activity where wait_event='transactionid' and query like '%insert into telegram_callback_effects%')",Boolean.class);
+					if(waiting)break;
+					try { Thread.sleep(20); }catch(InterruptedException e) { Thread.currentThread().interrupt();throw new AssertionError(e); }
+				}
+				assertThat(waiting).isTrue();jdbc.execute("select pg_sleep(2.1)");
+				tx.setRollbackOnly();
+			});
+			assertThatThrownBy(()->pending.getFirst().get(10,TimeUnit.SECONDS)).isInstanceOf(ExecutionException.class)
+					.hasCauseInstanceOf(IllegalStateException.class);
+		}
+		assertThat(jdbc.queryForObject("select count(*) from telegram_callback_effects",Integer.class)).isZero();
+		assertThat(jdbc.queryForObject("select count(*) from bot_messages",Integer.class)).isZero();assertThat(status(lease.id())).isEqualTo("processing");
+	}
 	@Test void batchTakesOnlyHeadsAndDifferentBotsRemainSeparate() {
 		accept("123",1,51);accept("123",2,51);accept("123",3,52);accept("456",1,51);
 		var heads=claim();assertThat(heads).extracting(TelegramInboxQueue.Lease::updateId).containsExactlyInAnyOrder(1L,3L);
