@@ -2021,6 +2021,27 @@ async function startServer() {
     else if (channels[index].seenAt <= channel.seenAt) channels[index] = channel;
   }
 
+  function importChannelTimer() {
+    const filename = path.join(path.dirname(DB_FILE), 'channel-timer-import.json');
+    if (!fs.existsSync(filename)) return;
+    const input = JSON.parse(fs.readFileSync(filename, 'utf8'));
+    const { channelId, title, messageId } = input;
+    const draft = readChannelTimerDraft(input, Date.now(), input);
+    if (!draft || typeof channelId !== 'string' || !/^-100\d{6,13}$/.test(channelId)
+        || typeof title !== 'string' || !title.trim() || !Number.isSafeInteger(messageId) || messageId < 1) {
+      throw new Error('Invalid channel timer import');
+    }
+    if (loadDatabase().settings?.channelTimers?.some(timer => timer.channelId === channelId && timer.messageId === messageId)) return;
+    mutateDatabaseAtomically(state => {
+      const createdAt = Date.now();
+      upsertTimerChannel(state, { id: channelId, title, canPost: true, seenAt: createdAt });
+      (state.settings!.channelTimers ||= []).push({
+        ...draft, id: crypto.randomUUID(), channelId, messageId, createdAt, status: 'running',
+      });
+    });
+    console.info('Imported channel timer', channelId, messageId);
+  }
+
   function timerAdmin(req: express.Request, res: express.Response, next: express.NextFunction) {
     const id = (req as express.Request & { authUserId?: string }).authUserId;
     const admin = loadDatabase().users.find(user => user.role === 'admin' && isUserActive(user)
@@ -2033,7 +2054,7 @@ async function startServer() {
     const { settings } = loadDatabase();
     return {
       channels: knownTimerChannels(settings?.timerChannels || [], settings?.telegramInbox || []),
-      timers: (settings?.channelTimers || []).map(timer => (
+      timers: (settings?.channelTimers || []).filter(timer => timer.status !== 'deleted').map(timer => (
         timer.status === 'publishing' && !timerRequests.has(timer.id)
           ? { ...timer, status: 'unknown', error: 'Проверьте, появился ли пост в канале.' } : timer
       )).reverse(),
@@ -2063,7 +2084,7 @@ async function startServer() {
     const draft = readChannelTimerDraft(body);
     if (!/^[a-f0-9-]{36}$/i.test(id) || !draft) return res.status(400).json({ error: 'Проверьте дату, текст и интервал обновления.' });
     const current = timerPanelSnapshot();
-    if (current.timers.some(timer => timer.id === id)) return res.json(current);
+    if (loadDatabase().settings?.channelTimers?.some(timer => timer.id === id)) return res.json(current);
     const selected = current.channels.find(channel => channel.id === body.channelId);
     if (!selected) return res.status(400).json({ error: 'Выберите известный боту канал.' });
     let channel: TimerChannel;
@@ -2108,18 +2129,22 @@ async function startServer() {
   app.post('/api/admin/channel-timers/update', (req, res) => {
     const body = req.body || {};
     const saved = loadDatabase().settings?.channelTimers?.find(timer => timer.id === body.id);
-    if (!saved?.messageId) return res.status(404).json({ error: 'Опубликованный пост не найден.' });
-    if (channelTimerBusy.has(saved.channelId)) return res.status(409).json({ error: 'Пост обновляется. Повторите через секунду.' });
-    const draft = body.action === 'edit' ? readChannelTimerDraft(body) : undefined;
+    if (!saved?.messageId || saved.status === 'deleted') return res.status(404).json({ error: 'Опубликованный пост не найден.' });
+    if (saved.status === 'deleting') return res.status(409).json({ error: 'Пост удаляется.' });
     const now = Date.now();
-    if (!(draft || (body.action === 'pause' && saved.status === 'running')
+    const draft = body.action === 'edit' ? readChannelTimerDraft(body, now, saved) : undefined;
+    if (!(draft || body.action === 'delete' || (body.action === 'pause' && saved.status === 'running')
         || (body.action === 'resume' && ['paused', 'failed'].includes(saved.status) && saved.deadline > now))) {
       return res.status(400).json({ error: 'Проверьте дату и состояние таймера.' });
     }
     mutateDatabaseAtomically(state => {
       const timer = state.settings!.channelTimers!.find(item => item.id === saved.id)!;
       if (draft) Object.assign(timer, draft);
-      timer.status = body.action === 'pause' || (draft && timer.status === 'paused') ? 'paused' : 'running';
+      timer.version = (timer.version || 0) + 1;
+      timer.status = body.action === 'delete' ? 'deleting'
+        : body.action === 'pause' || (draft && timer.status === 'paused') ? 'paused' : 'running';
+      timer.pausedAt = timer.status === 'paused' ? (timer.pausedAt ?? now) : undefined;
+      timer.pendingEdit = Boolean(draft && timer.status === 'paused');
       timer.error = undefined;
     });
     timerDue.delete(saved.id);
@@ -2131,22 +2156,32 @@ async function startServer() {
     if (isShuttingDown) return;
     const now = Date.now();
     const timers = databaseStateCache?.settings?.channelTimers || [];
-    const due = timers.filter(timer => timer.status === 'running' && timer.messageId && (timerDue.get(timer.id) || 0) <= now)
+    const due = timers.filter(timer => (timer.status === 'running' || timer.status === 'deleting' || timer.pendingEdit)
+      && timer.messageId && (timerDue.get(timer.id) || 0) <= now)
       .sort((a, b) => (timerDue.get(a.id) || 0) - (timerDue.get(b.id) || 0));
     await Promise.all(due.map(async timer => {
       if (channelTimerBusy.has(timer.channelId) || (channelTimerBackoff.get(timer.channelId) || 0) > now) return;
       channelTimerBusy.add(timer.channelId);
       timerDue.set(timer.id, now + timer.interval * 1000);
       try {
-        const finished = now >= timer.deadline;
-        const text = (finished && timer.finalText) || renderChannelTimer(timer.template, timer.deadline, now);
-        if (!finished && timerText.get(timer.id) === text) {
+        const deleting = timer.status === 'deleting';
+        const paused = timer.status === 'paused';
+        const finished = !paused && now >= timer.deadline;
+        const text = (finished && timer.finalText) || renderChannelTimer(timer.template, timer.deadline, paused ? timer.pausedAt : now);
+        if (!deleting && !paused && !finished && timerText.get(timer.id) === text) {
           timerDue.set(timer.id, Math.min(timerDue.get(timer.id)!, timer.deadline));
           return;
         }
-        const result = await timerTelegram('editMessageText', { chat_id: timer.channelId, message_id: timer.messageId, text });
-        const success = result.ok || /message is not modified/i.test(result.description || '');
-        if (success && !finished) {
+        const result = deleting
+          ? await timerTelegram('deleteMessages', { chat_id: timer.channelId, message_ids: [timer.messageId] })
+          : await timerTelegram('editMessageText', { chat_id: timer.channelId, message_id: timer.messageId, text });
+        const latest = databaseStateCache?.settings?.channelTimers?.find(item => item.id === timer.id);
+        if (result.error_code === 429) {
+          channelTimerBackoff.set(timer.channelId, Date.now() + (result.parameters?.retry_after || 5) * 1000);
+        }
+        if (latest?.version !== timer.version) return;
+        const success = result.ok || (!deleting && /message is not modified/i.test(result.description || ''));
+        if (success && !finished && !deleting && !paused) {
           timerText.set(timer.id, text);
           timerDue.set(timer.id, Math.min(timerDue.get(timer.id)!, timer.deadline));
           return;
@@ -2155,8 +2190,11 @@ async function startServer() {
         if (success || stopped) {
           mutateDatabaseAtomically(state => {
             const current = state.settings!.channelTimers!.find(item => item.id === timer.id)!;
-            current.status = success ? 'finished' : 'failed';
-            current.error = stopped ? 'Telegram отклонил обновление (код ' + result.error_code + '). Проверьте пост и права бота.' : undefined;
+            current.status = success ? (deleting ? 'deleted' : paused ? 'paused' : 'finished') : deleting ? 'paused' : 'failed';
+            current.pendingEdit = false;
+            current.error = stopped ? deleting
+              ? 'Telegram не удалил пост. Проверьте права бота и возраст поста или удалите его вручную.'
+              : 'Telegram отклонил обновление (код ' + result.error_code + '). Проверьте пост и права бота.' : undefined;
           });
           timerDue.delete(timer.id);
           timerText.delete(timer.id);
@@ -2166,7 +2204,8 @@ async function startServer() {
           if (result.error_code === 429) channelTimerBackoff.set(timer.channelId, retryAt);
         }
       } catch {
-        timerDue.set(timer.id, Date.now() + 5000);
+        const latest = databaseStateCache?.settings?.channelTimers?.find(item => item.id === timer.id);
+        if (latest?.version === timer.version) timerDue.set(timer.id, Date.now() + 5000);
       } finally {
         channelTimerBusy.delete(timer.channelId);
       }
@@ -7443,6 +7482,8 @@ async function startServer() {
         console.error('Could not persist previously discovered Telegram channels');
       }
     }
+    try { importChannelTimer(); }
+    catch { console.error('Could not import the existing channel timer'); }
     setInterval(() => { void tickChannelTimers().catch(() => console.error('Channel timer tick failed')); }, 1000);
     setInterval(() => {
       sendDueBirthdayReminders().catch((error) => console.error('Birthday reminder check failed:', error));

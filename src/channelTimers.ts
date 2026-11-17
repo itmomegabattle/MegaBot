@@ -24,9 +24,12 @@ export interface ChannelTimer extends ChannelTimerDraft {
   channelId: string;
   deadline: number;
   createdAt: number;
-  status: 'publishing' | 'running' | 'paused' | 'finished' | 'failed' | 'unknown';
+  status: 'publishing' | 'running' | 'paused' | 'finished' | 'failed' | 'unknown' | 'deleting' | 'deleted';
   messageId?: number;
   error?: string;
+  version?: number;
+  pausedAt?: number;
+  pendingEdit?: boolean;
 }
 
 export function renderChannelTimer(template: string, deadline: number, now = Date.now()) {
@@ -42,12 +45,13 @@ export function renderChannelTimer(template: string, deadline: number, now = Dat
     (_, key: keyof typeof values) => String(values[key]));
 }
 
-export function readChannelTimerDraft(input: Record<string, unknown>, now = Date.now()) {
+export function readChannelTimerDraft(input: Record<string, unknown>, now = Date.now(), existing?: ChannelTimerDraft) {
   const { date, time, interval } = input;
   if (typeof date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(date)
       || typeof time !== 'string' || !/^\d{2}:\d{2}$/.test(time)) return;
   const instant = projectDateTimeInstant(date, time);
-  if (!instant || instant.getTime() <= now || instant.getTime() - now > 366 * 86400000) return;
+  if (!instant || (instant.getTime() <= now && !(existing?.date === date && existing.time === time))
+      || instant.getTime() - now > 366 * 86400000) return;
   if (!timerIntervals.some(value => value === interval)) return;
   const template = typeof input.template === 'string' ? input.template.trim() : '';
   const finalText = typeof input.finalText === 'string' ? input.finalText.trim() : '';

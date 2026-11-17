@@ -10,7 +10,7 @@ const presets = {
   short: 'До начала: {days} дн. {hours} ч. {minutes} мин.',
 };
 const initial: ChannelTimerDraft = { date: '', time: '19:00', template: presets.concert, finalText: '', interval: 1 };
-const labels = { publishing: 'Публикуется', running: 'Идёт отсчёт', paused: 'На паузе', finished: 'Завершён', failed: 'Ошибка', unknown: 'Проверьте публикацию' };
+const labels = { publishing: 'Публикуется', running: 'Идёт отсчёт', paused: 'На паузе', finished: 'Завершён', failed: 'Ошибка', unknown: 'Проверьте публикацию', deleting: 'Удаляется из канала', deleted: 'Удалён' };
 const field = 'w-full rounded-xl border border-blue-100 bg-white px-3 py-2 text-sm text-slate-900';
 const button = 'min-h-10 rounded-xl border border-blue-200 px-3 py-2 text-sm font-bold text-[#005BC4] disabled:opacity-50';
 const primary = 'min-h-11 rounded-xl bg-[#0069E0] px-4 py-2 text-sm font-bold text-white disabled:opacity-50';
@@ -42,7 +42,17 @@ export function ChannelTimersPanel() {
   const publishId = useRef('');
   const locked = useRef(false);
   const selected = snapshot.channels.find(channel => channel.id === channelId);
-  const validDraft = readChannelTimerDraft({ ...draft }, now);
+  const validDraft = readChannelTimerDraft({ ...draft }, now, editing);
+  const deleting = snapshot.timers.some(timer => timer.status === 'deleting');
+  useEffect(() => {
+    if (!deleting) return;
+    const poll = setInterval(() => {
+      if (!locked.current) void api().then(data => {
+        if (!locked.current) setSnapshot(data);
+      }).catch(() => {});
+    }, 2000);
+    return () => clearInterval(poll);
+  }, [deleting]);
 
   useEffect(() => {
     let live = true;
@@ -104,7 +114,7 @@ export function ChannelTimersPanel() {
       return;
     }
     if (item.status === 'publishing') { setNotice('Запрос уже выполняется. Обновите список.'); return; }
-    setNotice(editing ? 'Настройки сохранены.' : 'Пост опубликован.');
+    setNotice(editing ? 'Изменения сохранены. Бот применит их к посту при ближайшем обновлении.' : 'Пост опубликован.');
     setEditing(undefined);
     setReviewing(false);
     publishId.current = '';
@@ -195,15 +205,23 @@ export function ChannelTimersPanel() {
           <strong>{snapshot.channels.find(channel => channel.id === timer.channelId)?.title || timer.channelId}</strong>
           <span>{labels[timer.status]} · {timer.date} {timer.time} МСК</span>
         </div>
-        <p className="whitespace-pre-wrap break-words text-sm">{renderChannelTimer(timer.template, timer.deadline, now).slice(0, 180)}</p>
+        <p className="whitespace-pre-wrap break-words text-sm">{(timer.status === 'finished' && timer.finalText
+          || renderChannelTimer(timer.template, timer.deadline, timer.pausedAt ?? now)).slice(0, 180)}</p>
         {timer.error && <p className="text-sm text-rose-700">{timer.error}</p>}
         <div className="flex flex-wrap gap-2">
           {timer.messageId && <>
             <a className={button} href={channelTimerLink(timer.channelId, timer.messageId)} target="_blank" rel="noreferrer">Открыть пост</a>
-            <button className={button} type="button" disabled={busy} onClick={() => {
+            <button className={button} type="button" disabled={busy || timer.status === 'deleting'} onClick={() => {
               setEditing(timer); setChannelId(timer.channelId); setDraft(timer); setReviewing(false);
               templateInput.current?.scrollIntoView({ block: 'center' });
             }}>Править</button>
+            <button className={button + ' border-rose-200 text-rose-700'} type="button"
+              disabled={busy || timer.status === 'deleting'} onClick={() => {
+                if (!window.confirm('Остановить таймер и удалить пост из Telegram-канала?')) return;
+                void run('/update', { id: timer.id, action: 'delete' }).then(data => {
+                  if (data && editing?.id === timer.id) { setEditing(undefined); setDraft(initial); }
+                });
+              }}>Удалить пост</button>
           </>}
           {(timer.status === 'running' || (timer.messageId && ['paused', 'failed'].includes(timer.status) && timer.deadline > now)) &&
             <button className={button} type="button" disabled={busy} onClick={() => void run('/update', {
