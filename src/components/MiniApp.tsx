@@ -1,3 +1,4 @@
+import { ChannelTimersPanel } from './ChannelTimersPanel.js';
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import {
   CalendarDots,
@@ -454,7 +455,7 @@ export default function MiniApp({
   const [calmBackground, setCalmBackground] = useState(() => (
     window.localStorage.getItem('megabattle-calm-background') === 'true'
   ));
-  const [adminSection, setAdminSection] = useState<'team' | 'events' | 'slots' | 'meetings' | 'tasks' | 'faculties'>('team');
+  const [adminSection, setAdminSection] = useState<'team' | 'events' | 'slots' | 'meetings' | 'tasks' | 'faculties' | 'timers'>('team');
   const [showEventForm, setShowEventForm] = useState(false);
   const [editingEventId, setEditingEventId] = useState<string | null>(null);
   const [eventName, setEventName] = useState('');
@@ -2627,7 +2628,7 @@ export default function MiniApp({
         {isAdminPanel && (
           <section className="space-y-4">
             <div className="mega-admin-tabs rounded-2xl border border-blue-100 bg-white p-1.5 shadow-sm" role="tablist" aria-label="Разделы админской панели">
-              <div className="grid grid-cols-2 gap-1 min-[480px]:grid-cols-3 sm:grid-cols-6">
+              <div className="grid grid-cols-2 gap-1 min-[480px]:grid-cols-3 sm:grid-cols-7">
                 {([
                   ['team', 'Команда'],
                   ['events', 'Мероприятия'],
@@ -2635,6 +2636,7 @@ export default function MiniApp({
                   ['meetings', 'Встречи'],
                   ['tasks', 'Задачи'],
                   ['faculties', 'Факультеты'],
+                  ['timers', 'Таймеры'],
                 ] as const).map(([section, label]) => (
                   <button
                     key={section}
@@ -2649,6 +2651,8 @@ export default function MiniApp({
                 ))}
               </div>
             </div>
+
+            {adminSection === 'timers' && <ChannelTimersPanel key={currentUser.id} />}
 
             {adminSection === 'events' && (
               <div className="space-y-4">

@@ -185,6 +185,8 @@ export function sanitizeSimulationState(input: SimulationState, baseWeekStart = 
         lastError: optionalText(item.lastError), processedAt: optionalText(item.processedAt),
         updatedAt: text(item.updatedAt) || new Date().toISOString(),
       })),
+    timerChannels: Array.isArray(input.settings?.timerChannels) ? structuredClone(input.settings.timerChannels) : undefined,
+    channelTimers: Array.isArray(input.settings?.channelTimers) ? structuredClone(input.settings.channelTimers) : undefined,
     databaseRevision: Math.max(0, Number(input.settings?.databaseRevision || 0)),
     idempotencyRecords: (input.settings?.idempotencyRecords || [])
       .filter((record) => record && text(record.key) && text(record.actorId) && text(record.operation) && /^[a-f0-9]{64}$/.test(text(record.bodyHash)))

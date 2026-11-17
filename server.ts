@@ -1,4 +1,5 @@
-﻿import dotenv from 'dotenv';
+﻿import { channelFromMembership, knownTimerChannels, readChannelTimerDraft, renderChannelTimer, type ChannelTimer, type TimerChannel } from './src/channelTimers.js';
+import dotenv from 'dotenv';
 dotenv.config();
 
 import express from 'express';
@@ -1133,6 +1134,8 @@ function saveDatabase(state: SimulationState, options: { changedMeetingIds?: Ite
     const incomingRevision = Math.max(0, Number(cleanState.settings.databaseRevision || 0));
     const currentRevision = Math.max(0, Number(databaseStateCache?.settings?.databaseRevision || 0));
     if (databaseStateCache && currentRevision > incomingRevision) {
+      cleanState.settings.timerChannels = databaseStateCache.settings?.timerChannels;
+      cleanState.settings.channelTimers = databaseStateCache.settings?.channelTimers;
       // Async requests may save stale clones after another request has committed.
       // Preserve every meeting except the records explicitly changed by this save.
       const changedMeetingIds = new Set(options.changedMeetingIds || []);
@@ -1975,6 +1978,200 @@ async function startServer() {
       timeZone: PROJECT_TIME_ZONE,
     });
   });
+
+  const timerRequests = new Set<string>();
+  const timerDue = new Map<string, number>();
+  const timerText = new Map<string, string>();
+  const channelTimerBusy = new Set<string>();
+  const channelTimerBackoff = new Map<string, number>();
+
+  async function timerTelegram(method: string, body: object) {
+    const base = process.env.TELEGRAM_API_BASE || 'https://api.telegram.org';
+    const token = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
+    if (!token) throw new Error('Токен бота не настроен.');
+    try {
+      const response = await telegramFetch(`${base}/bot${token}/${method}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      });
+      return await response.json() as {
+        ok: boolean; result?: any; error_code?: number; description?: string; parameters?: { retry_after?: number };
+      };
+    } catch {
+      throw new Error('Telegram не ответил. Проверьте канал перед повторной публикацией.');
+    }
+  }
+
+  async function lookupTimerChannel(reference: string): Promise<TimerChannel> {
+    const [chat, bot] = await Promise.all([timerTelegram('getChat', { chat_id: reference }), timerTelegram('getMe', {})]);
+    if (!chat.ok || !bot.ok || chat.result?.type !== 'channel') throw new Error('Канал не найден. Проверьте адрес и добавьте в него бота.');
+    const member = await timerTelegram('getChatMember', { chat_id: chat.result.id, user_id: bot.result.id });
+    if (!member.ok || ['left', 'kicked'].includes(member.result?.status)) throw new Error('Добавьте бота в канал.');
+    return {
+      id: String(chat.result.id), title: chat.result.title, username: chat.result.username, seenAt: Date.now(),
+      canPost: member.result?.status === 'creator'
+        || (member.result?.status === 'administrator' && member.result.can_post_messages === true),
+    };
+  }
+
+  function upsertTimerChannel(state: SimulationState, channel: TimerChannel) {
+    state.settings ||= {};
+    const channels = state.settings.timerChannels ||= [];
+    const index = channels.findIndex(item => item.id === channel.id);
+    if (index < 0) channels.push(channel);
+    else if (channels[index].seenAt <= channel.seenAt) channels[index] = channel;
+  }
+
+  function timerAdmin(req: express.Request, res: express.Response, next: express.NextFunction) {
+    const id = (req as express.Request & { authUserId?: string }).authUserId;
+    const admin = loadDatabase().users.find(user => user.role === 'admin' && isUserActive(user)
+      && (user.id === id || (!id && process.env.NODE_ENV !== 'production')));
+    if (!admin) return res.status(403).json({ error: 'Раздел доступен только администратору.' });
+    next();
+  }
+
+  function timerPanelSnapshot() {
+    const { settings } = loadDatabase();
+    return {
+      channels: knownTimerChannels(settings?.timerChannels || [], settings?.telegramInbox || []),
+      timers: (settings?.channelTimers || []).map(timer => (
+        timer.status === 'publishing' && !timerRequests.has(timer.id)
+          ? { ...timer, status: 'unknown', error: 'Проверьте, появился ли пост в канале.' } : timer
+      )).reverse(),
+    };
+  }
+
+  app.use('/api/admin/channel-timers', timerAdmin);
+  app.get('/api/admin/channel-timers', (_req, res) => res.json(timerPanelSnapshot()));
+  function timerRoute(handler: (req: express.Request, res: express.Response) => Promise<unknown>): express.RequestHandler {
+    return (req, res, next) => { void handler(req, res).catch(next); };
+  }
+  app.post('/api/admin/channel-timers/channel', timerRoute(async (req, res) => {
+    const ref = String(req.body?.reference || '').trim().replace(/^https?:\/\/t\.me\//i, '@').replace(/\/$/, '');
+    if (!/^(@[a-z0-9_]{5,32}|-100\d{6,13})$/i.test(ref)) {
+      return res.status(400).json({ error: 'Укажите @username, публичную ссылку или числовой ID канала.' });
+    }
+    let channel: TimerChannel;
+    try { channel = await lookupTimerChannel(ref); }
+    catch (error) { return res.status(422).json({ error: (error as Error).message }); }
+    mutateDatabaseAtomically(state => upsertTimerChannel(state, channel));
+    return res.json({ ...timerPanelSnapshot(), selected: channel.id });
+  }));
+
+  app.post('/api/admin/channel-timers/publish', timerRoute(async (req, res) => {
+    const body = req.body || {};
+    const id = typeof body.id === 'string' ? body.id : '';
+    const draft = readChannelTimerDraft(body);
+    if (!/^[a-f0-9-]{36}$/i.test(id) || !draft) return res.status(400).json({ error: 'Проверьте дату, текст и интервал обновления.' });
+    const current = timerPanelSnapshot();
+    if (current.timers.some(timer => timer.id === id)) return res.json(current);
+    const selected = current.channels.find(channel => channel.id === body.channelId);
+    if (!selected) return res.status(400).json({ error: 'Выберите известный боту канал.' });
+    let channel: TimerChannel;
+    try { channel = await lookupTimerChannel(selected.id); }
+    catch (error) { return res.status(422).json({ error: (error as Error).message }); }
+    const created = mutateDatabaseAtomically(state => {
+      upsertTimerChannel(state, channel);
+      if (!channel.canPost || draft.deadline <= Date.now()) return false;
+      const timers = state.settings!.channelTimers ||= [];
+      if (timers.some(timer => timer.id === id)) return false;
+      timers.push({ ...draft, id, channelId: channel.id, createdAt: Date.now(), status: 'publishing' });
+      return true;
+    }).value;
+    if (!channel.canPost) return res.status(422).json({ error: 'Выдайте боту право публиковать сообщения в канале.' });
+    if (!created) {
+      const snapshot = timerPanelSnapshot();
+      return snapshot.timers.some(timer => timer.id === id) ? res.json(snapshot)
+        : res.status(409).json({ error: 'Срок уже наступил. Выберите новую дату.' });
+    }
+    timerRequests.add(id);
+    let change: Partial<ChannelTimer>;
+    try {
+      const sent = await timerTelegram('sendMessage', {
+        chat_id: channel.id, text: renderChannelTimer(draft.template, draft.deadline),
+      });
+      change = sent.ok && Number.isSafeInteger(sent.result?.message_id)
+        ? { status: 'running', messageId: sent.result.message_id }
+        : sent.error_code && sent.error_code < 500
+          ? { status: 'failed', error: 'Telegram отклонил публикацию (код ' + sent.error_code + ').' }
+          : { status: 'unknown', error: 'Проверьте, появился ли пост в канале.' };
+    } catch {
+      change = { status: 'unknown', error: 'Проверьте, появился ли пост в канале.' };
+    }
+    try {
+      mutateDatabaseAtomically(state => Object.assign(state.settings!.channelTimers!.find(timer => timer.id === id)!, change));
+    } finally {
+      timerRequests.delete(id);
+    }
+    return res.json(timerPanelSnapshot());
+  }));
+
+  app.post('/api/admin/channel-timers/update', (req, res) => {
+    const body = req.body || {};
+    const saved = loadDatabase().settings?.channelTimers?.find(timer => timer.id === body.id);
+    if (!saved?.messageId) return res.status(404).json({ error: 'Опубликованный пост не найден.' });
+    if (channelTimerBusy.has(saved.channelId)) return res.status(409).json({ error: 'Пост обновляется. Повторите через секунду.' });
+    const draft = body.action === 'edit' ? readChannelTimerDraft(body) : undefined;
+    const now = Date.now();
+    if (!(draft || (body.action === 'pause' && saved.status === 'running')
+        || (body.action === 'resume' && ['paused', 'failed'].includes(saved.status) && saved.deadline > now))) {
+      return res.status(400).json({ error: 'Проверьте дату и состояние таймера.' });
+    }
+    mutateDatabaseAtomically(state => {
+      const timer = state.settings!.channelTimers!.find(item => item.id === saved.id)!;
+      if (draft) Object.assign(timer, draft);
+      timer.status = body.action === 'pause' || (draft && timer.status === 'paused') ? 'paused' : 'running';
+      timer.error = undefined;
+    });
+    timerDue.delete(saved.id);
+    timerText.delete(saved.id);
+    return res.json(timerPanelSnapshot());
+  });
+
+  async function tickChannelTimers() {
+    if (isShuttingDown) return;
+    const now = Date.now();
+    const timers = databaseStateCache?.settings?.channelTimers || [];
+    const due = timers.filter(timer => timer.status === 'running' && timer.messageId && (timerDue.get(timer.id) || 0) <= now)
+      .sort((a, b) => (timerDue.get(a.id) || 0) - (timerDue.get(b.id) || 0));
+    await Promise.all(due.map(async timer => {
+      if (channelTimerBusy.has(timer.channelId) || (channelTimerBackoff.get(timer.channelId) || 0) > now) return;
+      channelTimerBusy.add(timer.channelId);
+      timerDue.set(timer.id, now + timer.interval * 1000);
+      try {
+        const finished = now >= timer.deadline;
+        const text = (finished && timer.finalText) || renderChannelTimer(timer.template, timer.deadline, now);
+        if (!finished && timerText.get(timer.id) === text) {
+          timerDue.set(timer.id, Math.min(timerDue.get(timer.id)!, timer.deadline));
+          return;
+        }
+        const result = await timerTelegram('editMessageText', { chat_id: timer.channelId, message_id: timer.messageId, text });
+        const success = result.ok || /message is not modified/i.test(result.description || '');
+        if (success && !finished) {
+          timerText.set(timer.id, text);
+          timerDue.set(timer.id, Math.min(timerDue.get(timer.id)!, timer.deadline));
+          return;
+        }
+        const stopped = !success && [400, 401, 403].includes(result.error_code || 0);
+        if (success || stopped) {
+          mutateDatabaseAtomically(state => {
+            const current = state.settings!.channelTimers!.find(item => item.id === timer.id)!;
+            current.status = success ? 'finished' : 'failed';
+            current.error = stopped ? 'Telegram отклонил обновление (код ' + result.error_code + '). Проверьте пост и права бота.' : undefined;
+          });
+          timerDue.delete(timer.id);
+          timerText.delete(timer.id);
+        } else {
+          const retryAt = Date.now() + Math.max(timer.interval, result.parameters?.retry_after || 5) * 1000;
+          timerDue.set(timer.id, retryAt);
+          if (result.error_code === 429) channelTimerBackoff.set(timer.channelId, retryAt);
+        }
+      } catch {
+        timerDue.set(timer.id, Date.now() + 5000);
+      } finally {
+        channelTimerBusy.delete(timer.channelId);
+      }
+    }));
+  }
 
   app.get('/api/admin/diagnostics', (req, res) => {
     const state = loadDatabase();
@@ -3773,6 +3970,13 @@ async function startServer() {
   async function handleTelegramUpdate(update: any) {
     const res = { json: <T>(body: T) => body };
 
+    const timerChannel = channelFromMembership(update);
+    if (timerChannel) {
+      mutateDatabaseAtomically(state => {
+        state.settings ||= {};
+        upsertTimerChannel(state, timerChannel);
+      });
+    }
     const membershipUpdate = update.chat_member || update.my_chat_member;
     if (membershipUpdate?.chat && membershipUpdate?.new_chat_member?.user) {
       const status = String(membershipUpdate.new_chat_member.status || '');
@@ -7230,6 +7434,16 @@ async function startServer() {
     sendDueBirthdayReminders().catch((error) => console.error('Birthday reminder check failed:', error));
     sendTaskReminders().catch((error) => console.error('Task reminder check failed:', error));
     flushPendingImportantNotifications().catch((error) => console.error('Notification delivery flush failed:', error));
+    const timerSettings = databaseStateCache?.settings;
+    const channels = knownTimerChannels(timerSettings?.timerChannels || [], timerSettings?.telegramInbox || []);
+    if (JSON.stringify(channels) !== JSON.stringify(timerSettings?.timerChannels || [])) {
+      try {
+        mutateDatabaseAtomically(state => channels.forEach(channel => upsertTimerChannel(state, channel)));
+      } catch {
+        console.error('Could not persist previously discovered Telegram channels');
+      }
+    }
+    setInterval(() => { void tickChannelTimers().catch(() => console.error('Channel timer tick failed')); }, 1000);
     setInterval(() => {
       sendDueBirthdayReminders().catch((error) => console.error('Birthday reminder check failed:', error));
     }, 15 * 60 * 1000);

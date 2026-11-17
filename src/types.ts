@@ -177,6 +177,8 @@ export interface SimulationState {
       overloaded: boolean;
       oldestPendingAt?: string;
     };
+    timerChannels?: import('./channelTimers.js').TimerChannel[];
+    channelTimers?: import('./channelTimers.js').ChannelTimer[];
     telegramInbox?: TelegramInboxEntry[];
     databaseRevision?: number;
     idempotencyRecords?: Array<{
