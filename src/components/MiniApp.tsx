@@ -2835,7 +2835,7 @@ export default function MiniApp({
                         </button>
                         {showMeetingExtras && (
                           <div id="meeting-extra-fields" className="mt-3 space-y-3">
-                            <Field label="Описание — необязательно"><textarea value={meetingDescription} onChange={(event) => setMeetingDescription(event.target.value)} className={inputClass} rows={3} /></Field>
+                            <Field label="Описание"><textarea value={meetingDescription} onChange={(event) => setMeetingDescription(event.target.value)} className={inputClass} rows={3} /></Field>
                           </div>
                         )}
                       </div>
@@ -3400,7 +3400,7 @@ export default function MiniApp({
                   </button>
                   {showMeetingExtras && (
                     <div id="meeting-extra-fields" className="mt-3 space-y-3">
-                      <Field label="Описание — необязательно">
+                      <Field label="Описание">
                         <textarea value={meetingDescription} onChange={(event) => setMeetingDescription(event.target.value)} className={inputClass} rows={3} />
                       </Field>
                     </div>
