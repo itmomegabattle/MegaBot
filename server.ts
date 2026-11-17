@@ -2108,7 +2108,7 @@ async function startServer() {
     let change: Partial<ChannelTimer>;
     try {
       const sent = await timerTelegram('sendMessage', {
-        chat_id: channel.id, text: renderChannelTimer(draft.template, draft.deadline),
+        chat_id: channel.id, text: renderChannelTimer(draft.template, draft.deadline, Date.now(), draft.emojiDigits),
       });
       change = sent.ok && Number.isSafeInteger(sent.result?.message_id)
         ? { status: 'running', messageId: sent.result.message_id }
@@ -2167,7 +2167,8 @@ async function startServer() {
         const deleting = timer.status === 'deleting';
         const paused = timer.status === 'paused';
         const finished = !paused && now >= timer.deadline;
-        const text = (finished && timer.finalText) || renderChannelTimer(timer.template, timer.deadline, paused ? timer.pausedAt : now);
+        const text = (finished && timer.finalText)
+          || renderChannelTimer(timer.template, timer.deadline, paused ? timer.pausedAt : now, timer.emojiDigits);
         if (!deleting && !paused && !finished && timerText.get(timer.id) === text) {
           timerDue.set(timer.id, Math.min(timerDue.get(timer.id)!, timer.deadline));
           return;

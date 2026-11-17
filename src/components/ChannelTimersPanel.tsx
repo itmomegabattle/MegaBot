@@ -152,7 +152,7 @@ export function ChannelTimersPanel() {
           {snapshot.channels.map(channel => <option key={channel.id} value={channel.id} disabled={!channel.canPost && !editing}>{channel.title}</option>)}
         </select>
       </label>
-      <div className="grid gap-2 sm:grid-cols-3">
+      <div className="grid gap-2 sm:grid-cols-2">
         <label className="block min-w-0 text-sm font-bold">Дата окончания
           <input className={field} type="date" required value={draft.date} onChange={event => updateDraft('date', event.target.value)} />
         </label>
@@ -162,6 +162,13 @@ export function ChannelTimersPanel() {
         <label className="block text-sm font-bold">Обновлять
           <select className={field} value={draft.interval} onChange={event => updateDraft('interval', Number(event.target.value))}>
             {timerIntervals.map(interval => <option key={interval} value={interval}>{interval < 60 ? 'Раз в ' + interval + ' с' : 'Раз в ' + interval / 60 + ' мин'}</option>)}
+          </select>
+        </label>
+        <label className="block text-sm font-bold">Цифры таймера
+          <select className={field} value={draft.emojiDigits ? 'emoji' : 'plain'}
+            onChange={event => updateDraft('emojiDigits', event.target.value === 'emoji')}>
+            <option value="plain">Обычные · 12</option>
+            <option value="emoji">Эмодзи · 1️⃣2️⃣</option>
           </select>
         </label>
       </div>
@@ -185,7 +192,7 @@ export function ChannelTimersPanel() {
       <div className="rounded-2xl bg-[#EDF5FF] p-3 text-slate-900">
         <h3 className="text-sm font-black">{reviewing ? 'Публикация в «' + selected?.title + '»' : 'Предпросмотр'}</h3>
         <p className="mt-2 whitespace-pre-wrap break-words text-sm">{validDraft
-          ? renderChannelTimer(draft.template, validDraft.deadline, now) : 'Выберите будущую дату и добавьте в текст значение таймера.'}</p>
+          ? renderChannelTimer(draft.template, validDraft.deadline, now, draft.emojiDigits) : 'Проверьте дату, текст и длину поста.'}</p>
       </div>
       <div className="flex flex-wrap gap-2">
         <button className={primary} disabled={busy || !validDraft || !selected || (!editing && !selected.canPost)}>
@@ -206,7 +213,7 @@ export function ChannelTimersPanel() {
           <span>{labels[timer.status]} · {timer.date} {timer.time} МСК</span>
         </div>
         <p className="whitespace-pre-wrap break-words text-sm">{(timer.status === 'finished' && timer.finalText
-          || renderChannelTimer(timer.template, timer.deadline, timer.pausedAt ?? now)).slice(0, 180)}</p>
+          || renderChannelTimer(timer.template, timer.deadline, timer.pausedAt ?? now, timer.emojiDigits)).slice(0, 180)}</p>
         {timer.error && <p className="text-sm text-rose-700">{timer.error}</p>}
         <div className="flex flex-wrap gap-2">
           {timer.messageId && <>

@@ -17,6 +17,7 @@ export interface ChannelTimerDraft {
   template: string;
   finalText: string;
   interval: number;
+  emojiDigits?: boolean;
 }
 
 export interface ChannelTimer extends ChannelTimerDraft {
@@ -32,7 +33,11 @@ export interface ChannelTimer extends ChannelTimerDraft {
   pendingEdit?: boolean;
 }
 
-export function renderChannelTimer(template: string, deadline: number, now = Date.now()) {
+function asEmojiDigits(value: string) {
+  return value.replace(/[0-9]/g, digit => digit + '\uFE0F\u20E3');
+}
+
+export function renderChannelTimer(template: string, deadline: number, now = Date.now(), emojiDigits = false) {
   const remaining = Math.max(0, Math.ceil((deadline - now) / 1000));
   const days = Math.floor(remaining / 86400);
   const totalHours = Math.floor(remaining / 3600);
@@ -42,7 +47,7 @@ export function renderChannelTimer(template: string, deadline: number, now = Dat
   const clock = [totalHours, minutes, seconds].map(value => String(value).padStart(2, '0')).join(':');
   const values = { days, hours, minutes, seconds, clock, totalHours };
   return template.replace(/\{(days|hours|minutes|seconds|clock|totalHours)\}/g,
-    (_, key: keyof typeof values) => String(values[key]));
+    (_, key: keyof typeof values) => emojiDigits ? asEmojiDigits(String(values[key])) : String(values[key]));
 }
 
 export function readChannelTimerDraft(input: Record<string, unknown>, now = Date.now(), existing?: ChannelTimerDraft) {
@@ -55,10 +60,12 @@ export function readChannelTimerDraft(input: Record<string, unknown>, now = Date
   if (!timerIntervals.some(value => value === interval)) return;
   const template = typeof input.template === 'string' ? input.template.trim() : '';
   const finalText = typeof input.finalText === 'string' ? input.finalText.trim() : '';
+  const emojiDigits = input.emojiDigits === true;
+  const longestValue = emojiDigits ? asEmojiDigits('0000:00:00') : '0000:00:00';
   if (!template || template.length > 3800 || finalText.length > 4096
       || !timerFields.some(field => template.includes('{' + field + '}'))
-      || template.replace(/\{(?:days|hours|minutes|seconds|clock|totalHours)\}/g, '0000:00:00').length > 4096) return;
-  return { date, time, template, finalText, interval: Number(interval), deadline: instant.getTime() };
+      || template.replace(/\{(?:days|hours|minutes|seconds|clock|totalHours)\}/g, longestValue).length > 4096) return;
+  return { date, time, template, finalText, interval: Number(interval), deadline: instant.getTime(), emojiDigits };
 }
 
 export function channelFromMembership(update: Record<string, any>): TimerChannel | undefined {
