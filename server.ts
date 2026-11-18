@@ -1,3 +1,4 @@
+import { renderRichTaskNotification } from './src/telegramRichTasks.js';
 ﻿import { channelFromMembership, knownTimerChannels, readChannelTimerDraft, renderChannelTimer, type ChannelTimer, type TimerChannel } from './src/channelTimers.js';
 import dotenv from 'dotenv';
 dotenv.config();
@@ -83,7 +84,7 @@ const telegramProxyAgent = proxyUrl ? new ProxyAgent(proxyUrl) : null;
 function telegramFetch(input: string, init: RequestInit = {}) {
   const url = String(input);
   const isLongPoll = url.includes('/getUpdates');
-  const isSendMessage = url.includes('/sendMessage');
+  const isSendMessage = url.includes('/sendMessage') || url.includes('/sendRichMessage');
   const timeoutMs = isLongPoll ? 40000 : 10000;
   // A timed-out sendMessage may already have been accepted by Telegram. Retrying
   // it blindly can duplicate a user-visible notification, so the durable queue
@@ -2712,15 +2713,15 @@ async function startServer() {
 
     try {
       const tgApiBase = process.env.TELEGRAM_API_BASE || 'https://api.telegram.org';
-      const response = await telegramFetch(`${tgApiBase}/bot${botToken}/sendMessage`, {
+      const rich = renderRichTaskNotification(delivery.category, delivery.text);
+      const response = await telegramFetch(`${tgApiBase}/bot${botToken}/${rich ? 'sendRichMessage' : 'sendMessage'}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           chat_id: delivery.chatId,
-          text: renderTelegramHtml(delivery.text),
-          parse_mode: 'HTML',
+          ...(rich ? { rich_message: { html: rich, skip_entity_detection: true } }
+            : { text: renderTelegramHtml(delivery.text), parse_mode: 'HTML', disable_web_page_preview: delivery.disableWebPagePreview || undefined }),
           reply_markup: delivery.replyMarkup,
-          disable_web_page_preview: delivery.disableWebPagePreview || undefined,
           disable_notification: delivery.disableNotification || undefined,
           message_thread_id: delivery.messageThreadId,
         }),
