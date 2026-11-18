@@ -1,3 +1,4 @@
+import { renderRichMeetingNotification } from './src/telegramRichMeetings.js';
 import { renderRichTaskNotification } from './src/telegramRichTasks.js';
 ﻿import { channelFromMembership, knownTimerChannels, readChannelTimerDraft, renderChannelTimer, type ChannelTimer, type TimerChannel } from './src/channelTimers.js';
 import dotenv from 'dotenv';
@@ -2713,13 +2714,14 @@ async function startServer() {
 
     try {
       const tgApiBase = process.env.TELEGRAM_API_BASE || 'https://api.telegram.org';
-      const rich = renderRichTaskNotification(delivery.category, delivery.text);
+      const meetingRich = renderRichMeetingNotification(delivery.category, delivery.text);
+      const rich = meetingRich ?? renderRichTaskNotification(delivery.category, delivery.text);
       const response = await telegramFetch(`${tgApiBase}/bot${botToken}/${rich ? 'sendRichMessage' : 'sendMessage'}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           chat_id: delivery.chatId,
-          ...(rich ? { rich_message: { html: rich, skip_entity_detection: true } }
+          ...(rich ? { rich_message: { html: rich, skip_entity_detection: meetingRich ? undefined : true } }
             : { text: renderTelegramHtml(delivery.text), parse_mode: 'HTML', disable_web_page_preview: delivery.disableWebPagePreview || undefined }),
           reply_markup: delivery.replyMarkup,
           disable_notification: delivery.disableNotification || undefined,
