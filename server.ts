@@ -1,5 +1,6 @@
 import { renderRichMeetingNotification } from './src/telegramRichMeetings.js';
 import { renderRichTaskNotification } from './src/telegramRichTasks.js';
+import { richChatTable } from './src/telegramRichChat.js';
 ﻿import { channelFromMembership, knownTimerChannels, readChannelTimerDraft, renderChannelTimer, type ChannelTimer, type TimerChannel } from './src/channelTimers.js';
 import dotenv from 'dotenv';
 dotenv.config();
@@ -891,48 +892,37 @@ function roleLabel(role: User['role']) {
   return 'помощник факультета';
 }
 
-function profileSummaryText(user: User, state: SimulationState) {
-  const activeTasks = state.tasks.filter((task) => assignedIds(task).includes(user.id) && !['completed', 'cancelled'].includes(task.status));
-  const completedTasks = state.tasks.filter((task) => assignedIds(task).includes(user.id) && task.status === 'completed');
-  const upcomingMeetings = state.meetings
-    .filter((meeting) => (
-      meeting.status === 'scheduled'
-      && resolveMeetingAudienceUsers(state.users, meeting).some((member) => member.id === user.id)
-      && meetingPhase(meeting) !== 'past'
-    ))
-    .slice()
-    .sort((a, b) => {
-      const phaseOrder = Number(meetingPhase(a) !== 'ongoing') - Number(meetingPhase(b) !== 'ongoing');
-      return phaseOrder || meetingStartTimestamp(a) - meetingStartTimestamp(b);
-    });
-  const availability = alignedAvailabilitySlots(state.availabilities[user.id]);
-  const availableHours = Array.from({ length: 7 }, (_, dayIndex) => availability[dayIndex] || [])
-    .reduce((sum, hours) => sum + hours.length, 0);
-  const nextMeeting = upcomingMeetings[0];
+function profileSummary(user: User) {
   const birthdayCountdown = daysUntilBirthday(user.birthday);
-  const birthdayAge = ageOnBirthday(user.birthday);
-
-  return `*${user.realName}*\n${user.username} · ${roleLabel(user.role)}`
-    + `\n\n*Главный блок:* ${user.primaryCompetency || 'не выбран'}`
-    + `\n*Дата рождения:* ${formatBirthday(user.birthday)}${birthdayAge !== null ? ` · ${birthdayAge} лет` : ''}`
-    + `${birthdayCountdown !== null ? `\n*До дня рождения:* ${birthdayCountdown === 0 ? 'сегодня' : `${birthdayCountdown} дн.`}` : ''}`
-    + `\n\n*Сейчас:*`
-    + `\n• активных задач — ${activeTasks.length}`
-    + `\n• выполнено задач — ${completedTasks.length}`
-    + `\n• ближайших встреч — ${upcomingMeetings.length}`
-    + `\n• свободных часов отмечено — ${availableHours}`
-    + `${nextMeeting ? `\n\n*Следующая встреча:* ${formatShortDate(nextMeeting.date)}, ${nextMeeting.time} — ${nextMeeting.title}` : ''}`;
+  const birthday = birthdayParts(user.birthday);
+  const today = projectClock();
+  const hadBirthday = birthday && (today.month > birthday.month || (today.month === birthday.month && today.day >= birthday.day));
+  const age = ageOnBirthday(user.birthday, today.year - (hadBirthday ? 0 : 1));
+  const ageWord = age !== null && (age % 100 < 11 || age % 100 > 14)
+    ? age % 10 === 1 ? 'год' : [2, 3, 4].includes(age % 10) ? 'года' : 'лет'
+    : 'лет';
+  const rows = [
+    ['Главный блок', user.primaryCompetency || 'не выбран'],
+    ['Дата рождения', formatBirthday(user.birthday)],
+  ];
+  if (age !== null && age >= 0) rows.push(['Возраст', age + ' ' + ageWord]);
+  if (birthdayCountdown !== null) rows.push(['До дня рождения', birthdayCountdown === 0 ? 'сегодня' : birthdayCountdown + ' дн.']);
+  const subtitle = [user.username, roleLabel(user.role)].filter(Boolean).join(' · ');
+  return { rows, subtitle };
 }
 
-function slotsSummaryText(user: User, state: SimulationState, overrideSlots?: Record<number, number[]>, weekIndex = 0) {
+function slotSummaryRows(user: User, state: SimulationState, overrideSlots?: Record<number, number[]>, weekIndex = 0) {
   const availability = overrideSlots || alignedAvailabilitySlots(state.availabilities[user.id]);
   const dayNames = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
   const { activeDays } = normalizeAvailabilityConfig(state.settings);
-  const rows = activeDays.map((dayOffset) => {
+  return activeDays.map((dayOffset) => {
     const hours = availability[weekIndex * 7 + dayOffset] || [];
-    return `${dayNames[dayOffset]}: ${hours.length ? hours.map((hour) => `${hour}:00`).join(', ') : '—'}`;
+    return [dayNames[dayOffset], hours.length ? hours.map((hour) => `${hour}:00`).join(', ') : '—'];
   });
-  return `*Мои слоты на эту неделю*\n\n${rows.join('\n')}`;
+  }
+
+function slotsSummaryText(user: User, state: SimulationState, overrideSlots?: Record<number, number[]>, weekIndex = 0) {
+  return slotSummaryRows(user, state, overrideSlots, weekIndex).map(([day, hours]) => day + ': ' + hours).join('\n');
 }
 
 function meetingsSummaryText(user: User, state: SimulationState) {
@@ -2576,7 +2566,7 @@ async function startServer() {
     }
   }
 
-  async function sendTelegramKeyboard(chatId: string | number, text: string, rows: string[][], includeWebApp = false, user?: User, silent = false) {
+  async function sendTelegramKeyboard(chatId: string | number, text: string, rows: string[][], includeWebApp = false, user?: User, silent = false, richHtml?: string) {
     const botToken = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
     if (!botToken) return;
     const tgApiBase = process.env.TELEGRAM_API_BASE || 'https://api.telegram.org';
@@ -2816,13 +2806,12 @@ async function startServer() {
     if (!botToken) return;
     const tgApiBase = process.env.TELEGRAM_API_BASE || 'https://api.telegram.org';
     try {
-      const response = await telegramFetch(`${tgApiBase}/bot${botToken}/sendMessage`, {
+      const response = await telegramFetch(`${tgApiBase}/bot${botToken}/${richHtml ? 'sendRichMessage' : 'sendMessage'}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           chat_id: chatId,
-          text: renderTelegramHtml(text),
-          parse_mode: 'HTML',
+          ...(richHtml ? { rich_message: { html: richHtml } } : { text: renderTelegramHtml(text), parse_mode: 'HTML' }),
           disable_web_page_preview: true,
           disable_notification: silent || undefined,
           message_thread_id: messageThreadId,
@@ -3425,7 +3414,8 @@ async function startServer() {
           ['Профиль', 'Слоты', 'Встречи'],
           user.role === 'admin' ? ['Задачи', 'МФ', 'Помощь'] : ['Задачи', 'Помощь'],
         ];
-    await sendTelegramKeyboard(chatId, profileSummaryText(user, state), rows, false, user);
+    const profile = profileSummary(user);
+    await sendTelegramKeyboard(chatId, '', rows, false, user, false, richChatTable(user.realName, profile.rows, profile.subtitle));
   }
 
   function sendTaskTelegramMessage(
@@ -3613,13 +3603,12 @@ async function startServer() {
     const chatKey = String(chatId);
     const availability = cloneValidSlotSelection(state, overrideSlots || alignedAvailabilitySlots(state.availabilities[user.id]));
     chatSessions.set(chatKey, { flow: 'slots_root' });
-    const text = `✅ *Слоты сохранены*\n\n${slotsSummaryText(user, state, availability)}`;
-    const keyboard = [[{ text: 'Изменить слоты', callback_data: 'slot_edit' }]];
-    if (messageId) await updateInlinePanel(chatId, messageId, text, keyboard);
-    else {
-      await sendInlinePanel(chatId, text, keyboard);
-      await sendNavigationKeyboard(chatId, [['Меню']], user);
-    }
+    const rows = slotSummaryRows(user, state, availability);
+    const sentId = await sendTelegramKeyboard(
+      chatId, '', [['Изменить', 'Назад']], false, user, false,
+      richChatTable('Мои слоты на эту неделю', rows),
+    );
+    if (sentId && messageId && sentId !== messageId) void deleteTelegramMessage(chatId, messageId);
   }
 
   async function showSlotWeekPicker(chatId: string | number, user: User, state: SimulationState, messageId?: number) {
@@ -4340,7 +4329,7 @@ async function startServer() {
         } else {
           chatSessions.delete(chatKey);
           chatSlotDrafts.delete(chatKey);
-          await showSlotsPanel(chatId, user, state, undefined, callbackMessageId);
+          await showSlotsPanel(chatId, user, savedState, undefined, callbackMessageId);
         }
         void flushPendingSheetAvailabilityExports();
         return res.json({ ok: true });
@@ -5526,6 +5515,11 @@ async function startServer() {
           user,
         );
         return res.json({ ok: true });
+      if (normalizedText === 'изменить' && ['slots_root', 'slots_edit'].includes(session?.flow || '')) {
+        await showSlotWeekPicker(chatId, user, state);
+        return res.json({ ok: true });
+      }
+
       } else if (cmd === 'команда') {
         await showTeamPanel(chatId, user, state);
         return res.json({ ok: true });
@@ -5605,6 +5599,10 @@ async function startServer() {
     } finally {
       releaseQueue();
       void tail.finally(() => {
+        if (normalizedText === 'назад' && ['slots_root', 'slots_edit'].includes(currentSession?.flow || '')) {
+          await showProfilePanel(chatId, user, state);
+          return res.json({ ok: true });
+        }
         if (telegramChatUpdateQueues.get(chatKey) === tail) telegramChatUpdateQueues.delete(chatKey);
       });
     }
