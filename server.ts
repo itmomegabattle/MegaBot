@@ -2694,6 +2694,9 @@ async function startServer() {
   let notificationDeliveryFlushPromise: Promise<void> | null = null;
 
   async function sendTelegramDeliveryRaw(delivery: NotificationDelivery): Promise<TelegramDeliveryOutcome> {
+    if (delivery.category === 'birthday_reminder' && delivery.dedupeKey.endsWith('_2')) {
+      return { kind: 'permanent', code: 'retired_birthday_reminder', message: 'Two-day birthday reminders are disabled' };
+    }
     const botToken = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
     if (!botToken) return { kind: 'retryable', code: 'bot_not_configured', message: 'Telegram bot token is not configured' };
     const globalDelayMs = Math.max(0, Number(process.env.TELEGRAM_DELIVERY_INTERVAL_MS || 50));

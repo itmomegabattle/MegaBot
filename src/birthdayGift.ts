@@ -1,5 +1,6 @@
 import { moscowClock } from './reminderSchedule.js';
 import type { SimulationState, User } from './types.js';
+import { isUserActive } from './userLifecycle.js';
 
 export function birthdayParts(value?: string) {
   const raw = String(value || '').trim();
@@ -30,18 +31,18 @@ export function birthdayReminder(user: Pick<User, 'birthday' | 'realName'>, now 
   const birthday = birthdayParts(user.birthday);
   if (!birthday) return null;
   const clock = moscowClock(now);
-  for (const daysBefore of [2, 1, 0] as const) {
+  for (const daysBefore of [1, 0] as const) {
     const date = new Date(`${clock.dateKey}T12:00:00Z`);
     date.setUTCDate(date.getUTCDate() + daysBefore);
     if (date.getUTCDate() !== birthday.day || date.getUTCMonth() + 1 !== birthday.month) continue;
     const birthdayDate = date.toISOString().slice(0, 10);
     const age = birthday.year ? date.getUTCFullYear() - birthday.year : null;
-    const when = daysBefore === 2 ? 'Через 2 дня' : daysBefore === 1 ? 'Завтра' : 'Сегодня';
+    const when = daysBefore === 1 ? 'Завтра' : 'Сегодня';
     return {
       daysBefore, birthdayDate, year: date.getUTCFullYear(),
-      text: `🎂 ${when} день рождения у ${user.realName}!`
+      text: `Команда, внимание 🎂\n\n${when} день рождения у ${user.realName}!`
         + (age !== null ? ` Исполняется ${age} лет.` : '')
-        + `\n\nНе забудьте поздравить 🎉\n\n${birthdayGiftCollectionText(birthdayDate, environment, daysBefore === 0 && clock.hour >= 19)}`,
+        + `\nДавайте поздравим как следует.\n\n${birthdayGiftCollectionText(birthdayDate, environment, daysBefore === 0 && clock.hour >= 19)}`,
     };
   }
   return null;
@@ -54,10 +55,10 @@ export async function deliverBirthdayReminders(dependencies: {
 }, now = new Date(), environment: NodeJS.ProcessEnv = process.env) {
   const snapshot = dependencies.loadState();
   let delivered = 0;
-  for (const birthdayUser of snapshot.users) {
+  for (const birthdayUser of snapshot.users.filter(isUserActive)) {
     const reminder = birthdayReminder(birthdayUser, now, environment);
     if (!reminder) continue;
-    for (const recipient of snapshot.users) {
+    for (const recipient of snapshot.users.filter(isUserActive)) {
       if (recipient.id === birthdayUser.id) continue;
       const legacyId = `bday_notify_${reminder.year}_${birthdayUser.id}_${recipient.id}`;
       const id = `${legacyId}_${reminder.daysBefore}`;
